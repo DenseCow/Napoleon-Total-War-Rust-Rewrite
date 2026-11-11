@@ -38,6 +38,7 @@ impl CampaignModel {
     /// The gate `0x008BE360` also checks the campaign's turn faction and stage; this runs inside the
     /// faction's own turn start, so only its pending-battle part can refuse here.
     pub(crate) fn march_reinforcements(&mut self, faction: FactionId) -> Vec<CampaignEvent> {
+        debug_assert!(!self.is_rebel_faction(faction), "the rebels' turn start skips the reinforcement march (0x008F2B47)");
         let mut events = Vec::new();
         // The faction's entries (and any whose new army's commander is gone, dropped below); the
         // others keep their place.
@@ -93,6 +94,18 @@ impl CampaignModel {
     /// the step mover `0x00972CA0` at `0x00973A04`). An exchange left pending (a full receiver) does
     /// not complete it, so the army tries again at each turn start. One whose execute finds no path
     /// is abandoned (`0x0095BA40`, CONFIRMED).
+    ///
+    /// While a battle is pending (an ambush sprung by an earlier march), a still-valid order is kept and
+    /// its army does not walk; an invalid one is still cancelled (the check above runs first). The exe issues the order regardless (`0x009653D0` → `RunCharacterOrder`
+    /// `0x009651A0` with (1, 0, 1) runs no order gate, and the execute `0x0095BA40` does not call
+    /// `CanCharacterTakeOrderNow` `0x008BE360`), but its armies walk only in the per-frame
+    /// `UpdateMovingCampaignCharacters` `0x00973B90`, whose loop at `0x00973C20` steps no mover while
+    /// the battle sequence's stage (campaign +0xF6C, +0x54, `0x004B4A50`) is 1 or the pending-action
+    /// stack (+0xF70, `0x005865E0`) is not empty, and leaves it on the moving list, unlost (CONFIRMED by
+    /// decompile). That a set-up battle holds that gate until it is fought is INFERRED (the write of
+    /// stage 1 is not traced). The model walks a move in one go, so it keeps the order for the next
+    /// turn start instead. PROVISIONAL: the exe's held mover walks on once the battle is fought, in the
+    /// same turn; ours loses that walk until the next turn start.
     pub(crate) fn resume_standing_orders(&mut self, faction: FactionId) -> Vec<CampaignEvent> {
         let mut events = Vec::new();
         if self.world.standing_orders.is_empty() {
@@ -103,7 +116,14 @@ impl CampaignModel {
             let Some(order) = self.world.standing_orders.remove(&c) else { continue };
             match order {
                 StandingOrder::JoinForce { into } => {
+                    // The still-valid check runs first: an invalid order is cancelled even while a
+                    // battle is pending (`0x009653D0`).
                     let Some(force) = self.force_of(c).filter(|_| self.world.forces.contains_key(&into)) else { continue };
+                    if self.pending_battle.is_some() {
+                        // Moves wait while a battle is pending (doc above); the valid order is kept.
+                        self.world.standing_orders.insert(c, order);
+                        continue;
+                    }
                     match self.march_and_merge(c, force, into) {
                         Ok(walk) => {
                             events.extend(walk.events);

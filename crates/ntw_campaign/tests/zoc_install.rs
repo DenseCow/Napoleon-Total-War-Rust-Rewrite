@@ -10,7 +10,8 @@ use std::path::PathBuf;
 
 use ntw_campaign::pathing::poly_map;
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::polypath::Mover;
@@ -229,6 +230,9 @@ fn vanilla_save_risen_armies_keep_their_government() {
     let m = &loaded.model;
     let w = &m.world;
     assert!(!w.region_risen_armies.is_empty());
+    // And every army with a government is in a risen list (the load warns for one in none).
+    let listed: Vec<_> = w.region_risen_armies.values().flatten().collect();
+    assert!(w.rebel_army_governments.keys().all(|id| listed.contains(&id)));
     for (region, armies) in &w.region_risen_armies {
         for id in armies {
             assert_eq!(w.rebel_army_governments.get(id).map(String::as_str), Some("gov_absolute_monarchy"), "{id:?}");

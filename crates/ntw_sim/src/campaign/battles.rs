@@ -37,6 +37,46 @@ pub struct PendingBattle {
     /// the attacker continues its move or attack): the settlement it was marching on when an army
     /// outside it stood in the way.
     pub resume: Option<RegionId>,
+    /// The attacker springs an ambush: he stood hidden and the defender walked into his zone
+    /// ([`CampaignModel::spring_ambush`], the battle setup `0x008E18D0` with fAmbush set). Two armies then
+    /// fight a `land_ambush` battle ([`CampaignModel::battle_type`]).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ambush: bool,
+}
+
+/// A campaign battle's type: the codes of the type parser `ParseBattleTypeString` `0x0057C710` (CONFIRMED),
+/// which the battle sequence keeps at +0x60. [`CampaignModel::battle_type`] gives a pending battle's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum BattleType {
+    /// `land_normal`.
+    LandNormal = 0,
+    /// `land_ambush`.
+    LandAmbush = 1,
+    /// `land_bridge`.
+    LandBridge = 2,
+    /// `fort_standard`.
+    FortStandard = 3,
+    /// `fort_sally`.
+    FortSally = 4,
+    /// `fort_relief`.
+    FortRelief = 5,
+    /// `settlement_standard`: an assault on a walled settlement.
+    SettlementStandard = 6,
+    /// `settlement_sally`.
+    SettlementSally = 7,
+    /// `settlement_relief`.
+    SettlementRelief = 8,
+    /// `settlement_unfortified`.
+    SettlementUnfortified = 9,
+    /// `town_normal`.
+    TownNormal = 10,
+    /// `naval_normal`.
+    NavalNormal = 11,
+    /// `naval_blockade`: the attacking navy is docked.
+    NavalBlockade = 12,
+    /// `naval_breakout`: the attacked navy blockades a port.
+    NavalBreakout = 13,
 }
 
 /// How a battle ended (from autoresolve or from a real-time battle).
@@ -257,9 +297,39 @@ impl CampaignModel {
     /// can be destroyed. Each side's faction is its record's force's (`+0x24`, through the force's `+0x74` owner
     /// and its `+0x2A0` handle, `0x008F7B39`..`0x008F7B73`, as `0x008E1B50` reads side `+0x68`); PROVISIONAL: that
     /// the defenders' record holds the first defender (the record is filled by `0x008B7D60`, not traced).
-    fn battle_sides(&self, battle: &PendingBattle) -> (Option<FactionId>, Option<FactionId>) {
+    pub(crate) fn battle_sides(&self, battle: &PendingBattle) -> (Option<FactionId>, Option<FactionId>) {
         let faction = |f: &ForceId| self.world.forces.get(f).map(|f| f.faction);
         (faction(&battle.attacker), battle.defenders.first().and_then(faction))
+    }
+
+    /// A battle's type (the battle sequence's +0x60). A settlement assault is 6 when the settlement is
+    /// walled, else 9 (`0x008B5930`, the assault path `0x0094B600` → `0x008E1A90`: its fortification slot
+    /// holds a building, `GetSettlementFortificationLevel` `0x00B3F7C0` ≥ 0; CONFIRMED). A battle of two navies
+    /// (`SelectCampaignBattleType` `0x008B55A0`, called with fTestTargetFirst and fAmbush clear by the
+    /// character attack `0x0095B370` at `0x0095B697`; CONFIRMED by disassembly) is 12 when the attacker is
+    /// docked (navy +0xE0, [`Self::docked_port`]), else 13 when the first defender blockades a port (navy
+    /// +0xE8), else 11. A sprung ambush of two armies ([`PendingBattle::ambush`], the setup's fAmbush) is 1
+    /// (`0x008B55A0` step 4: a field target that stands on no bridge, CONFIRMED); a hidden navy's ambush
+    /// takes the naval types above, which fAmbush does not change. Anything else is 0: the model has no
+    /// bridge (2), fort (3..5), sally (7), relief (8) or town (10) battle. The naval types read the forces,
+    /// so they hold only before any can be destroyed (a settlement's type reads only the region).
+    pub fn battle_type(&self, battle: &PendingBattle) -> BattleType {
+        if let Some(region) = battle.settlement {
+            let walled = self.world.regions.get(&region).is_some_and(|r| r.fortification.is_some());
+            return if walled { BattleType::SettlementStandard } else { BattleType::SettlementUnfortified };
+        }
+        let is_navy = |f: &ForceId| self.world.forces.get(f).is_some_and(|f| f.is_navy);
+        let Some(target) = battle.defenders.first() else { return BattleType::LandNormal };
+        if !(is_navy(&battle.attacker) && is_navy(target)) {
+            // An ambush here is of two armies: one springs only on a force of its own kind
+            // (`hidden_enemies`), and two navies took the naval types below.
+            return if battle.ambush { BattleType::LandAmbush } else { BattleType::LandNormal };
+        }
+        if self.docked_port(battle.attacker).is_some() {
+            return BattleType::NavalBlockade;
+        }
+        let blockades = self.world.regions.values().any(|r| r.slots.iter().any(|s| s.blockade.is_some_and(|b| b.navy == *target)));
+        if blockades { BattleType::NavalBreakout } else { BattleType::NavalNormal }
     }
 
     /// The battle's outcome ([`Self::apply_battle_result`]) for `battle`, already taken off the model. `undock`: the
@@ -318,15 +388,15 @@ impl CampaignModel {
             );
         }
         for c in commanders {
-            if self.world.characters.contains_key(&c) {
-                events.push(CampaignEvent::CharacterCompletedBattle { character: c });
+            if let Some(agent_type) = self.world.agent_type(c) {
+                events.push(CampaignEvent::CharacterCompletedBattle { character: c, agent_type: Some(agent_type) });
             }
         }
         // The winner resumes its order (0x008F7880 state 7, CONFIRMED): on into the settlement.
         if result.attacker_won
             && let Some(region) = battle.resume
             && self.world.forces.contains_key(&battle.attacker)
-            && let Ok(mut more) = self.attack_settlement(battle.attacker, region, true)
+            && let Ok(mut more) = self.attack_settlement(battle.attacker, region, true, false)
         {
             events.append(&mut more);
         }
@@ -354,8 +424,7 @@ impl CampaignModel {
     pub(crate) fn battle_class_war(&mut self, battle: &PendingBattle, result: &BattleResult, sides: (Option<FactionId>, Option<FactionId>)) {
         let (Some((code_a, code_d)), (Some(fa), Some(fd))) = (result.codes, sides) else { return };
         let (winner, loser, won, lost) = if result.attacker_won { (fa, fd, code_a, code_d) } else { (fd, fa, code_d, code_a) };
-        let walled = battle.settlement.and_then(|r| self.world.regions.get(&r)).is_some_and(|r| r.fortification.is_some());
-        let (win_kind, lose_kind) = if walled {
+        let (win_kind, lose_kind) = if self.battle_type(battle) == BattleType::SettlementStandard {
             (5, 4)
         } else {
             let win_kind = match won {
@@ -1006,19 +1075,22 @@ impl BattleCommandRole {
 /// The general part of a battle unit card built from a campaign unit (CONFIRMED: `0x008AF200` /
 /// `0x008AEF40` fill the record `0x00513A10` (+0x20 rank, +0x24 role, +0x28 category), which the land
 /// card `0x00513320` copies to `+0xBC`/`+0xC0`/`+0xC4` and the naval card `0x00512E50` to
-/// `+0xE8`/`+0xEC`/`+0xF0`): what the battle's morale reads.
+/// `+0xE8`/`+0xEC`/`+0xF0`). One record serves both cards: ours reads it for a land battle's general
+/// ([`Self::army_general_rank`], what the land morale reads) and for both kinds of battle's star
+/// ratings (its `rank`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BattleGeneralCard {
-    /// Land card `+0xC0`.
+    /// Land card `+0xC0`, naval card `+0xEC` (as [`BattleCommandRole::card_value`] maps it).
     pub role: BattleCommandRole,
-    /// Land card `+0xBC`: the unit character's rank ([`super::agents::rank`], `0x00A198D0`) when the card
-    /// is built, at battle start; 0 without a character (the default record `0x00513A50`).
+    /// Land card `+0xBC`, naval card `+0xE8`: the unit character's rank ([`super::agents::rank`],
+    /// `0x00A198D0`) when the card is built, at battle start; 0 without a character (the default
+    /// record `0x00513A50`).
     pub rank: i32,
 }
 
 impl BattleGeneralCard {
-    /// The battle unit's general rank (`LandUnit::general_rank`): the rank when the card makes its
-    /// unit the army's general, else none.
+    /// The land battle unit's general rank (`LandUnit::general_rank`): the rank when the card makes
+    /// its unit the army's general, else none. Ours reads it only for a land battle.
     pub fn army_general_rank(self) -> Option<i32> {
         self.role.is_army_general().then_some(self.rank)
     }

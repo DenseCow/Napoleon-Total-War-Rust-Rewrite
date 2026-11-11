@@ -7,7 +7,7 @@ use super::characters::{add_ancillary, add_trait_points, promoted_attributes, re
 use super::details::{CharacterTrait, GovernmentPost};
 
 /// The test mapping of every rank bonus: DB key `t_<bonus>` → the basic bonus `<bonus>`.
-const RANK_BONUSES: [&str; 10] = [
+const RANK_BONUSES: [&str; 21] = [
     "command_land_infantry",
     "command_land_cavalry",
     "command_land_artillery",
@@ -18,6 +18,17 @@ const RANK_BONUSES: [&str; 10] = [
     "management_finance",
     "management_justice",
     "zeal_europe",
+    "land_command_attack",
+    "land_command_defence",
+    "land_command_ambush",
+    "land_command_siege_attack",
+    "land_command_siege_defence",
+    "sea_command_attack",
+    "sea_command_defence",
+    "hates_ottomans",
+    "hates_europeans",
+    "hates_french",
+    "hates_british",
 ];
 
 /// [`test_model`] whose mapping maps every [`RANK_BONUSES`] key, with the pick units, and a hidden
@@ -211,6 +222,37 @@ fn an_expired_ancillary_takes_its_effect_off() {
     assert_eq!(land(&m), 2);
 }
 
+/// Character 100's level of ability `key` as the action code reads it (`0x009C7610`).
+fn ability_level(m: &CampaignModel, key: &str) -> i32 {
+    super::agents::ability(m, CharacterId(100), key)
+}
+
+#[test]
+fn trait_and_ancillary_ability_effects_move_the_ability_level() {
+    // 0x00A0ECB0 / 0x00A0EC10: the second loop adds each row to the ability slot's level.
+    let mut m = ancillary_model(9999);
+    {
+        let rules = Arc::make_mut(&mut m.rules);
+        rules.effects.trait_ability.insert("T_1".into(), vec![("can_spy".into(), 1)]);
+        rules.effects.trait_ability.insert("T_2".into(), vec![("can_spy".into(), 2)]);
+        rules.effects.ancillary_ability.insert("A1".into(), vec![("can_spy".into(), 3), ("can_duel".into(), 1)]);
+        rules.characters.traits.get_mut("T").unwrap().no_going_back_level = 9;
+    }
+    m.world.character_details.get_mut(&CharacterId(100)).unwrap().abilities = vec![("can_spy".into(), 0, String::new())];
+    // T level 1 (+1), then level 2 (+2 instead of +1).
+    add_trait_points(&mut m, CharacterId(100), "T", 2);
+    assert_eq!(ability_level(&m, "can_spy"), 1);
+    add_trait_points(&mut m, CharacterId(100), "T", 3);
+    assert_eq!(ability_level(&m, "can_spy"), 2);
+    // A1: can_spy +3; can_duel, which he lacks, is a reset slot (−1) plus 1.
+    add_ancillary(&mut m, CharacterId(100), "A1").unwrap();
+    assert_eq!((ability_level(&m, "can_spy"), ability_level(&m, "can_duel")), (5, 0));
+    assert!(remove_ancillary(&mut m, CharacterId(100), "A1"));
+    assert_eq!((ability_level(&m, "can_spy"), ability_level(&m, "can_duel")), (2, -1));
+    assert!(remove_trait(&mut m, CharacterId(100), "T"));
+    assert_eq!(ability_level(&m, "can_spy"), 0);
+}
+
 #[test]
 fn a_promotion_keeps_the_trait_and_ancillary_effects() {
     // ORIGINAL BUG 0x00A1A300: the exe copies the new type's levels and drops these effects.
@@ -331,6 +373,32 @@ fn zeal_counts_the_own_and_faction_bonus_only_where_the_feature_is_on() {
     assert_eq!(super::agents::rank_original(&m, CharacterId(103), &super::effects::OwnEffects::held(&own), false), 3);
 }
 
+/// polish72: the rank reads one bonus of the faction's sum without building it
+/// (`Effects::faction_bonus`); it is the built sum's value for every source: saved base entries
+/// (basic, an id outside the basic names, another type), technologies and a minister's own set.
+#[test]
+fn one_faction_bonus_is_the_built_sums_value() {
+    use super::effects::{Effects, SavedBonus};
+    let mut m = rank_model(&[("land_command_attack", 2.0), ("zeal_europe", 0.25)]);
+    with_rank_trait(&mut m, 102, "management", 3);
+    with_technology(&mut m, &[("t_land_command_attack", 3.0), ("t_zeal_europe", 1.5)]);
+    let basic = |name: &str| super::effects::BONUS_NAMES.iter().position(|n| *n == name).unwrap() as i32;
+    let d = m.world.faction_details.entry(A).or_default();
+    d.posts = vec![GovernmentPost { id: 1, key: "army".into(), holder: Some(CharacterId(102)), governorship: None }];
+    d.bonus_base = vec![
+        SavedBonus { kind: 1, bonus: basic("land_command_attack"), value: 0.5, ..Default::default() },
+        SavedBonus { kind: 1, bonus: basic("land_command_attack"), value: 0.25, ..Default::default() },
+        SavedBonus { kind: 1, bonus: 0x98, value: 9.0, ..Default::default() },
+        SavedBonus { kind: 6, bonus: basic("land_command_attack"), value: 7.0, qualifier: "upper".into(), ..Default::default() },
+    ];
+    let sum = Effects::faction_sum(&m, A);
+    for bonus in RANK_BONUSES.iter().copied().chain(["conversion", "not_a_bonus"]) {
+        assert_eq!(Effects::faction_bonus(&m, A, bonus), sum.get(bonus), "{bonus}");
+    }
+    assert_eq!(Effects::faction_bonus(&m, A, "land_command_attack"), 0.5 + 0.25 + 3.0 + 2.0);
+    assert_eq!(Effects::faction_bonus(&m, FactionId(9999), "land_command_attack"), 0.0);
+}
+
 #[test]
 fn a_mod_rule_replaces_the_rank() {
     let mut m = rank_model(&ARMY_BONUSES);
@@ -442,4 +510,131 @@ fn the_autoresolve_star_ratings_are_the_battle_cards_ranks() {
     let maker: crate::seam::Maker<super::seams::CharacterRank> = Arc::new(|_| Arc::new(|_: &CampaignModel, _: CharacterId, _: &super::effects::OwnEffects<'_>, _: bool| 7));
     Arc::make_mut(&mut m.rules).seams.character_rank.apply("test.seven", &maker);
     assert_eq!(ranks(&m), (vec![7, 7, 0], vec![7, 7, 0]));
+}
+
+/// The stance bonuses of the pending-battle tests, one bit each.
+const STANCE_BONUSES: [(&str, f32); 6] = [
+    ("land_command_attack", 1.0),
+    ("land_command_defence", 2.0),
+    ("land_command_siege_attack", 4.0),
+    ("land_command_siege_defence", 8.0),
+    ("sea_command_attack", 16.0),
+    ("sea_command_defence", 32.0),
+];
+
+/// Force `attacker` attacks force `defender` (and the settlement of region `settlement`); returns the
+/// battle's type.
+fn pend(m: &mut CampaignModel, attacker: u32, defender: u32, settlement: Option<u32>) -> BattleType {
+    let battle = PendingBattle { attacker: ForceId(attacker), defenders: vec![ForceId(defender)], settlement: settlement.map(RegionId), resume: None, ambush: false };
+    let t = m.battle_type(&battle);
+    m.pending_battle = Some(battle);
+    t
+}
+
+/// Character `c`'s pending-battle bonus (the faction set's call).
+fn battle_bonus(m: &CampaignModel, c: i32) -> i32 {
+    super::agents::pending_battle_bonus(m, CharacterId(c), &super::effects::OwnEffects::of(m, CharacterId(c)), true)
+}
+
+/// `0x00A198D0` at `0x00A19B32`..`0x00A19C7F`: the stance bonus by the battle's type and the side he
+/// commands, for the two commanders and nobody else, only while the battle is pending.
+#[test]
+fn the_pending_battle_gives_the_stance_bonus_by_type_and_side() {
+    let mut m = rank_model(&STANCE_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    with_rank_trait(&mut m, 101, "command_land", 1);
+    with_rank_trait(&mut m, 102, "command_land", 1);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101), rank(&m, CharacterId(100))), (0, 0, 2));
+    // A field battle: attack / defence, in the rank too; the bystander gets nothing.
+    assert_eq!(pend(&mut m, 1000, 1001, None), BattleType::LandNormal);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101), battle_bonus(&m, 102)), (1, 2, 0));
+    assert_eq!(rank(&m, CharacterId(100)), 2 + 1);
+    pend(&mut m, 1001, 1000, None);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (2, 1));
+    // An unwalled settlement (9) as a field battle; a walled one (6) gives the siege bonuses.
+    assert_eq!(pend(&mut m, 1000, 1001, Some(11)), BattleType::SettlementUnfortified);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (1, 2));
+    m.world.regions.get_mut(&RegionId(11)).unwrap().fortification = Some(BuildingRef { level_key: "walls".into(), health: 100 });
+    assert_eq!(pend(&mut m, 1000, 1001, Some(11)), BattleType::SettlementStandard);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (4, 8));
+    // Two navies at sea (11), the attacker docked (12): the sea bonuses.
+    for f in [1000, 1001] {
+        m.world.forces.get_mut(&ForceId(f)).unwrap().is_navy = true;
+    }
+    assert_eq!(pend(&mut m, 1000, 1001, None), BattleType::NavalNormal);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (16, 32));
+    let slot = &mut m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0];
+    (slot.port, slot.position) = (true, Some(pos(0, 0)));
+    assert_eq!(pend(&mut m, 1000, 1001, None), BattleType::NavalBlockade);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (16, 32));
+    // An attack on a navy blockading a port, from outside it (13): nothing.
+    m.world.characters.get_mut(&CharacterId(100)).unwrap().position = pos(50, 50);
+    m.world.regions.get_mut(&RegionId(10)).unwrap().slots[0].blockade = Some(PortBlockade { navy: ForceId(1001), docked_navy_attacked: false });
+    assert_eq!(pend(&mut m, 1000, 1001, None), BattleType::NavalBreakout);
+    assert_eq!((battle_bonus(&m, 100), battle_bonus(&m, 101)), (0, 0));
+    // Settled: no bonus.
+    m.pending_battle = None;
+    assert_eq!(battle_bonus(&m, 100), 0);
+}
+
+/// The attacker in a land battle also gets his faction's `land_command_attack` (faction +0x6FC through
+/// character +0x2A0), unless the caller is the faction set's own (the minister level).
+#[test]
+fn the_land_attacker_adds_his_factions_attack_bonus() {
+    let mut m = rank_model(&STANCE_BONUSES);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    with_rank_trait(&mut m, 101, "command_land", 1);
+    with_technology(&mut m, &[("t_land_command_attack", 3.0)]);
+    pend(&mut m, 1000, 1001, None);
+    assert_eq!(battle_bonus(&m, 100), 1 + 3);
+    let own = super::effects::Effects::character_effects(&m, CharacterId(100));
+    assert_eq!(super::agents::pending_battle_bonus(&m, CharacterId(100), &super::effects::OwnEffects::held(&own), false), 1);
+    // As the defender he gets only his own defence.
+    pend(&mut m, 1001, 1000, None);
+    assert_eq!(battle_bonus(&m, 100), 2);
+}
+
+/// The vanilla enemy bonuses (`ntw_campaign::features`): ottomans by key, european by culture,
+/// spa_france by key, spa_britain by key (the exe's culture test at `0x00A19D35` is the ORIGINAL BUG),
+/// with three made-up european factions and the rebels' "" in the culture too.
+fn with_enemy_bonuses(m: &mut CampaignModel) {
+    use super::features::{EnemyKey, EnemyRankBonus};
+    let rules = Arc::make_mut(&mut m.rules);
+    let b = |bonus: &str, enemy| EnemyRankBonus { bonus: bonus.into(), enemy };
+    rules.features.enemy_rank_bonuses = vec![
+        b("hates_ottomans", EnemyKey::Faction("ottomans".into())),
+        b("hates_europeans", EnemyKey::Culture("european".into())),
+        b("hates_french", EnemyKey::Faction("spa_france".into())),
+        b("hates_british", EnemyKey::Faction("spa_britain".into())),
+    ];
+    for key in ["spa_france", "spa_britain", "europe_test", ""] {
+        rules.characters.faction_subculture.insert(key.into(), "sc_european_west".into());
+    }
+    rules.characters.subculture_culture.insert("sc_european_west".into(), "european".into());
+}
+
+/// `0x00A198D0` at `0x00A19C80`..`0x00A19D5F`: the bonuses against the other side's faction, by key or
+/// culture, for both sides, none against the rebels.
+#[test]
+fn the_enemy_faction_gives_the_hates_bonuses() {
+    let mut m = rank_model(&[("hates_ottomans", 1.0), ("hates_europeans", 2.0), ("hates_french", 4.0), ("hates_british", 8.0)]);
+    with_rank_trait(&mut m, 100, "command_land", 2);
+    with_rank_trait(&mut m, 101, "command_land", 1);
+    with_enemy_bonuses(&mut m);
+    pend(&mut m, 1000, 1001, None);
+    let mut against = |key: &str| {
+        m.world.factions.get_mut(&B).unwrap().key = key.into();
+        battle_bonus(&m, 100)
+    };
+    assert_eq!(against("test_faction_b"), 0);
+    assert_eq!(against("ottomans"), 1);
+    assert_eq!(against("europe_test"), 2);
+    assert_eq!(against("spa_france"), 2 + 4);
+    // ORIGINAL BUG fixed: the exe never gives `hates_british`.
+    assert_eq!(against("spa_britain"), 2 + 8);
+    // The rebels (no faction record) give nothing, though their key "" has a culture here.
+    assert_eq!(against(""), 0);
+    // The defender's enemy is the attacker's faction.
+    m.world.factions.get_mut(&A).unwrap().key = "ottomans".into();
+    assert_eq!(battle_bonus(&m, 101), 1);
 }

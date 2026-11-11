@@ -1,7 +1,8 @@
 //! Research helper for the campaign map (read-only, through the Vfs).
 //!   cargo run -p ntw_formats --example campaign_probe -- tree <vfs path> [max_depth] [max_items]
 //!   cargo run -p ntw_formats --example campaign_probe -- hex <vfs path> [len] [offset]
-use ntw_formats::campaign_map::{GameFiles, Heightmap, RegionMap, SplineFile, SuperTexture};
+use ntw_formats::campaign_map::{Heightmap, RegionMap, SplineFile, SuperTexture};
+use ntw_formats::pack::GameFiles;
 use ntw_formats::dds::{DdsFormat, decode_blocks_rgba8};
 use ntw_formats::esf::{EsfFile, EsfNode};
 use std::collections::BTreeMap;

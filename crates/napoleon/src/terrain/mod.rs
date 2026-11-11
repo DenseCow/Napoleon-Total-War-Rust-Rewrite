@@ -15,8 +15,9 @@
 //!
 //! PROVISIONAL (to be replaced by the original's terrain renderer once found in the exe):
 //! the lighting (plain sun + ambient from the map's `.environment`), no detail/blend/cliff/rock
-//! maps, no grass, no lightmap, no fog, and the seams between levels.
+//! maps, no lightmap, no fog, and the seams between levels. The grass is in [`grass`].
 
+mod grass;
 pub mod objects;
 mod speedtree;
 mod trees;
@@ -184,11 +185,13 @@ impl Plugin for TerrainPlugin {
         embedded_asset!(app, "trees.wgsl");
         embedded_asset!(app, "speedtree.wgsl");
         embedded_asset!(app, "water.wgsl");
+        embedded_asset!(app, "grass.wgsl");
         app.add_plugins((
             MaterialPlugin::<TerrainMaterial>::default(),
             MaterialPlugin::<trees::TreeMaterial>::default(),
             MaterialPlugin::<speedtree::TreeGeomMaterial>::default(),
             MaterialPlugin::<water::SeaMaterial>::default(),
+            MaterialPlugin::<grass::GrassMaterial>::default(),
         ))
             .init_resource::<speedtree::TreeFarDistance>()
             .add_systems(Update, extend_camera_far_plane)
@@ -204,6 +207,8 @@ impl Plugin for TerrainPlugin {
                     trees::spawn_trees.after(speedtree::read_tree_far_distance),
                     speedtree::setup_near_trees.after(speedtree::read_tree_far_distance),
                     speedtree::setup_wind,
+                    // Takes its colour from the ground's textures.
+                    grass::setup_grass.after(spawn_terrain),
                 ),
             )
             .add_systems(
@@ -212,10 +217,14 @@ impl Plugin for TerrainPlugin {
                     speedtree::update_near_trees,
                     speedtree::update_wind,
                     water::update_sea,
+                    grass::update_grass,
                 )
                     .run_if(in_state(crate::GameMode::Battle)),
             )
-            .add_systems(OnExit(crate::GameMode::Battle), (speedtree::clear_near_trees, water::remove_sea));
+            .add_systems(
+                OnExit(crate::GameMode::Battle),
+                (speedtree::clear_near_trees, water::remove_sea, grass::clear_grass),
+            );
         if !self.load_at_start {
             return;
         }
@@ -310,25 +319,34 @@ fn image_with_mips(width: u32, height: u32, rgba: Vec<u8>, repeat: bool) -> Imag
     image
 }
 
-/// Decodes a JPEG from the packs to (width, height, pixels as RGBA8 / as luminance).
-fn read_jpeg(vfs: &Vfs, path: &str) -> Result<(u32, u32, Vec<u8>), String> {
-    let bytes = vfs.read(path).map_err(|e| e.to_string())?;
+/// Decodes an 8-bit image file (`ext` names its format, e.g. `jpg` or `png`) to (width, height,
+/// RGBA8 pixels, stored values, no sRGB conversion). Bevy expands a grey, grey + alpha or RGB
+/// image to RGBA8 (a grey pixel gives R = G = B, a missing alpha 255), as D3DX's `A8R8G8B8` decode
+/// does. A 16-bit or float image is an error.
+pub(super) fn decode_rgba8(bytes: &[u8], ext: &str) -> Result<(u32, u32, Vec<u8>), String> {
     let image = Image::from_buffer(
-        &bytes,
-        ImageType::Extension("jpg"),
+        bytes,
+        ImageType::Extension(ext),
         CompressedImageFormats::NONE,
         false,
         ImageSampler::Default,
         RenderAssetUsages::default(),
     )
-    .map_err(|e| format!("{path}: {e}"))?;
-    // Bevy's JPEG loader returns RGBA8 (UNORM since `is_srgb` is false).
+    .map_err(|e| e.to_string())?;
     let (w, h) = (image.width(), image.height());
-    let data = image.data.ok_or_else(|| format!("{path}: no pixels"))?;
-    if data.len() != (w * h * 4) as usize {
-        return Err(format!("{path}: unexpected pixel format {:?}", image.texture_descriptor.format));
+    let format = image.texture_descriptor.format;
+    let data = image.data.ok_or("no pixels")?;
+    if format != TextureFormat::Rgba8Unorm || data.len() != w as usize * h as usize * 4 {
+        return Err(format!("unsupported pixel format {format:?} (8 bits a channel expected)"));
     }
     Ok((w, h, data))
+}
+
+/// Decodes a JPEG from the packs to (width, height, RGBA8 pixels) through [`decode_rgba8`]; a
+/// greyscale JPEG comes back as RGBA8 too, its value in R, G and B.
+fn read_jpeg(vfs: &Vfs, path: &str) -> Result<(u32, u32, Vec<u8>), String> {
+    let bytes = vfs.read(path).map_err(|e| e.to_string())?;
+    decode_rgba8(&bytes, "jpg").map_err(|e| format!("{path}: {e}"))
 }
 
 /// `colour_map_<level>.jpg` with the red channel of `colour_map_<level>_alpha.jpg` as alpha
@@ -432,6 +450,17 @@ fn lighting_params(map: &BattleMap) -> (Vec3, Vec3, Vec3) {
     (to_sun.normalize(), sun, ambient)
 }
 
+/// The ground's level-0 textures, for what takes its colour from the ground (the grass).
+#[derive(Resource)]
+pub(crate) struct TerrainTextures {
+    /// Level 0's colour map (`colour_map_0.jpg` + alpha).
+    pub colour0: Handle<Image>,
+    /// The tiled ground texture.
+    pub tile: Handle<Image>,
+    /// The tiled texture's repeats across level 0.
+    pub tile_repeat: f32,
+}
+
 /// Startup: one mesh + material per heightfield level.
 fn spawn_terrain(
     mut commands: Commands,
@@ -450,8 +479,16 @@ fn spawn_terrain(
     };
     let mut hole = 0.0;
     for (level, hf) in map.heightfields.iter().enumerate() {
-        let colour = colour_map(&vfs.0, map, level)
-            .unwrap_or_else(|| image_with_mips(1, 1, vec![90, 110, 70, 0], false));
+        let colour = images.add(
+            colour_map(&vfs.0, map, level).unwrap_or_else(|| image_with_mips(1, 1, vec![90, 110, 70, 0], false)),
+        );
+        if level == 0 {
+            commands.insert_resource(TerrainTextures {
+                colour0: colour.clone(),
+                tile: tile.clone(),
+                tile_repeat: 8.0 * hf.settings.world_width / 2048.0,
+            });
+        }
         let stride = if level == 0 { 1 } else { FAR_STRIDE };
         let material = TerrainMaterial {
             params: TerrainParams {
@@ -461,7 +498,7 @@ fn spawn_terrain(
                 // `tiled_texcoord` = 8 · (0.5 + xz / 2048): 8 repeats per 2,048 m.
                 tile: Vec4::new(8.0 * hf.settings.world_width / 2048.0, 0.0, 0.0, 0.0),
             },
-            colour_map: images.add(colour),
+            colour_map: colour,
             tile_map: tile.clone(),
         };
         commands.spawn((

@@ -459,30 +459,34 @@ impl CampaignModel {
         }
         // The exe asks the humans of its faction list in its order (the test posts its events in that
         // order; winners and losers are told in it): a human id with no faction in the world is in no
-        // list and is never asked. Only the humans are listed (`victory_state` takes `&mut self`); a
-        // single human needs no ordering, so the faction list is walked only with several.
-        let humans: Vec<FactionId> = if self.turn.humans.len() <= 1 {
-            self.turn.humans.iter().copied().filter(|f| self.world.factions.contains_key(f)).collect()
+        // list and is never asked. Only the humans are listed, each with its state (`victory_state`
+        // takes `&mut self`); a single human needs no ordering, so the faction list is walked (and a
+        // list allocated) only with several.
+        let mut single: Option<(FactionId, VictoryState)> = None;
+        let mut several: Vec<(FactionId, VictoryState)> = Vec::new();
+        if self.turn.humans.len() <= 1 {
+            single = self.turn.humans.iter().copied().find(|f| self.world.factions.contains_key(f)).map(|f| (f, VictoryState::Undecided));
         } else {
-            self.world.factions_in_turn_order().into_iter().filter(|&f| self.is_human(f)).collect()
-        };
-        let mut decided: Vec<(FactionId, VictoryState)> = Vec::new();
-        let mut undecided = false;
-        for &faction in &humans {
-            match self.victory_state(faction, events) {
-                VictoryState::Undecided => undecided = true,
-                state => decided.push((faction, state)),
-            }
+            several = self.world.factions_in_turn_order().into_iter().filter(|&f| self.is_human(f)).map(|f| (f, VictoryState::Undecided)).collect();
         }
-        if decided.is_empty() {
+        let humans: &mut [(FactionId, VictoryState)] = match &mut single {
+            Some(h) => std::slice::from_mut(h),
+            None => &mut several,
+        };
+        for (faction, state) in humans.iter_mut() {
+            *state = self.victory_state(*faction, events);
+        }
+        let humans = &*humans;
+        let is = |state: VictoryState| humans.iter().any(|&(_, s)| s == state);
+        let (won, undecided) = (is(VictoryState::Won), is(VictoryState::Undecided));
+        if !won && !is(VictoryState::Lost) {
             return;
         }
-        let won = decided.iter().any(|(_, s)| *s == VictoryState::Won);
         if !won && undecided {
             return;
         }
         let lost = |events: &mut Vec<CampaignEvent>| {
-            events.extend(decided.iter().filter(|(_, s)| *s == VictoryState::Lost).map(|&(faction, _)| CampaignEvent::CampaignLost { faction }));
+            events.extend(humans.iter().filter(|(_, s)| *s == VictoryState::Lost).map(|&(faction, _)| CampaignEvent::CampaignLost { faction }));
         };
         if !won {
             lost(events);
@@ -496,12 +500,12 @@ impl CampaignModel {
                 p.held = true;
             }
         }
-        for &(winner, _) in decided.iter().filter(|(_, s)| *s == VictoryState::Won) {
+        for &(winner, _) in humans.iter().filter(|(_, s)| *s == VictoryState::Won) {
             if self.world.victory_notification_disabled {
                 continue;
             }
             // Only in a multiplayer campaign (+0x1034 tested at `0x0096CEA9`) is another human looked for.
-            let other = if self.world.multiplayer_campaign { humans.iter().copied().find(|&f| f != winner) } else { None };
+            let other = if self.world.multiplayer_campaign { humans.iter().map(|&(f, _)| f).find(|&f| f != winner) } else { None };
             if let Some(other) = other {
                 // Event +0x108 {other, 1}: the movie listener answers it as it answers a destroyed
                 // human's (`0x00A14E80`). UNKNOWN: what that event's other listeners do when the

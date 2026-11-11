@@ -31,7 +31,7 @@
 //! blockade ([`CampaignModel::sally`], the attack execute `0x0095B370`).
 //!
 //! **While it lasts.** A navy docked in the blockaded port is no obstacle on the path grid
-//! ([`CampaignModel::navies_docked_in_blockaded_ports`]); the port's naval recruitment queue holds its
+//! ([`CampaignModel::docked_in_blockaded_port`]); the port's naval recruitment queue holds its
 //! finished ships, as a besieged settlement's land queue holds its units (the hold in
 //! [`CampaignModel::region_turn`]); the trade routes are cut only by sieges and hostile navies on their sea
 //! legs, not by the port blockade itself ([`super::trade`]).
@@ -115,24 +115,41 @@ impl CampaignModel {
     /// port holds one docked navy (port +0x60); the model tells a docked navy by its position, so it can hold
     /// several.
     pub(crate) fn docked_navies(&self, region: RegionId, slot: usize) -> impl Iterator<Item = ForceId> + '_ {
-        self.world.forces.values().filter(move |f| f.is_navy && self.docked_port(f.id) == Some((region, slot))).map(|f| f.id)
+        self.world.forces.values().filter(move |f| self.is_docked_in(f, region, slot)).map(|f| f.id)
     }
 
-    /// The navies lying docked in a blockaded port, which are no path-grid obstacle (CONFIRMED by decompile):
-    /// the blockade start removes the docked navy's character from the obstacle layers (`0x00B653A0`, the call
-    /// at `0x00A67105`; it also runs from the character's destructor and on entering a settlement), and the
-    /// re-add `0x00B084F0` adds a character in a residence only when `0x00B1D100` lets it: a docked navy only
-    /// while its port (`0x00A17D20`) has no blockader (port +0x68 does not resolve). The lift calls
-    /// `0x00B084F0` on the docked navy's character after unlinking the blockader, which adds him back. The
-    /// model reads obstacles on the fly ([`super::zones`]), so this test stands for that state. Empty, without
-    /// allocating, when no port is blockaded.
+    /// Whether force `f` is a navy docked in port slot `slot` of `region` ([`Self::docked_navies`]).
+    fn is_docked_in(&self, f: &super::MilitaryForce, region: RegionId, slot: usize) -> bool {
+        f.is_navy && self.docked_port(f.id) == Some((region, slot))
+    }
+
+    /// Every navy [`Self::docked_in_blockaded_port`] finds, for the tests. Empty, without allocating, when
+    /// no port is blockaded.
+    #[cfg(test)]
     pub(crate) fn navies_docked_in_blockaded_ports(&self) -> Vec<ForceId> {
-        let ports = self.blockaded_slots(None, |_, _, _| true);
-        if ports.is_empty() {
+        if !self.any_port_blockaded() {
             return Vec::new();
         }
-        let docked = |f: &&super::MilitaryForce| f.is_navy && self.docked_port(f.id).is_some_and(|p| ports.contains(&p));
-        self.world.forces.values().filter(docked).map(|f| f.id).collect()
+        self.world.forces.keys().copied().filter(|&f| self.docked_in_blockaded_port(f)).collect()
+    }
+
+    /// Whether any port slot is blockaded (a cheap gate before [`Self::docked_in_blockaded_port`], which looks
+    /// up the navy's port).
+    pub(crate) fn any_port_blockaded(&self) -> bool {
+        self.world.regions.values().any(|r| r.slots.iter().any(|s| s.blockade.is_some()))
+    }
+
+    /// Whether `force` is a navy lying docked in a blockaded port, which is no path-grid obstacle (CONFIRMED
+    /// by decompile): the blockade start removes the docked navy's character from the obstacle layers
+    /// (`0x00B653A0`, the call at `0x00A67105`; it also runs from the character's destructor and on entering a
+    /// settlement), and the re-add `0x00B084F0` adds a character in a residence only when `0x00B1D100` lets
+    /// it: a docked navy only while its port (`0x00A17D20`) has no blockader (port +0x68 does not resolve).
+    /// The lift calls `0x00B084F0` on the docked navy's character after unlinking the blockader, which adds
+    /// him back. The model reads obstacles on the fly ([`super::zones`]), so this test stands for that state.
+    pub(crate) fn docked_in_blockaded_port(&self, force: ForceId) -> bool {
+        self.docked_port(force)
+            .and_then(|(r, i)| self.world.regions.get(&r)?.slots.get(i))
+            .is_some_and(|s| s.blockade.is_some())
     }
 
     /// The faction a port slot stands for in a navy's order against it: the port order is allowed only to a
@@ -163,8 +180,12 @@ impl CampaignModel {
     /// decompile): the army he commands ends its siege (`0x00A0B8C0`, army +0x94 →
     /// `EndForceSiegeOfSettlement`, [`Self::end_force_siege`]) and the navy he commands lifts its blockade
     /// (`0x00A0B680`, navy +0xE8 → `LiftPortSlotBlockade`, [`Self::lift_blockade_of_navy`]). The helper acts on
-    /// the ordered character's own force only and runs before the order is created, so the siege or blockade
-    /// stays ended when the order then fails (no path, no action points). Every character order's execute
+    /// the ordered character's own force only and runs in the order's execute (at its start but for the
+    /// reinforcement march's, below), so the siege or blockade stays ended when the execute then finds no path
+    /// or no action points. An army's move asks for its path earlier: the command's pre-check (`0x00924790`, or
+    /// `0x009246C0` for the theatre move) refuses a move with no path before the order is run, so the helper in
+    /// the execute (`0x0095DC60`) is never reached and the siege stays ([`Self::move_order`] asks before its
+    /// walk; CAMPAIGN_FIDELITY.md "pre-checks", CONFIRMED by decompile). Every character order's execute
     /// calls it with the flag set (30 call sites; the notes list them) except the settlement order when his
     /// army besieges that very settlement (`0x0095D140`, [`Self::enter_settlement`]) and the docked navy's
     /// attack on its blockader, which runs no helper at all ([`Self::sally`]).
@@ -259,7 +280,7 @@ impl CampaignModel {
     /// the 0xBA message and the 307 event (BACKLOG "Port blockade"), and the slot's and holder's events once
     /// their listeners are traced (the lift posts the same two, [`Self::lift_port_blockade`]). The start's call
     /// `0x00B653A0` on a docked navy's character takes him off the path grid's obstacles, which the model
-    /// reads from the blockade ([`Self::navies_docked_in_blockaded_ports`]); its set of the byte +0x58 of the
+    /// reads from the blockade ([`Self::docked_in_blockaded_port`]); its set of the byte +0x58 of the
     /// slot's naval recruitment manager (slot +0x1E8) has no effect of its own (the queue's turn step writes
     /// the byte before it reads it, [`Self::region_turn`]). PROVISIONAL: the start sets the slot's byte +0x220
     /// (`0x00A6707B`; the lift does not clear it), whose readers are not traced; the model holds no such byte.
@@ -386,7 +407,7 @@ impl CampaignModel {
     /// When a navy is docked in the port, the lift then floods and stores its commander's zone again
     /// (`0x00B084F0` on `GetPortDockedNavyCharacter`'s character, CONFIRMED by decompile: with the blockader
     /// unlinked, `0x00B1D100` lets the docked navy be an obstacle again,
-    /// [`Self::navies_docked_in_blockaded_ports`]; ours [`Self::rebuild_zone`]). The lift's clear of the byte
+    /// [`Self::docked_in_blockaded_port`]; ours [`Self::rebuild_zone`]). The lift's clear of the byte
     /// +0x58 of the slot's naval recruitment manager (slot +0x1E8) has no effect of its own: the queue's turn
     /// step writes the byte before it reads it (the hold in [`Self::region_turn`]). The slot's and the holder
     /// faction's events (slot +0x3C → +8 → +0x480, holder +0xA8 → +8 → +0x2A0) are not posted, as at the
@@ -401,12 +422,22 @@ impl CampaignModel {
 
     /// [`Self::lift_port_blockade`] without its price update, for a caller that runs the update once afterwards.
     fn clear_port_blockade(&mut self, region: RegionId, slot: usize) -> bool {
+        use std::ops::Bound::{Excluded, Unbounded};
         let lifted = self.world.regions.get_mut(&region).and_then(|r| r.slots.get_mut(slot)).and_then(|s| s.blockade.take()).is_some();
         if lifted {
-            let docked: Vec<CharacterId> =
-                self.docked_navies(region, slot).filter_map(|f| self.world.forces.get(&f).and_then(|f| f.commander)).collect();
-            for c in docked {
-                self.rebuild_zone(c);
+            // The docked navies in force id order, walked in place: a zone rebuild moves no force.
+            let mut from = Unbounded;
+            while let Some((id, commander)) = self
+                .world
+                .forces
+                .range((from, Unbounded))
+                .find(|(_, f)| self.is_docked_in(f, region, slot))
+                .map(|(id, f)| (*id, f.commander))
+            {
+                from = Excluded(id);
+                if let Some(c) = commander {
+                    self.rebuild_zone(c);
+                }
             }
         }
         lifted

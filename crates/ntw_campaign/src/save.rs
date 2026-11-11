@@ -15,7 +15,7 @@
 //! | treasury | `FACTION_ECONOMICS` #1 | CONFIRMED position |
 //! | characters | `LOCOMOTABLE` #0/#1 position, #8 base and #9 current action points; removed characters' items are dropped | CONFIRMED positions |
 //! | forces | `MILITARY_FORCE` #0/#1, `UNITS_ARRAY` rebuilt from the model (existing unit items kept and patched: `UNIT` #5 men, #6 max men; new units cloned from a template unit item); destroyed forces dropped; new forces cloned from a template `ARMY`/`NAVY` item | CONFIRMED positions; cloning PROVISIONAL |
-//! | regions | `REGION` #20 owner, garrison residence owner and siege (`SIEGEABLE_GARRISON_RESIDENCE` #2 turns to surrender, #3 turns besieged, #13 besieging forces; writer `0x00B7A5F0`), slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves; the siege fields from the writer `0x00B7A5F0` and a round trip (`save_compat.rs` `siege_state_is_written`): no evidence save holds a siege |
+//! | regions | `REGION` #20 owner, garrison residence owner and siege (`SIEGEABLE_GARRISON_RESIDENCE` #2 turns to surrender, #3 turns besieged, #13 besieging forces, `FORTIFICATIONS_BLOCK` the fortification damage, rebuilt only when it changed; writer `0x00B7A5F0`, items `0x00523AE0`), slot buildings, road building, `BUILDING_CONSTRUCTION_ITEM`s (source items kept, repair items kept), the recruitment queues (region and port managers; source items kept), the economy fields (`write_region_economy`), the population state and religion shares (`write_region_population`) | CONFIRMED layouts from the user's saves; the siege fields from the writer `0x00B7A5F0` and a round trip (`save_compat.rs` `siege_state_is_written`): no evidence save holds a siege |
 //! | taxes | every `GOVERNORSHIP_TAXES` | CONFIRMED position (CAMPAIGN_DATA.md §3) |
 //! | stances | `DIPLOMACY_RELATIONSHIP` #4 (old stance to #20) | #4 CONFIRMED, #20 INFERRED |
 //! | treaty money | `DIPLOMACY_RELATIONSHIP` #8 protectorate tribute, #9 patron income, #14 `REGULAR_PAYMENTS[]` (`write_treaty_money`) | CONFIRMED (writer `0x00AFC340`) |
@@ -872,23 +872,16 @@ fn write_traits(d: &mut EsfRecord, details: &ntw_sim::campaign::details::Charact
     }
 }
 
-/// `CHARACTER_DETAILS` #14 `AgentAttributeBonuses[]` {key, u32} from the model: the exe's writer
-/// `0x009A0580` writes details +0x13C under each key of its situation list, which holds only `dummy`
-/// (CONFIRMED, CHARACTERS_FIDELITY.md §17). Nothing in play changes the value, so this only keeps the
-/// model's entries from depending on what the source record (or a new character's template) held: each
-/// entry's value is set in place, and one the record lacks is appended with the UTF-16 key the original
-/// writes.
+/// `CHARACTER_DETAILS` #14 `AgentAttributeBonuses[]` {key, u32}, rebuilt from the model. The exe's
+/// writer `0x009A0580` writes the array from its own state alone, never from what was read: one
+/// entry, the situation key `GetAttributeSituationKey(0)` (`0x009A0AB6`, `dummy`) as a UTF-16 string
+/// (type 14, `0x009A0AE8`) and details +0x13C as a u32 (type 8, `0x009A0B35`); CONFIRMED,
+/// CHARACTERS_FIDELITY.md §17. So the items are exactly the model's entries in its order, each with
+/// a UTF-16 key and a u32: a source entry the model lacks is not kept, and none is skipped for its
+/// node type. Vanilla gives the one `dummy` entry the exe writes; the model's list (a mod's
+/// situations) lifts the exe's single value, and each of its entries is written, a repeated key too.
 fn write_attribute_bonuses(items: &mut Vec<Vec<EsfNode>>, bonuses: &[(String, u32)]) {
-    for (key, value) in bonuses {
-        match items.iter_mut().find(|it| it.first().and_then(EsfNode::as_str) == Some(key.as_str())) {
-            Some(it) => {
-                if let Some(n @ EsfNode::U32(_)) = it.get_mut(1) {
-                    *n = EsfNode::U32(*value);
-                }
-            }
-            None => items.push(vec![EsfNode::Utf16String(key.clone()), EsfNode::U32(*value)]),
-        }
-    }
+    *items = bonuses.iter().map(|(key, value)| vec![EsfNode::Utf16String(key.clone()), EsfNode::U32(*value)]).collect();
 }
 
 /// `CHARACTER_DETAILS` #12 `AgentAttributes[]` {key, i32 level} from the model: the stored levels move
@@ -1116,6 +1109,12 @@ fn write_faction(
         set(f, arr + 1, EsfNode::I32(land));
         set(f, arr + 2, EsfNode::I32(naval));
     }
+    // The out-of-game flag (faction +0x824, the bool two before the flag anchor, which the loader reads at
+    // 0x0087B4CC; `details::faction_details`), from the one in-the-game rule, so a faction destroyed or
+    // brought back in play is saved as such.
+    if let Some(arr) = crate::details::flags_anchor(f) {
+        set(f, arr - 2, EsfNode::Bool(!model.in_the_game(faction.id)));
+    }
     // The `WarStartedCharacterFaction` flag (`details::war_started_index`) and the
     // `FactionDestroyedByCharacterFaction` flag, the bool before it, where the record has them.
     if let (Some(i), Some(d)) = (crate::details::war_started_index(f), model.world.faction_details.get(&faction.id)) {
@@ -1209,7 +1208,15 @@ fn write_faction(
                 if matches!(c.children.get(14), Some(EsfNode::Bool(b)) if *b != d.no_action) {
                     set(c, 14, EsfNode::Bool(d.no_action));
                 }
-                for (i, v) in [(15, d.idle_turns), (28, d.turns_at_sea), (29, d.turns_in_enemy_lands), (30, d.turns_at_home)] {
+                // #18 / #20: the defensive / offensive sieges (u32 +0x4D0 / +0x4D8, LaySiege `0x008AF6A0`).
+                for (i, v) in [
+                    (15, d.idle_turns),
+                    (18, d.defensive_sieges),
+                    (20, d.offensive_sieges),
+                    (28, d.turns_at_sea),
+                    (29, d.turns_in_enemy_lands),
+                    (30, d.turns_at_home),
+                ] {
                     if matches!(c.children.get(i), Some(EsfNode::U32(x)) if *x != v) {
                         set(c, i, EsfNode::U32(v));
                     }
@@ -1830,6 +1837,45 @@ enum QueueDest {
     New(RecruitmentManager),
 }
 
+/// `SIEGEABLE_GARRISON_RESIDENCE/FORTIFICATIONS_BLOCK` from the model's fortification damage
+/// (CONFIRMED, writer `0x00523AE0`, called by the residence writer `0x00B7A5F0`): each item one `FORTIFICATION_DAMAGE_INFO`
+/// v4 {#0 `HIT_POINTS_BLOCK` v0 of `F32` items, #1 `F32` factor, #2 `U32` kind, #3 `U32` hits}. A
+/// block that already reads back as the model's entries is kept as loaded (so an older record
+/// version stays byte for byte); otherwise it is rebuilt. A residence without the block cannot keep
+/// the damage, so the save fails when the model has any.
+fn write_fortifications(sgr: &mut EsfRecord, entries: &[ntw_sim::campaign::FortificationDamage]) -> Result<(), SaveError> {
+    let Some(block) = array_mut(sgr, "FORTIFICATIONS_BLOCK") else {
+        return if entries.is_empty() { Ok(()) } else { Err(SaveError::Missing("FORTIFICATIONS_BLOCK")) };
+    };
+    let unchanged = block.items.len() == entries.len()
+        && block.items.iter().zip(entries).all(|(item, e)| {
+            item.first()
+                .and_then(EsfNode::as_record)
+                .filter(|r| r.name == "FORTIFICATION_DAMAGE_INFO")
+                .and_then(|r| crate::world::read_fortification(r, "").ok())
+                .is_some_and(|loaded| loaded == *e)
+        });
+    if unchanged {
+        return Ok(());
+    }
+    block.items = entries
+        .iter()
+        .map(|e| {
+            let mut hp = EsfRecordArray::new("HIT_POINTS_BLOCK", 0);
+            hp.items = e.hit_points.iter().map(|&h| vec![EsfNode::F32(h)]).collect();
+            let mut info = EsfRecord::new("FORTIFICATION_DAMAGE_INFO", 4);
+            info.children = vec![
+                EsfNode::RecordArray(Box::new(hp)),
+                EsfNode::F32(e.factor),
+                EsfNode::U32(e.kind),
+                EsfNode::U32(e.hits),
+            ];
+            vec![EsfNode::Record(Box::new(info))]
+        })
+        .collect();
+    Ok(())
+}
+
 fn write_region(
     r: &mut EsfRecord,
     region: &Region,
@@ -1864,6 +1910,7 @@ fn write_region(
         set(sgr, 2, EsfNode::U32(siege.surrender_turns));
         set(sgr, 3, EsfNode::U32(siege.turns_besieged));
         set(sgr, 13, EsfNode::U32Array(siege.besiegers.iter().map(|f| f.raw()).collect()));
+        write_fortifications(sgr, &siege.fortifications)?;
         if let Some(gr) = child_mut(sgr, "GARRISON_RESIDENCE") {
             set(gr, 0, EsfNode::U32(region.owner.raw() as u32));
         }
@@ -2413,8 +2460,8 @@ mod tests {
     }
 
     /// `CHARACTER_DETAILS` #14 is written from the model (`0x009A0580` writes details +0x13C), not left as
-    /// the source record or a new character's template held it: an entry's value is set in place and one
-    /// the record lacks is added; a record without the array at #14 is left alone.
+    /// the source record or a new character's template held it: the entries are the model's, each key
+    /// a UTF-16 string as the exe writes it; a record without the array at #14 is left alone.
     #[test]
     fn attribute_bonuses_are_written_from_the_model() {
         use ntw_sim::campaign::details::CharacterDetails;
@@ -2426,15 +2473,29 @@ mod tests {
             *d
         };
         let details = CharacterDetails { attribute_bonuses: vec![("dummy".into(), 5), ("mod_situation".into(), 2)], ..Default::default() };
-        // The template's entry holds 0 under a single-byte key: the value changes, the key node stays.
+        let utf16 = |k: &str, v: u32| vec![EsfNode::Utf16String(k.into()), EsfNode::U32(v)];
+        // The template's entry holds 0 under a single-byte key: the exe writes its key as UTF-16 (type
+        // 14, `0x009A0AE8`) whatever was read.
         let mut d = details_rec(array("AgentAttributeBonuses", vec![vec![EsfNode::AsciiString("dummy".into()), EsfNode::U32(0)]]));
         write_traits(&mut d, &details);
         let written = &d.record_array("AgentAttributeBonuses").unwrap().items;
-        assert_eq!(
-            *written,
-            vec![vec![EsfNode::AsciiString("dummy".into()), EsfNode::U32(5)], vec![EsfNode::Utf16String("mod_situation".into()), EsfNode::U32(2)]]
-        );
+        assert_eq!(*written, vec![utf16("dummy", 5), utf16("mod_situation", 2)]);
         assert_eq!(crate::details::read_attribute_bonuses(&d), details.attribute_bonuses);
+        // A source with a repeated key, an entry the model lacks and a value that is not a u32: the
+        // array is rebuilt to the model's entries, nothing of the source kept (`0x009A0580` writes from
+        // its own state only).
+        let source = vec![
+            vec![EsfNode::Utf16String("dummy".into()), EsfNode::I32(9)],
+            utf16("dummy", 1),
+            utf16("stale_situation", 4),
+        ];
+        let mut d = details_rec(array("AgentAttributeBonuses", source));
+        write_traits(&mut d, &details);
+        assert_eq!(d.record_array("AgentAttributeBonuses").unwrap().items, vec![utf16("dummy", 5), utf16("mod_situation", 2)]);
+        // A model list with a repeated key writes each entry and reads back the same.
+        let twice = CharacterDetails { attribute_bonuses: vec![("dummy".into(), 1), ("dummy".into(), 3)], ..Default::default() };
+        write_traits(&mut d, &twice);
+        assert_eq!(crate::details::read_attribute_bonuses(&d), twice.attribute_bonuses);
         // Another array at #14: not this layout, untouched.
         let other = array("AgentAbilities", Vec::new());
         let mut d = details_rec(other.clone());

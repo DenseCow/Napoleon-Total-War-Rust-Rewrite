@@ -336,6 +336,11 @@ impl CampaignModel {
     /// the path grid's view and the trade price update (`0x00B67490`, `0x00BCB020`, no model state).
     pub fn declare_war_rules(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         self.check_diplomacy_pair(a, b)?;
+        self.declare_war_of_pair(a, b)
+    }
+
+    /// [`Self::declare_war_rules`] for a pair the caller has checked ([`Self::check_diplomacy_pair`]).
+    fn declare_war_of_pair(&mut self, a: FactionId, b: FactionId) -> Result<Vec<CampaignEvent>, CommandError> {
         // ORIGINAL BUG: `0x00B268B0` / `0x00B26700` declare a war that already exists again (allies
         // called, notices and attitude factors added once more); ours refuses it (see
         // [`Self::declare_war_command`]).
@@ -1164,7 +1169,8 @@ impl CampaignModel {
     /// - Not modelled: when either side is human (+0x6E0) the handler then posts model event 0xBC (the
     ///   declarer, no position) on the model's event broadcaster (+0x9C0, `0x008DBAC0`). Its one listener
     ///   (the object `0x0090AE10` builds, handler `0x009593A0`) passes it on only when the event's faction
-    ///   is its own (+0xB4), so only the local declarer hears it. It is a sound: 0xBC is sound slot 188,
+    ///   is its own (listener +0xB4 at `0x009593B9`, +0x174 of the built object, the listener being its
+    ///   sub-object +0xC0), so only the local declarer hears it. It is a sound: 0xBC is sound slot 188,
     ///   `CAMPAIGN_EVENT_WAR_DECLARED` (ntw_formats `sound/slots.rs`); the event carries no sound name
     ///   (+0x0C holds the default key at `0x01457CAC`), so the listener plays slot +0x10 through its +0x74 object, the sound
     ///   manager (vtable +0x1C), and treats slot 0x191 as no sound. No model state reads it; the sound
@@ -1174,7 +1180,7 @@ impl CampaignModel {
         if let Some(f) = [a, b].into_iter().find(|&f| !self.in_the_game(f)) {
             return Err(CommandError::OutOfGame(f));
         }
-        self.declare_war_rules(a, b)
+        self.declare_war_of_pair(a, b)
     }
 
     /// The `CCQ_MAKE_PROTECTORATE` command (`HandleMakeProtectorateCommand` `0x009367A0`, CONFIRMED):
@@ -1710,9 +1716,11 @@ impl CampaignModel {
     }
 
     /// The regular payments to `payee` that finished in their payer's per-turn update earlier this round
-    /// end, removed once `payee`'s own settle has paid their last round (run by the payee's round-end
-    /// economy right after its settle, [`super::TurnStep::Economy`]), each taking its lines back
-    /// (`0x0086A120`). ORIGINAL BUG fix: see [`Self::diplomacy_round_end`] step 8.
+    /// end, removed right after `payee`'s own settle (run by the payee's round-end economy,
+    /// [`super::TurnStep::Economy`]), each taking its lines back (`0x0086A120`). That settle pays their
+    /// last round, except for the rebels and a payee out of the game, whose settle pays nothing
+    /// ([`super::economy::Settlement::Skipped`]); they are removed all the same. ORIGINAL BUG fix: see
+    /// [`Self::diplomacy_round_end`] step 8.
     pub(super) fn drop_finished_payments_to(&mut self, payee: FactionId) {
         let payers: Vec<FactionId> = self
             .world

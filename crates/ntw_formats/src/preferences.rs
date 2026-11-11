@@ -118,8 +118,16 @@ impl Preferences {
     ///
     /// Difference: an int setting's read stops at a point in the exe (`2.5` is 2); here the
     /// fraction is kept and the readers of whole-number settings drop it. Ours reads every
-    /// numeric setting as the float read does; what the int read (`0x010DFF00`) gives for a
-    /// number beyond an int's range is UNKNOWN (not traced).
+    /// numeric setting as the float read does. The exe's int read (`0x010DFF00`) gathers the
+    /// digit field (`0x010E4460`: a sign, then decimal digits, leading zeros dropped, at most 30
+    /// kept and the rest read and lost) and converts it with `sscanf("%i")` (`0x010F5F50` →
+    /// `0x0044AAC0`, the UCRT's `__stdio_common_vsscanf`); it fails only when no digit was read or
+    /// sscanf converted nothing (CONFIRMED). So a number beyond an int's range does not fail. The
+    /// statically linked UCRT's `%i` parses a signed 64-bit number (`0x0127C18E` with base 0,
+    /// signed, → `0x01277818`), saturating beyond that range (`0x012753BF`: to i64::MAX, or
+    /// i64::MIN for a negative), and stores its low 32 bits into the int (`0x0127D5C1`)
+    /// (CONFIRMED). So `2147483648` stores -2147483648, `4294967296` stores 0, and a number beyond
+    /// i64's range stores -1 (0 when negative). Difference: ours keeps the number.
     pub fn get_f64(&self, key: &str) -> Option<f64> {
         self.file_value(key).and_then(number_value).or_else(|| registered_default(key).and_then(number_value))
     }

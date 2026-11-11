@@ -1,0 +1,55 @@
+# The battle-map grass (napoleon/src/terrain/grass.wgsl). A mod changes how the grass looks and
+# moves by shipping materials/vanilla/grass.toml; a number it leaves out keeps the value below.
+#
+# Texture slots: "atlas" (the grass type's picture page, battleterrain\grass\<type>0.dds) and the
+# ground's own colour map and tiled texture, which the grass takes its colour from.
+#
+# The numbers are the original's, read from the shipped fx\grass.fx (CONFIRMED by the file);
+# grass_wind_scale is the exe's variable of that name (CONFIRMED default 1.0, 0x01248580).
+
+[alpha]
+mode = "mask"
+cutoff = 0.50196          # 128/255, grass.fx ALPHAREF
+two_sided = true          # grass.fx CULLMODE = NONE
+
+[params]
+# A blade's quad: corner weights w (0..1) spread to spread*(w - 0.5) + (0, rise) times its size,
+# lifted by `lift` metres, turned towards the view direction leaned `view_lean` of the way towards
+# the blade itself.
+spread = 5.0
+rise = 1.5
+lift = 0.3
+view_lean = 0.25
+# The corner weights w of a quad's left and right sides and of its foot and top. INFERRED: the
+# exe fills them in before 0x011EFBD0 (not traced); these are the values that make the quad span
+# the blade's width centred on its foot and its height from the ground up (all multiples of 51/255).
+corner_left = 0.4
+corner_right = 0.6
+corner_foot = 0.2
+corner_top = 0.4
+# Fade: a blade fades over the last fade_width of fade_distance * (1 - fade_spread * phase),
+# measured with heights counted fade_height_weight times; its colour turns to the ground's below
+# lod dissolve_start, and its alpha is the picture's alpha * alpha_gain.
+fade_distance = 78.0
+fade_spread = 0.2
+fade_start = 0.65
+fade_width = 0.35
+fade_height_weight = 3.0
+dissolve_start = 0.6
+alpha_gain = 1.5
+# Sway: sway_amplitude * top weight * sincos(time * (sway_speed + sway_speed_spread * phase)
+# + position + phase * sway_phase), then the gust: wind direction * top weight * gust * gust_scale.
+sway_amplitude = 0.06
+sway_speed = 2.6
+sway_speed_spread = 0.8
+sway_phase = 5.0
+gust_scale = 0.0004
+grass_wind_scale = 1.0
+# The gust itself (0x01247E90): each second it grows by the wind's push times a ramp that runs from
+# gust_rampup_low to gust_rampup_high as the weather's wind level runs from 1 to 100, and a positive
+# gust loses gust / gust_falloff. The exe's variables grass_gust_rampup_low (registered 0x00441240,
+# stored 0x01839030), grass_gust_rampup_high (0x004411F0, 0x01838A30) and grass_gust_falloff
+# (0x004411A0, 0x018383C0); CONFIRMED defaults.
+gust_rampup_low = 1.0
+gust_rampup_high = 5.0
+gust_falloff = 1.5

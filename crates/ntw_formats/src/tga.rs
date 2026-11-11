@@ -17,10 +17,13 @@
 //! 0 u8 id length        1 u8 colour-map type   2 u8 image type
 //! 3 u16 cmap first      5 u16 cmap length      7 u8 cmap entry bits
 //! 8 u16 x origin        10 u16 y origin        12 u16 width   14 u16 height
-//! 16 u8 bits per pixel  17 u8 descriptor (bit 5 set = rows stored top-down; bits 0-3 = alpha bits)
+//! 16 u8 bits per pixel  17 u8 descriptor (bit 5 set = rows stored top-down; bit 4 set = columns
+//!                          stored right to left; bits 0-3 = alpha bits)
 //! then: id field, colour map, pixel data
 //! ```
-//! This decoder always returns rows **top-down** (row 0 = the top of the picture) and, for
+//! This decoder always returns rows **top-down** (row 0 = the top of the picture) and columns
+//! left to right, as the original's TGA reader lays them out (CONFIRMED `0x004E2680`: rows by
+//! bit 5, columns by bit 4), and, for
 //! palette images, keeps the raw indices as well (the ground-type map converts them through its
 //! palette colours, `battle_terrain::GroundTypeMap`).
 
@@ -101,6 +104,7 @@ impl Tga {
         let descriptor = b[17];
         let alpha_bits = descriptor & 0x0F;
         let top_down = descriptor & 0x20 != 0;
+        let right_to_left = descriptor & 0x10 != 0;
         let rle = image_type >= 9;
         let base_type = if rle { image_type - 8 } else { image_type };
         if !matches!(base_type, 1..=3) {
@@ -156,7 +160,8 @@ impl Tga {
             let row = if top_down { file_row } else { h - 1 - file_row };
             for x in 0..w {
                 let src = &stored[(file_row * w + x) * px_bytes..][..px_bytes];
-                let dst = row * w + x;
+                let col = if right_to_left { w - 1 - x } else { x };
+                let dst = row * w + col;
                 let colour = match base_type {
                     1 => {
                         indices[dst] = src[0];
@@ -217,6 +222,21 @@ mod tests {
         let t = Tga::parse(&b).unwrap();
         assert_eq!(t.rgba, vec![3, 2, 1, 4, 3, 2, 1, 4, 7, 8, 9, 6]);
         assert!(t.indices.is_empty());
+    }
+
+    /// Descriptor bit 4 stores the columns right to left (0x004E2680); the decoder returns them
+    /// left to right, indices included.
+    #[test]
+    fn right_to_left_columns_are_mirrored() {
+        let mut b = header(0, 3, 0, 0, 3, 2, 8, 0x20 | 0x10);
+        b.extend([1, 2, 3, 4, 5, 6]);
+        let t = Tga::parse(&b).unwrap();
+        assert_eq!(t.indices, vec![3, 2, 1, 6, 5, 4]);
+        assert_eq!(&t.rgba[0..4], &[3, 3, 3, 255]);
+        // Bottom-up and right to left: both flipped.
+        let mut b = header(0, 3, 0, 0, 3, 2, 8, 0x10);
+        b.extend([1, 2, 3, 4, 5, 6]);
+        assert_eq!(Tga::parse(&b).unwrap().indices, vec![6, 5, 4, 3, 2, 1]);
     }
 
     #[test]

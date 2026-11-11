@@ -11,7 +11,7 @@ fn in_a_turn() -> CampaignModel {
 }
 
 fn battle(attacker: ForceId, defenders: Vec<ForceId>) -> Option<super::battles::PendingBattle> {
-    Some(super::battles::PendingBattle { attacker, defenders, settlement: None, resume: None })
+    Some(super::battles::PendingBattle { attacker, defenders, settlement: None, resume: None, ambush: false })
 }
 
 /// Condition 7 alone: the player's own turn, under way.

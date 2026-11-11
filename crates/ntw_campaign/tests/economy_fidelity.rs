@@ -171,7 +171,7 @@ fn government_relations_are_keyed_on_the_pair() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let m = ntw_campaign::read_esf(&esf, &db).expect("loads").model;
@@ -619,7 +619,7 @@ fn trade_node_supply_matches_the_domestic_routes() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let (mut checked, mut equal) = (0, 0);
     for campaign in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "spa_napoleon"] {
         let Ok(bytes) = files.read(&format!("campaigns/{campaign}/startpos.esf")) else { continue };
@@ -678,7 +678,7 @@ fn commodity_demand_and_prices_match_the_startpos() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -714,7 +714,7 @@ fn region_neighbours_come_from_the_map_outlines() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -754,7 +754,7 @@ fn every_region_gets_the_outlines_of_the_area_its_settlement_stands_on() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let esf = EsfFile::from_bytes(&bytes).expect("esf");
     let mut loaded = ntw_campaign::read_esf(&esf, &db).expect("load");
@@ -796,7 +796,7 @@ fn tech_availability_rule_keeps_every_start_position_state() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let mut checked = 0;
     for campaign in ["eur_napoleon", "egy_napoleon", "ita_napoleon", "spa_napoleon"] {
         let Ok(bytes) = files.read(&format!("campaigns/{campaign}/startpos.esf")) else { continue };
@@ -867,7 +867,7 @@ fn population_factors_and_growth_match_the_vanilla_saves() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let mut maps = std::collections::BTreeMap::new();
     let load = |name: &str, maps: &mut std::collections::BTreeMap<String, ntw_sim::campaign::Terrain>| {
         let path = ev.join(format!("{name}.save"));
@@ -1154,7 +1154,7 @@ fn region_deals_on_the_europe_start() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
     let map = ntw_formats::campaign_map::CampaignMap::load(&files, &loaded.info.map_key).expect("map");
@@ -1211,7 +1211,7 @@ fn ai_areas_on_the_europe_start() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
     // The director's state comes from the start position's CDIR_INTERFACE (v3, RNG 37138) and its
@@ -1246,6 +1246,7 @@ fn ai_areas_on_the_europe_start() {
 /// `CAI_WORLD_REGION_HLCIS[]`, kept by `0x00C5C490` when a piece's `regions.esf` area has flag #2):
 /// every land region lies on one; the British Isles are one (Ireland included), the mainland
 /// another (Sicily included), Corsica a third, so Corsica is a group of its own (LOST for its owner).
+/// Then the change states of a few regions on the start's owners: SPLIT, MERGED, INCREASED, LOST.
 #[test]
 fn region_land_masses_on_the_europe_start() {
     use ntw_sim::campaign::region_value::GroupChange;
@@ -1256,7 +1257,7 @@ fn region_land_masses_on_the_europe_start() {
     }
     let db = GameDatabase::from_install(&dir).expect("database");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let bytes = files.read("campaigns/eur_napoleon/startpos.esf").expect("startpos");
     let mut loaded = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("loads");
     assert!(loaded.model.world.ai_areas.iter().any(|a| !a.hlcis.is_empty()), "the CAI regions' HLCIs");
@@ -1276,6 +1277,25 @@ fn region_land_masses_on_the_europe_start() {
     let groups = m.region_groups();
     let corsica = id("eur_corsica");
     assert_eq!(groups.change(corsica, m.world.regions[&corsica].owner), GroupChange::Lost);
+    // More factions on the 1805 owners: a hub region SPLITS its owner's group (Wales and Scotland
+    // join only through England; France's provinces through Paris), the Ottomans' Wallachia too.
+    let faction = |k: &str| m.world.factions.values().find(|f| f.key == k).unwrap_or_else(|| panic!("{k}")).id;
+    let change = |r: &str, f: &str| groups.change(id(r), faction(f));
+    assert_eq!(m.world.regions[&id("eur_hannover")].owner, faction("france"));
+    assert_eq!(m.world.regions[&id("eur_cleves_mark")].owner, faction("prussia"));
+    assert_eq!(change("eur_england", "britain"), GroupChange::Split);
+    assert_eq!(change("eur_france", "france"), GroupChange::Split);
+    assert_eq!(change("eur_wallachia", "ottomans"), GroupChange::Split);
+    assert_eq!(change("eur_wallachia", "austria"), GroupChange::Increased, "Austria's one group beside it");
+    assert_eq!(change("eur_hungary", "austria"), GroupChange::Split);
+    // France's Hannover lies between Prussia's Cleves-Mark (a group of its own) and Brandenburg:
+    // MERGED for Prussia; it is a group of its own for France (LOST). Cleves-Mark in turn lies
+    // between Hannover and France's Flanders-Wallonia: MERGED for France.
+    assert_eq!(change("eur_hannover", "prussia"), GroupChange::Merged);
+    assert_eq!(change("eur_hannover", "france"), GroupChange::Lost);
+    assert_eq!(change("eur_cleves_mark", "prussia"), GroupChange::Lost);
+    assert_eq!(change("eur_cleves_mark", "france"), GroupChange::Merged);
+    assert_eq!(change("eur_hannover", "denmark"), GroupChange::Increased);
 }
 
 /// The campaign director's state in the original's own save (CDIR_INTERFACE v3, loader
@@ -1435,7 +1455,7 @@ fn mobiles_are_situated_in_the_region_under_them() {
     let source = EsfFile::open(&p).expect("esf");
     let loaded = ntw_campaign::read_esf(&source, &db).expect("loads");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let map = ntw_formats::campaign_map::CampaignMap::load(&ntw_formats::campaign_map::GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
+    let map = ntw_formats::campaign_map::CampaignMap::load(&ntw_formats::pack::GameFiles { vfs: &vfs }, &loaded.info.map_key).expect("map");
     let grid = ntw_campaign::pathing::build_grid(&map);
     let world = source.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD").expect("CAI_WORLD");
     let items = |list: &str| -> Vec<Vec<EsfNode>> { world.record_array(list).into_iter().flat_map(|a| a.items.iter().cloned()).collect() };

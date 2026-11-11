@@ -35,10 +35,11 @@
 //! | 9 | the running economics record's expense trackers: each faction's land and naval upkeep trackers (`World::upkeep_booked`) and each region's policing tracker (`PopulationState::policing_booked`), with the policing cost (`PopulationState::policing_cost`); an older save's trackers take what its running record holds (see [`read_with_start`]) |
 //! | 10 | each faction's diplomacy records keep their order (`World::diplomacy_record_order`, the order the allies of a war are called in); an older save takes it from the campaign's start, or without one walks the records by faction id (see [`read_with_start`]) |
 //! | 11 | the region manager's order (`World::region_order`, the order each faction's region list follows after a load); an older save takes it from the campaign's start, or without one walks the regions by id (see [`read_with_start`]) |
-//! | 12 | the director's stored CAI relation beliefs keep their ally list (`RelationBelief::allies`); an older save's stored beliefs get it rebuilt from the loaded world, which leaves off an ally destroyed since the belief was stored (see [`read_with_start`]) |
+//! | 12 | the director's stored CAI relation beliefs keep their ally list (`RelationBelief::allies`); an older save's stored beliefs get it rebuilt from the loaded world, which leaves off an ally destroyed since the belief was stored, and, in a save without the out-of-game flag (`out_of_game: None`), an ally the startpos rule counts out of the game (see [`read_with_start`]) |
 //! | 13 | risen armies keep their side in the rising (`World::rebel_army_sides`: the `REBEL_SETUP` faction and the `REBEL_DATA` +0x34 value, which the capture report reads); an older save has none and nothing holds them (the start has no risen army of the save), so its risen armies never skip the capture choice; the load warns once with their count. The CAI random stream (`CampaignModel::cai_rng`, `CAI_INTERFACE` #0); an older save starts it from the exe preset (see [`read_with_start`])
 //! | 14 | regions keep their demand per commodity (`Region::commodity_demand`, `REGION` #32), which the load leaves as stored; an older save's regions get it from the demand step on the save's own GDP and town wealth (see [`read_with_start`]) |
 //! | 15 | the CAI map areas keep their high level connectivity indexes (`AiArea::hlcis`, `CAI_REGION` #1), from which the regions' land masses are built at map attach; an older save's areas take them from the campaign's start, or without one every region counts as lying on one land mass, with a warning (see [`read_with_start`]) |
+//! | 16 | regions keep their fortification damage entries (`SiegeState::fortifications`, `FORTIFICATIONS_BLOCK`); an older save takes them from the campaign's start, or without one keeps none, with a warning (see [`read_with_start`]) |
 //!
 //! **What is saved.** The whole [`CampaignModel`] except the fields marked `serde(skip)` in
 //! `ntw_sim`: game data rebuilt on load (`rules` from the DB, `terrain` and the regions' land masses from the map), fields the
@@ -61,7 +62,7 @@ use crate::{CampaignInfo, LoadError, LoadedCampaign};
 /// The first bytes of every save in this format.
 pub const MAGIC: &[u8; 16] = b"NAPOLEONRUST\0SAV";
 /// The format version this build writes and the newest it reads.
-pub const FORMAT_VERSION: u32 = 15;
+pub const FORMAT_VERSION: u32 = 16;
 
 /// Everything a save holds besides its header.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -238,6 +239,23 @@ pub fn read_info(bytes: &[u8]) -> Result<CampaignInfo, FormatError> {
     decode(sections(bytes)?.1)
 }
 
+/// Reads a save's start from `reader` up to the end of its header section, without the body: the
+/// magic, version and header length, then as many bytes as the length says (fewer when the file ends
+/// first; [`read_info`] of them then gives [`FormatError::Truncated`]). `None` when the bytes do not
+/// start with [`MAGIC`].
+pub fn read_head(reader: &mut impl Read) -> std::io::Result<Option<Vec<u8>>> {
+    let mut head = Vec::with_capacity(MAGIC.len() + 8);
+    reader.by_ref().take(MAGIC.len() as u64 + 8).read_to_end(&mut head)?;
+    if !is_own_save(&head) {
+        return Ok(None);
+    }
+    // The length word; a file cut short before it reads as truncated.
+    if let Some(len) = head.get(MAGIC.len() + 4..).and_then(|w| Some(u32::from_le_bytes(w.try_into().ok()?))) {
+        reader.take(u64::from(len)).read_to_end(&mut head)?;
+    }
+    Ok(Some(head))
+}
+
 /// The header and the body exactly as stored (the model without rules), with the save's format
 /// version. A body older than [`FORMAT_VERSION`] is not converted: it lacks what [`read_with_start`]
 /// adds (a version-1 save's regions have no unit resources here).
@@ -266,7 +284,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 
 /// [`read`], converting a save older than [`FORMAT_VERSION`] from `start`, the campaign at its start
 /// (its source's [`new_campaign`](crate::source::CampaignSource::new_campaign) model), called only
-/// for a save older than version 11, or older than version 15 when it holds CAI map areas:
+/// for a save older than version 16:
 /// * version 1 → 2: every region takes the unit resources (`RESOURCES_ARRAY`) of the start's region
 ///   of the same key. Nothing in the campaign changes a region's resources, so the start's are the
 ///   ones the save would hold. A region the start does not have fails the load: never a region left
@@ -277,7 +295,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   only when its faction loses the region (`CampaignModel::change_region_owner` clears it with every
 ///   slot that faction holds), so this is exact whenever the start's holder also held a slot there
 ///   (or was the start's owner, kept while it still owns the region); any other holder is kept and logged.
-/// * version 3 → 4, with no start: a repair stored as a build of the standing building's level becomes a
+/// * version 3 → 4, which needs no start: a repair stored as a build of the standing building's level becomes a
 ///   repair item (`CampaignModel::convert_legacy_repairs`, once the rules are attached). A version 1 or 2
 ///   save also predates construction at the round end: its factions stepped construction at their own turn
 ///   start, so those up to the one whose turn it is (the save is made in it) have run this round's step
@@ -285,15 +303,15 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   in a slot its region's owner holds, or a repair; never the rebels', which no longer step) gets that
 ///   turn back, once. A version 3 save written by a build of the hour before the round-end change has the
 ///   same extra step but cannot be told from a later one, and is read as it is.
-/// * version 4 → 5, with no start: each trade route whose first hop is a sea hop from its exporter's capital
+/// * version 4 → 5, which needs no start: each trade route whose first hop is a sea hop from its exporter's capital
 ///   is a capital port route (`TradePath::capital_port`), as every route of the original's saves shows
 ///   (INFERRED for a capital that moved after the route was made).
-/// * version 5 → 6, with no start: every stored treaty-break count (diplomacy manager +0x1C) gets 1 added: older
+/// * version 5 → 6, which needs no start: every stored treaty-break count (diplomacy manager +0x1C) gets 1 added: older
 ///   builds counted it from 0 where the exe presets 1 (`0x00AE8DD0` / `0x00AE8E10`), and a faction with no
 ///   entry already reads the preset. The access-abuse counts (+0x18) were not kept (`World::access_abuses`
 ///   reads 0, the exe's preset, as older builds charged every abuse at count 0); the other two counters
 ///   already started at the exe's 0.
-/// * version 6 → 7, with no start: an older save kept one accumulated trade value per (exporter, importer)
+/// * version 6 → 7, which needs no start: an older save kept one accumulated trade value per (exporter, importer)
 ///   pair (`World::trade_accumulated`), the sum of its routes' (+0x3C, `0x00B05CC0`). A pair with stored routes
 ///   gets it on its first route (`TradePath::accumulated`): the pair's total is kept, its split over the routes
 ///   was not; a pair without one keeps it as its built route's value.
@@ -302,7 +320,7 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   (`TradeLeg::splines`) and each trade segment the curves of the start's segment of the same index
 ///   (`TradeSegmentSight::curves`). Without a usable start the load goes on with a warning and no segment can
 ///   be raided.
-/// * version 8 → 9, with no start: an older save has no expense trackers; it paid the upkeep it wrote into the
+/// * version 8 → 9, which needs no start: an older save has no expense trackers; it paid the upkeep it wrote into the
 ///   running record's categories 19 / 20 at each round end, which become the faction's upkeep trackers, and each
 ///   region's policing tracker starts at 0, so the running record is rebuilt as a load leaves it
 ///   (`ntw_sim::campaign::economy::rebuild_running_record`: category 21 the regions' sum, 0; the categories no
@@ -336,14 +354,22 @@ pub fn read(bytes: &[u8], db: &GameDatabase) -> Result<LoadedCampaign, FormatErr
 ///   them). An area the start does not have keeps none, counted in one warning. Without a usable start the
 ///   load goes on with a warning and the region groups take every region to lie on one land mass. A save
 ///   with no CAI areas (a map without them, or an own save written before `World::ai_areas` was stored,
-///   which reads them empty) has nothing to take and does not read the start.
+///   which reads them empty) has nothing to take.
+/// * version 15 → 16: an older save's regions hold no fortification damage entries
+///   (`SiegeState::fortifications`, `FORTIFICATIONS_BLOCK`, which the siege's wall damage, a capture and a
+///   walls repair read and write). Each region takes the entries of the start's region of the same key. That
+///   is exact but for one case: before format 16 nothing in our model changed them, and a walls item that
+///   finished then added none (the original adds the default entries, `0x00B143E0`), so such walls get them at
+///   their next finished walls item. A region the start does not have keeps none, counted in one warning;
+///   without a usable start the load goes on with a warning and only walls whose walls item finishes after the
+///   load take siege damage.
 pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> Result<CampaignModel, String>) -> Result<LoadedCampaign, FormatError> {
     let (version, info, data) = read_stored(bytes)?;
     let mut model = data.model;
-    // Only the steps before version 11, and the land-mass step of a save with CAI areas, need the
-    // start (built here, once, before the steps).
+    // Every save older than version 16 needs the start (its fortification damage; built here, once,
+    // before the steps).
     let needs_hlcis = version < 15 && !model.world.ai_areas.is_empty();
-    let start = (version < 11 || needs_hlcis).then(start);
+    let start = (version < 16).then(start);
     if version < 3 {
         let fail = |reason: String| FormatError::NeedsStart { found: version, reason };
         let start = match &start {
@@ -445,10 +471,24 @@ pub fn read_with_start(bytes: &[u8], db: &GameDatabase, start: impl FnOnce() -> 
             None => {}
         }
     }
-    // A save from before the victory conditions were kept reads none (`World::victory_conditions`).
+    if version < 16 {
+        match &start {
+            Some(Ok(start)) => {
+                let (taken, unknown) = copy_fortifications(&mut model, start);
+                log::info!("Own save format version {version}: the fortification damage of {taken} regions taken from the campaign's start");
+                if unknown > 0 {
+                    log::warn!("Own save format version {version}: {unknown} regions are not in the campaign's start and keep no fortification damage entries (their walls take no siege damage until a walls item finishes there)");
+                }
+            }
+            Some(Err(e)) => log::warn!("Own save format version {version}: the regions' fortification damage was not restored (no campaign start: {e}); no walls take siege damage until a walls item finishes there"),
+            None => {}
+        }
+    }
+    // A save from before the victory conditions were kept reads none (`World::victory_conditions`), and
+    // so does one of a campaign whose map gives no victory options (an open-format map).
     let without = model.turn.humans.iter().filter(|h| !model.world.victory_conditions.contains_key(h)).count();
     if without > 0 {
-        log::warn!("Own save: {without} human factions have no victory conditions record (a save from before they were kept has none); the victory test never decides for them");
+        log::warn!("Own save: {without} human factions have no victory conditions record (a save from before they were kept, or of a map without victory options, has none); the victory test never decides for them");
     }
     finish_load(&mut model);
     Ok(LoadedCampaign {
@@ -497,6 +537,24 @@ fn copy_area_hlcis(model: &mut CampaignModel, start: &CampaignModel) -> (usize, 
             Some(s) => {
                 a.hlcis.clone_from(&s.hlcis);
                 taken += 1;
+            }
+            None => unknown += 1,
+        }
+    }
+    (taken, unknown)
+}
+
+/// The version 15 → 16 step of [`read_with_start`]: each region takes the fortification damage entries of the
+/// start's region of the same key; returns how many regions took entries and how many regions the start did
+/// not have (those keep none).
+fn copy_fortifications(model: &mut CampaignModel, start: &CampaignModel) -> (usize, usize) {
+    let by_key: std::collections::BTreeMap<&str, &ntw_sim::campaign::Region> = start.world.regions.values().map(|r| (r.key.as_str(), r)).collect();
+    let (mut taken, mut unknown) = (0, 0);
+    for r in model.world.regions.values_mut() {
+        match by_key.get(r.key.as_str()) {
+            Some(s) => {
+                r.siege.fortifications.clone_from(&s.siege.fortifications);
+                taken += usize::from(!s.siege.fortifications.is_empty());
             }
             None => unknown += 1,
         }

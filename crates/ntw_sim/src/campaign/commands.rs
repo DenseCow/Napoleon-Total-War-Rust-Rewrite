@@ -126,13 +126,31 @@ pub enum CampaignCommand {
         /// The force receiving them.
         into: ForceId,
     },
-    /// Move into a settlement: an own settlement is entered; an enemy one (at war) is occupied if
-    /// undefended, else assaulted (pending battle).
+    /// Move into a settlement: an own settlement is entered; an enemy one (at war) is besieged and,
+    /// when the army can assault it now, assaulted (pending battle) or, undefended, taken; a rebel
+    /// exception occupies it at once (see [`CampaignModel::attack_settlement`](super::CampaignModel::attack_settlement)).
     EnterSettlement {
         /// The force.
         force: ForceId,
         /// The region whose settlement to enter.
         region: RegionId,
+    },
+    /// The attack order with its hold byte set (the attack command's byte handed to the attack entry
+    /// `0x00916980`, order +0x120, step +0x5C; CONFIRMED by decompile): as
+    /// [`CampaignCommand::EnterSettlement`], but an army that lays siege waits instead of assaulting.
+    BesiegeSettlement {
+        /// The force.
+        force: ForceId,
+        /// The region whose settlement to besiege.
+        region: RegionId,
+    },
+    /// Assault the settlement the army besieges (`CCQ_INITIATE_SIEGE_ASSAULT`, handler `0x009365D0`
+    /// registered with its name by `0x00421B00`, CONFIRMED by decompile and disassembly): when it
+    /// can assault now (`0x008B26C0`), the assault starts (`0x008E1A90`; see
+    /// [`CampaignModel::assault_command`](super::CampaignModel::assault_command)).
+    AssaultSettlement {
+        /// The besieging army.
+        force: ForceId,
     },
     /// A character without a force walks into a settlement and stays inside as one of its residents
     /// (the move-to-residence order `0x009549B0` → command execute `0x0095B7F0` → `0x0091BE30`, whose
@@ -273,6 +291,13 @@ pub enum CampaignCommand {
     /// [`CampaignModel::end_blockade`](super::CampaignModel::end_blockade), [`super::port_blockade`]).
     EndBlockade {
         /// The blockading navy's commander.
+        character: CharacterId,
+    },
+    /// End the siege of the army a character commands (`CCQ_CHARACTER_END_SIEGE`, handler `0x00932760`
+    /// registered with its name by `0x00420080`, CONFIRMED by disassembly;
+    /// [`CampaignModel::end_siege_command`](super::CampaignModel::end_siege_command)).
+    EndSiege {
+        /// The besieging army's commander.
         character: CharacterId,
     },
     /// Dismiss a minister (`0x008EB9D0`; see [`super::family`]): he leaves, the post is refilled.
@@ -778,15 +803,20 @@ impl CampaignModel {
 
     /// `CharacterCreated` for every character that exists now and is not in `known`, in id order.
     pub(crate) fn created_since(&self, known: &std::collections::BTreeSet<CharacterId>) -> Vec<CampaignEvent> {
-        self.world.characters.keys().filter(|c| !known.contains(c)).map(|&character| CampaignEvent::CharacterCreated { character }).collect()
+        self.world
+            .characters
+            .iter()
+            .filter(|(c, _)| !known.contains(c))
+            .map(|(&character, c)| CampaignEvent::CharacterCreated { character, agent_type: Some(c.kind) })
+            .collect()
     }
 
     /// Validates and applies one command. On success returns the events it caused; on failure the
     /// model is left as it was, except the path grid's stored view a rebel's force order sets first,
     /// the standing order a force order refused for its action points (or, but for an army's move,
     /// for its path) ends, and the siege or blockade a character's order ends when it starts
-    /// ([`Self::begin_order`]: the exe ends them before it creates the order, so they stay ended when
-    /// the order then finds no path or no action points; an army's move without a path is refused
+    /// ([`Self::begin_order`]: the exe ends them in the order's execute, so they stay ended when the
+    /// execute then finds no path or no action points; an army's move without a path is refused
     /// before that, [`Self::move_order`]).
     pub fn apply(&mut self, cmd: CampaignCommand) -> Result<Vec<CampaignEvent>, CommandError> {
         if matches!(cmd, CampaignCommand::EndTurn) {
@@ -809,9 +839,10 @@ impl CampaignModel {
             self.store_rebel_view(force);
         }
         let commander = force.and_then(|f| self.world.forces.get(&f)).and_then(|f| f.commander);
-        // An army's move, whose pre-check asks for a path before the order is run (below).
+        // An army's move, whose pre-check asks for a path before the order is run (below). Without a
+        // commander no standing order is ended, so the test needs only his.
         let army_move = matches!(cmd, CampaignCommand::MoveForce { .. } | CampaignCommand::MoveCharacter { .. })
-            && force.and_then(|f| self.world.forces.get(&f)).is_some_and(|f| !f.is_navy);
+            && commander.is_some_and(|c| self.moves_as_army(c));
         let mut out = self.apply_inner(cmd);
         // A force order replaces its commander's standing order (`World::standing_orders`) once it
         // is given, also when its execute then finds no path or no action points (CONFIRMED by
@@ -880,7 +911,7 @@ impl CampaignModel {
     ///    holds the pending battle's two side lists (+0x68 / +0x6C,
     ///    `FindPendingBattleSideMemberForFaction` `0x008C1970`), and the save gate
     ///    `CanFactionSaveCampaign` `0x008BE4A0` lets a side save at stage 1, so stages 1-7 are taken
-    ///    for ours' pending battle; what sets each stage is not traced;
+    ///    for our pending battle; what sets each stage is not traced;
     /// 2. something waits on the pending-action stack (+0xF70): refused while the stack has an entry
     ///    (`HasNonNullFirstEntry` `0x005865E0`, CONFIRMED by decompile). A capture waiting for its
     ///    choice, held behind the victory screen or not, and a call to war waiting for the human ally's
@@ -910,8 +941,13 @@ impl CampaignModel {
             | CampaignCommand::AttackForce { force, .. }
             | CampaignCommand::MergeForces { force, .. }
             | CampaignCommand::EnterSettlement { force, .. }
+            | CampaignCommand::BesiegeSettlement { force, .. }
             | CampaignCommand::Embark { force, .. }
             | CampaignCommand::Disembark { force, .. } => Some(force),
+            // The assault and the end of a siege are no force orders: `CCQ_INITIATE_SIEGE_ASSAULT`
+            // (`0x009365D0`) calls `0x008B26C0` and the assault `0x008E1A90` directly, and
+            // `CCQ_CHARACTER_END_SIEGE` (`0x00932760`) calls `0x008BD550`; neither goes through the order
+            // step `0x00A645C0` that stores the view (CONFIRMED, disassembly), so they store none.
             _ => None,
         }
     }
@@ -977,6 +1013,8 @@ impl CampaignModel {
             CampaignCommand::AttackForce { force, target } => self.refuse_aboard(force).and_then(|()| self.attack(force, target)),
             CampaignCommand::MergeForces { force, into } => self.refuse_aboard(force).and_then(|()| self.merge(force, into)),
             CampaignCommand::EnterSettlement { force, region } => self.refuse_aboard(force).and_then(|()| self.enter_settlement(force, region)),
+            CampaignCommand::BesiegeSettlement { force, region } => self.refuse_aboard(force).and_then(|()| self.attack_settlement(force, region, false, true)),
+            CampaignCommand::AssaultSettlement { force } => self.assault_command(force),
             CampaignCommand::AgentEnterSettlement { agent, region } => self.agent_enter_settlement(agent, region),
             CampaignCommand::JoinGarrison { character, region } => self.join_garrison(character, region),
             CampaignCommand::Autoresolve => self.autoresolve(),
@@ -992,6 +1030,7 @@ impl CampaignModel {
             CampaignCommand::RepairShip { force, unit } => self.order_ship_repair(force, unit),
             CampaignCommand::ToggleShipRepair { force, unit } => self.toggle_ship_repair(force, unit),
             CampaignCommand::EndBlockade { character } => self.end_blockade(character),
+            CampaignCommand::EndSiege { character } => self.end_siege_command(character),
             CampaignCommand::DismissMinister { minister } => self.dismiss_minister(minister),
             CampaignCommand::AppointMinister { a, b } => self.appoint_minister(a, b),
             CampaignCommand::SetTaxLevel { faction, class, level } => self.set_tax_level(faction, class, level),
@@ -1217,17 +1256,26 @@ impl CampaignModel {
     /// [`CommandError::NoPath`] before the order starts when there is no path: its pre-check
     /// (`0x00924790`, the path query `0x00B17A10` with no cost limit; see [`Self::apply`]) runs before
     /// RunCharacterOrder `0x009651A0` and so before the execute's order start (`0x008FF470`), and the
-    /// siege stays. The execute then searches again, as ours does in the walk.
+    /// siege stays. The execute then searches again, as ours does in the walk. The pre-check's path is
+    /// not reused: the order's start ([`Self::begin_order`]) can end the army's siege, which puts the
+    /// besieged garrison's obstacle back (the zones skip a besieged garrison, `besieged_garrison`), so
+    /// the second search can differ.
     pub(crate) fn move_order(&mut self, character: CharacterId, to: (Fixed20, Fixed20)) -> Result<Walk, CommandError> {
         if let Some(navy) = self.force_of_kind(character, true)
             && let Some(port) = self.hostile_port_at(navy, to)
         {
             return self.port_order(character, navy, port, to);
         }
-        if self.force_of_kind(character, false).is_some() && self.plan_path_with(character, to, false).is_none() {
+        if self.moves_as_army(character) && self.plan_path_with(character, to, false).is_none() {
             return Err(CommandError::NoPath);
         }
         self.walk(character, to, false)
+    }
+
+    /// `character`'s move is an army's move, the one whose pre-check asks for a path first
+    /// ([`Self::move_order`], [`Self::apply`]): he commands an army.
+    fn moves_as_army(&self, character: CharacterId) -> bool {
+        self.force_of_kind(character, false).is_some()
     }
 
     /// A character's order to move towards `to`: the order starts ([`Self::begin_order`]: his army's
@@ -1262,10 +1310,13 @@ impl CampaignModel {
     }
 
     /// Moves a character along the planned path `plan` towards its point `target_idx`, as far as its
-    /// action points reach (`plan.reachable`); he has arrived when he gets there. Errors (and changes
-    /// nothing) if he cannot move at all.
+    /// action points reach (`plan.reachable`); he has arrived when he gets there. A hidden enemy's zone
+    /// on the way may spring an ambush ([`Self::ambush_on_walk`]): the walk stops there, charged the
+    /// path's cost up to that point (INFERRED: the exe charges each step it took), and the ambush battle
+    /// is set up ([`Self::spring_ambush`]); he has not arrived then. Errors (and changes nothing) if he
+    /// cannot move at all.
     pub(crate) fn walk_planned(&mut self, character: CharacterId, plan: &PlannedMove, target_idx: usize) -> Result<Walk, CommandError> {
-        let pts = &plan.path.points;
+        let (pts, costs) = (&plan.path.points, &plan.path.costs);
         let end = plan.reachable.min(target_idx);
         let ch = &self.world.characters[&character];
         let available = ch.movement_points;
@@ -1273,11 +1324,20 @@ impl CampaignModel {
             if target_idx == 0 {
                 return Ok(Walk { events: Vec::new(), arrived: true });
             }
-            return Err(CommandError::NotEnoughMovementPoints { needed: plan.path.costs[1].ceil() as i32, available });
+            return Err(CommandError::NotEnoughMovementPoints { needed: costs[1].ceil() as i32, available });
         }
-        let spent = (plan.path.costs[end].ceil() as i32).min(available);
-        let new_pos = (Fixed20::from_f64(pts[end].0 as f64), Fixed20::from_f64(pts[end].1 as f64));
-        let path: Vec<(f32, f32)> = pts[..=end].to_vec();
+        let ambush = self.ambush_on_walk(character, &pts[..=end]);
+        let (path, cost) = match ambush {
+            Some(a) => {
+                let (i, t) = (a.segment, a.along);
+                let stop = (pts[i].0 + (pts[i + 1].0 - pts[i].0) * t, pts[i].1 + (pts[i + 1].1 - pts[i].1) * t);
+                (pts[..=i].iter().copied().chain(std::iter::once(stop)).collect::<Vec<_>>(), costs[i] + (costs[i + 1] - costs[i]) * t)
+            }
+            None => (pts[..=end].to_vec(), costs[end]),
+        };
+        let spent = (cost.ceil() as i32).min(available);
+        let stop = path[path.len() - 1];
+        let new_pos = (Fixed20::from_f64(stop.0 as f64), Fixed20::from_f64(stop.1 as f64));
         self.leave_garrison(character);
         // A navy leaves its port and carries its embarked armies along.
         self.move_character(character, new_pos);
@@ -1285,7 +1345,7 @@ impl CampaignModel {
         ch.movement_points -= spent;
         let mut events = vec![CampaignEvent::CharacterMoved { character, path }];
         if available > 0 && ch.movement_points <= 0 {
-            events.push(CampaignEvent::MovementPointsExhausted { character });
+            events.push(CampaignEvent::MovementPointsExhausted { character, agent_type: Some(ch.kind) });
         }
         // The walk's last step sets him down ([`Self::set_down`]): the step mover `0x00972CA0` passes 1
         // when the current waypoint is the path's last and no order object is left (`0x00972EB1`,
@@ -1295,6 +1355,10 @@ impl CampaignModel {
         // (character +0x9C) passes its finished flag at `0x00973A01`; which branch ends a walk that
         // runs out of points is not traced (PATHFINDING.md §8).
         self.set_down(character);
+        if let Some(a) = ambush {
+            events.extend(self.spring_ambush(a.ambusher, character));
+            return Ok(Walk { events, arrived: false });
+        }
         Ok(Walk { events, arrived: end == target_idx })
     }
 
@@ -1321,7 +1385,7 @@ impl CampaignModel {
             if !may {
                 return Err(CommandError::Unsupported("the docked navy has already attacked its blockader"));
             }
-            self.pending_battle = Some(PendingBattle { attacker: force, defenders: vec![target], settlement: None, resume: None });
+            self.pending_battle = Some(PendingBattle { attacker: force, defenders: vec![target], settlement: None, resume: None, ambush: false });
             return Ok(vec![CampaignEvent::PreBattle { attacker: force }]);
         }
         let to = self.force_position(target).ok_or(CommandError::UnknownForce(target))?;
@@ -1334,7 +1398,7 @@ impl CampaignModel {
                 Some(r) => self.defenders_of(r),
                 None => vec![target],
             };
-            self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement, resume: None });
+            self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement, resume: None, ambush: false });
             events.push(CampaignEvent::PreBattle { attacker: force });
         }
         Ok(events)
@@ -1371,9 +1435,11 @@ impl CampaignModel {
     /// faction's turn start) and its standing order ([`Self::resume_standing_orders`]) share it. The exe's move-to-character order (execute `0x0095BA40`,
     /// builder `0x0091CED0`) pushes the same exchange step as the residence order (`0x009081F0`),
     /// so the arrival is [`Self::exchange_on_arrival`]. Neither the execute nor the builder calls
-    /// the fit `0x008B2720` (CONFIRMED: the execute's callee list, the builder's decompile; the
-    /// execute's helper `0x008FD870` is not read): a full receiver does not refuse the order, the
-    /// arrival decides.
+    /// the fit `0x008B2720` (CONFIRMED: the execute's callee list, the builder's decompile), nor do
+    /// the two helpers the execute asks first (`0x008FD870` at `0x0095BC1E` / `0x0095BC49`,
+    /// `0x008FD580` at `0x0095BC5C`; which one is picked by what the order's object +0x118
+    /// resolves) (CONFIRMED for their own callee lists; their callees' callees are not read): a
+    /// full receiver does not refuse the order, the arrival decides.
     pub(crate) fn march_and_merge(&mut self, c: CharacterId, force: ForceId, into: ForceId) -> Result<Walk, CommandError> {
         let a = &self.world.forces[&force];
         let b = self.world.forces.get(&into).ok_or(CommandError::UnknownForce(into))?;
@@ -1461,7 +1527,7 @@ impl CampaignModel {
     /// (his +0x14C slot 8, the +0x900 dispatcher), the +0x4E8 building flag (`0x00A0C810` /
     /// `0x009DA300`), `0x008D5F10`'s residence steps at its end (`0x008D6BF6`–`0x008D6C16`) and the
     /// rest of the made commander's `0x009D3B60` (his +0x1C and +0x2EC flags, `0x00A07660`, the
-    /// optional `0x009551D0`, the event `0x01355768`, his +0x520).
+    /// optional `0x009551D0`, a thunk to `0x008CFAF0`, the event `0x01355768`, his +0x520).
     pub(crate) fn merge_units(&mut self, force: ForceId, into: ForceId, events: &mut Vec<CampaignEvent>) {
         let room = self.world.forces.get(&into).map_or(0, |f| self.max_units(f.is_navy).saturating_sub(f.units.len()));
         // What the transfers note on entry: both commanders as they were, and whether they raid.
@@ -1538,11 +1604,12 @@ impl CampaignModel {
                 self.rebuild_force_zones_and_sight(force);
             }
         }
-        // A commander whose force is gone commands nothing now: his zone goes.
+        // A commander whose force is gone, and one the pick replaced, has his zone rebuilt for what he
+        // commands now: none (his zone goes), or the target when its pick made him its commander
+        // ([`Self::rebuild_zone`] then floods it from the target).
         if let Some(c) = commander.filter(|_| empty) {
             self.rebuild_zone(c);
         }
-        // A commander the pick replaced commands nothing now: his zone goes.
         for old in replaced {
             self.rebuild_zone(old);
         }
@@ -1575,20 +1642,24 @@ impl CampaignModel {
     /// command `0x009324F0` and the AI's `0x00AAAE00` call the attack entry `0x00916980` with its
     /// skip-gate flag clear).
     pub(crate) fn enter_settlement(&mut self, force: ForceId, region: RegionId) -> Result<Vec<CampaignEvent>, CommandError> {
-        self.attack_settlement(force, region, false)
+        self.attack_settlement(force, region, false, false)
     }
 
-    /// The attack order into `region`'s settlement. `resumed` is the post-battle resume
+    /// The attack order into `region`'s settlement. `hold` is the attack command's hold byte (handed to
+    /// the attack entry `0x00916980`, kept in order +0x120 and step +0x5C): set, an army that lays siege
+    /// does not assault ([`CampaignCommand::BesiegeSettlement`]). `resumed` is the post-battle resume
     /// (`0x008F7880` at `0x008F85BC` / `0x008F8702`), which calls the attack entry `0x00916980` with
     /// its skip-gate flag set. The entry hands the flag on (builder `0x0091B9E0` → order +0x121,
     /// constructor `0x00906C00`; execute `0x0095D140` → step pusher `0x00917D20` → step +0x5D,
     /// constructor `0x008FFEA0`), and the arrival `0x0094B600` picks the capture by it
-    /// (CONFIRMED, disassembly): set, the assault's capture with its report (`0x00B58560`, settlement
-    /// vtable +0xA0, [`Self::settle_capture`]); clear, the siege ([`Self::walk_in_besieges`]) unless a
-    /// rebel exception takes it without a report (`0x00B58890`, +0xA4, [`Self::occupy`]: no capture
-    /// choice). A settlement's surrender after a battle with no result (`0x008F8AB0`, flags set) takes
+    /// (CONFIRMED, disassembly): with no garrison, set, the assault's capture with its report
+    /// (`0x00B58560`, settlement vtable +0xA0, [`Self::settle_capture`]); clear, the siege
+    /// ([`Self::walk_in_besieges`]) unless a rebel exception takes it without a report (`0x00B58890`,
+    /// +0xA4, [`Self::occupy`]: no capture choice). A garrisoned settlement always takes the siege path:
+    /// the army lays siege ([`Self::start_siege`]) and assaults ([`Self::assault`]) when it can and does
+    /// not hold. A settlement's surrender after a battle with no result (`0x008F8AB0`, flags set) takes
     /// the third variant `0x00B58C00`, not reached here.
-    pub(crate) fn attack_settlement(&mut self, force: ForceId, region: RegionId, resumed: bool) -> Result<Vec<CampaignEvent>, CommandError> {
+    pub(crate) fn attack_settlement(&mut self, force: ForceId, region: RegionId, resumed: bool, hold: bool) -> Result<Vec<CampaignEvent>, CommandError> {
         let c = self.commander_of(force)?;
         let fa = self.world.forces[&force].faction;
         if self.world.forces[&force].is_navy {
@@ -1617,28 +1688,36 @@ impl CampaignModel {
         // An enemy army standing outside the settlement is fought first; the attacker then goes on
         // into the settlement (the battle type with a follow-up target, 0x008F7880 state 7).
         if let Some(blocker) = self.army_outside(region, fa) {
-            self.pending_battle = Some(PendingBattle { attacker: force, defenders: vec![blocker], settlement: None, resume: Some(region) });
+            self.pending_battle = Some(PendingBattle { attacker: force, defenders: vec![blocker], settlement: None, resume: Some(region), ambush: false });
             events.push(CampaignEvent::PreBattle { attacker: force });
             return Ok(events);
         }
-        let defenders = self.defenders_of(region);
-        if defenders.is_empty() {
-            // An undefended settlement. Both captures then send code 211 with the character on the world's
-            // notifier +0x9A8 (`0x0094B804` / `0x0094B885`; no listener traced, not sent) and the army goes inside.
+        let undefended = self.defenders_of(region).is_empty();
+        if undefended && (resumed || !self.walk_in_besieges(force, region)) {
+            // An undefended settlement taken at once. Both captures then send code 211 with the character on
+            // the world's notifier +0x9A8 (`0x0094B804` / `0x0094B885`; no listener traced, not sent) and the
+            // army goes inside.
             if resumed {
-                self.settle_capture(region, fa, Some(force), false, &mut events);
-            } else if self.walk_in_besieges(force, region) {
-                // PROVISIONAL: the exe lays siege here (`0x008AF6A0` at `0x0094B94B`, then the assault
-                // `0x008E1A90` when the order's +0x5C is clear and `0x008B26C0` holds); the model has no siege
-                // start yet (BACKLOG "Sieges on the campaign map"), so it takes the settlement as an assault would.
                 self.settle_capture(region, fa, Some(force), false, &mut events);
             } else {
                 // Only the rebel exceptions of `walk_in_besieges` come here.
                 self.occupy(region, fa, Some(force), &mut events);
             }
-        } else {
-            self.pending_battle = Some(PendingBattle { attacker: force, defenders, settlement: Some(region), resume: None });
-            events.push(CampaignEvent::PreBattle { attacker: force });
+            return Ok(events);
+        }
+        // The siege path of the arrival `0x0094B600` (CONFIRMED, decompile): a settlement another army
+        // besieges first is left to that siege; else the army lays siege unless it already does
+        // (`0x008AF6A0` at `0x0094B94B` when its siege object +0x94 is null), then assaults when the step's
+        // hold flag +0x5C is clear and it can assault now (`0x008B26C0`, [`Self::can_assault_now`]).
+        let siege = &self.world.regions[&region].siege;
+        if siege.besiegers.first().is_some_and(|&first| first != force) {
+            return Ok(events);
+        }
+        if !siege.besiegers.contains(&force) {
+            self.start_siege(force, region);
+        }
+        if !hold && self.can_assault_now(force, region) {
+            self.assault(force, region, &mut events);
         }
         Ok(events)
     }
@@ -1979,7 +2058,8 @@ impl CampaignModel {
 
     /// The entries one building of the region `r` gives its `0x00B43CA0` list (CONFIRMED): each of its
     /// [`Self::building_units`] with the building flags [`Self::recruitable_units`] lists ([`ENTRY_DAMAGED`],
-    /// [`ENTRY_OCCUPIED`] when its slot is `occupied`, [`ENTRY_NO_TECHNOLOGY`] from [`Self::unit_tech_ok`]).
+    /// [`ENTRY_OCCUPIED`] when its slot is `occupied`, [`ENTRY_BESIEGED`] while the settlement is under siege,
+    /// [`ENTRY_NO_TECHNOLOGY`] from [`Self::unit_tech_ok`]).
     /// [`Self::recruitable_units`] merges them over the region; the director's land recruitment belief reads
     /// a slot's own.
     pub(crate) fn building_entries<'a>(
@@ -1989,7 +2069,7 @@ impl CampaignModel {
         occupied: bool,
     ) -> impl Iterator<Item = (&'a String, u32)> + 'a {
         let flag = |on: bool, flag: u32| if on { flag } else { 0 };
-        let building_flags = flag(b.is_damaged(), ENTRY_DAMAGED) | flag(occupied, ENTRY_OCCUPIED);
+        let building_flags = flag(b.is_damaged(), ENTRY_DAMAGED) | flag(occupied, ENTRY_OCCUPIED) | flag(r.siege.under_siege(), ENTRY_BESIEGED);
         self.building_units(r, b).map(move |u| (u, building_flags | flag(!self.unit_tech_ok(r.owner, u), ENTRY_NO_TECHNOLOGY)))
     }
 
@@ -2004,8 +2084,8 @@ impl CampaignModel {
     /// the building flags that make it unavailable:
     /// * [`ENTRY_DAMAGED`] when the building's health is below 100;
     /// * [`ENTRY_OCCUPIED`] when the slot is held by another faction than the region's owner (`0x00A91FC0`);
-    /// * [`ENTRY_BESIEGED`] when the settlement is under siege (its `IsUnderSiege` virtual +0x98): never set,
-    ///   the campaign model has no sieges yet (BACKLOG "Sieges on the campaign map");
+    /// * [`ENTRY_BESIEGED`] when the settlement is under siege (its `IsUnderSiege` virtual +0x98,
+    ///   [`super::siege::SiegeState::under_siege`]);
     /// * [`ENTRY_NO_TECHNOLOGY`] when one of the unit's required technologies is not researched (`0x008AAB60`:
     ///   every `unit_required_technology_junctions` technology, linked by `0x00EA9B10`, must be in state 0).
     ///
@@ -2595,6 +2675,13 @@ impl CampaignModel {
     /// Public for test tooling (the save-compatibility test saves); the turn calls it when a
     /// recruitment item completes.
     pub fn spawn_recruited_unit(&mut self, region: RegionId, unit_key: String) -> Option<CampaignEvent> {
+        self.spawn_recruited_unit_at(region, unit_key, None)
+    }
+
+    /// [`Self::spawn_recruited_unit`] with the land place already found (`known`, from
+    /// [`Self::land_recruit_place`] with nothing changed since), so it is not searched again; `None`
+    /// searches. Ignored for a naval unit.
+    pub(super) fn spawn_recruited_unit_at(&mut self, region: RegionId, unit_key: String, known: Option<LandRecruitPlace>) -> Option<CampaignEvent> {
         let naval = self.rules.units.get(&unit_key).is_some_and(|r| r.is_naval);
         let reg = &self.world.regions[&region];
         let owner = reg.owner;
@@ -2604,7 +2691,7 @@ impl CampaignModel {
             (join, port, false)
         } else {
             // With no place nothing is raised, and the caller reports it.
-            match self.land_recruit_place(region)? {
+            match known.or_else(|| self.land_recruit_place(region))? {
                 LandRecruitPlace::NewGarrison => (None, reg.settlement.position, true),
                 LandRecruitPlace::Join(id) => (Some(id), reg.settlement.position, false),
                 LandRecruitPlace::Outside(spot) => (None, spot, false),
@@ -2873,7 +2960,7 @@ pub const ENTRY_NO_POPULATION: u32 = 0x04;
 pub const ENTRY_DAMAGED: u32 = 0x08;
 /// Recruitable entry flag: the building's slot is held by another faction than the region's owner.
 pub const ENTRY_OCCUPIED: u32 = 0x10;
-/// Recruitable entry flag: the settlement is under siege (never set: the campaign model has no sieges yet).
+/// Recruitable entry flag: the settlement is under siege ([`super::siege::SiegeState::under_siege`]).
 pub const ENTRY_BESIEGED: u32 = 0x20;
 /// Recruitable entry flag: the faction holds and has queued as many units of the type as its cap allows.
 pub const ENTRY_UNIT_CAP: u32 = 0x40;

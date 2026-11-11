@@ -265,6 +265,26 @@ pub fn ui_virtual_screen(window: Vec2) -> Vec2 {
     window / ui_scale(window)
 }
 
+/// What a HUD's sprites were last drawn for: its UI tree's generation and the window size. The draw
+/// scale and centre follow the window, and two windows with the same virtual screen (1024x768 and
+/// 800x600 both lay out in 1280x960) leave the layout, and so its generation, unchanged, so a HUD
+/// redraws when either differs. The one redraw test of the front end and the campaign and battle HUDs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawnFor {
+    pub generation: u64,
+    pub screen: Vec2,
+}
+
+impl DrawnFor {
+    /// Nothing drawn yet (or a redraw forced): differs from every tree and window.
+    pub const NOTHING: Self = Self { generation: u64::MAX, screen: Vec2::ZERO };
+
+    /// Whether sprites drawn for `self` are out of date for this tree generation and window.
+    pub fn stale(&self, generation: u64, screen: Vec2) -> bool {
+        *self != Self { generation, screen }
+    }
+}
+
 /// A window point (pixels, top-left origin) in the virtual screen (the inverse of the draw
 /// mapping, as `0x0119B270`).
 pub fn window_to_ui(p: Vec2, window: Vec2) -> Vec2 {
@@ -434,6 +454,19 @@ pub fn spawn_world(world: &UiWorld, root: NodeId, commands: &mut Commands, asset
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The redraw test of every HUD (front end, campaign, battle): a resize to a window with the same
+    /// virtual screen keeps the tree's generation but changes the draw scale, so it redraws too.
+    #[test]
+    fn a_hud_redraws_for_a_new_tree_or_a_new_window() {
+        let (small, smaller) = (Vec2::new(1024.0, 768.0), Vec2::new(800.0, 600.0));
+        assert!(ui_virtual_screen(small).abs_diff_eq(ui_virtual_screen(smaller), 1e-3));
+        assert!(DrawnFor::NOTHING.stale(0, small), "nothing drawn yet");
+        let drawn = DrawnFor { generation: 7, screen: small };
+        assert!(!drawn.stale(7, small));
+        assert!(drawn.stale(8, small), "the tree changed");
+        assert!(drawn.stale(7, smaller), "same layout, new window");
+    }
 
     /// The window ↔ virtual-screen mapping every HUD uses (`0x0114EB20`, `0x011881C0`,
     /// `0x0119B270`): below 1280x960 the layouts are laid out in window / scale and drawn scaled;

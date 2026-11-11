@@ -9,7 +9,8 @@ use std::sync::{Arc, OnceLock};
 
 use ntw_campaign::{pathing, save, LoadedCampaign};
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::{

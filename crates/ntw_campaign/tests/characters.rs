@@ -7,7 +7,7 @@ mod common;
 use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::db::DbValue;
 use ntw_formats::db_folder::{RawTable, RowKey};
 use ntw_formats::esf::EsfFile;

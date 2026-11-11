@@ -226,8 +226,8 @@ checked).
   (`0x0121609D`). Ours: `mixer::movie_gain` (victoryscreen3, 2026-11-10).
 - Intro order: CONFIRMED 2026-10-04 (§8.3). Front-end movie looping: CONFIRMED (victorytest, 2026-11-10):
   the third argument of `0x004831D0` is option byte +1 of the bink control's open `0x00D9F600`, which hands it
-  to the player's open (vtable 0x01429D90 +12, `0x01215C10`, stored at player +0x59, `0x01215D72`); the player's
-  update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is set and
+  to the open of its movie controller (the Bink player, vtable 0x01429D90 slot +12, `0x01215C10`, stored at
+  controller +0x59, `0x01215D72`); the controller's update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is set and
   closes the movie (vtable +20) when it is clear (`0x0124DB74`-`0x0124DB85`). So the front end's background
   loops and the intro movies and the campaign movie panel play once.
 - INFERRED: ±1 colour differences on the GPU path (§8.2).

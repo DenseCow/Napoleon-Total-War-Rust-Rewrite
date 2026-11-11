@@ -104,7 +104,14 @@ impl GameLimits {
     /// The scale of unit-size index `index` (`0x00DAFBB0`): an index outside the list takes the
     /// last step, as the original's read past its four entries ends on 1.0 after the clamp.
     pub fn unit_scale(&self, index: i32) -> f32 {
-        usize::try_from(index).ok().and_then(|i| self.unit_scales.get(i)).copied().unwrap_or_else(|| self.last_scale())
+        usize::try_from(index).map_or_else(|_| self.last_scale(), |step| self.step_scale(step))
+    }
+
+    /// [`GameLimits::unit_scale`] of a step already in the list (from
+    /// [`GameLimits::unit_scale_step`] or [`GameLimits::unit_scale_setting`]); past the end, the
+    /// last step, as there.
+    pub fn step_scale(&self, step: usize) -> f32 {
+        self.unit_scales.get(step).copied().unwrap_or_else(|| self.last_scale())
     }
 
     /// The unit-size index of a scale (`0x00DAFBC0`, CONFIRMED): the first step not below it,
@@ -180,6 +187,7 @@ mod tests {
         assert_eq!(l.unit_scales, [0.25, 0.5, 0.75, 1.0]);
         assert_eq!((0..4).map(|i| l.unit_scale(i)).collect::<Vec<_>>(), [0.25, 0.5, 0.75, 1.0]);
         assert_eq!((l.unit_scale(-1), l.unit_scale(4)), (1.0, 1.0));
+        assert_eq!([0, 1, 2, 3, 9].map(|s| l.step_scale(s)), [0.25, 0.5, 0.75, 1.0, 1.0]);
         assert_eq!(l.max_scale(), 1.0);
         assert_eq!([0.25, 0.5, 0.75, 1.0].map(|s| l.max_units(s)), [(20, 6), (20, 8), (20, 10), (20, 20)]);
         // 0x00DAFBC0: the first step not below the scale; past the last, the last.

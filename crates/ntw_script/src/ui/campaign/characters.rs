@@ -98,7 +98,7 @@ pub(super) fn character_details(lua: &Lua, inner: &Inner, ui: &CampaignUi, c: Ch
     // its name for the faction's government (`ministerial_positions_by_gov_types`: faction, post,
     // government → string key, loc `ministerial_positions_strings_on_screen_<key>`; column use
     // INFERRED from the rows). PROVISIONAL: PostEffects empty.
-    let post = m.world.faction_details.get(&ch.faction).and_then(|d| d.posts.iter().find(|p| p.holder == Some(c)).map(|p| p.key.clone()));
+    let post = m.held_post(c).map(|p| p.key.clone());
     if let Some(post) = post {
         let gov = m.world.factions.get(&ch.faction).map(|f| f.government_key.clone()).unwrap_or_default();
         let rows = ui.post_names.get_or_init(|| {
@@ -295,8 +295,8 @@ pub(super) enum Pips {
 /// builder `0x009AD250` takes the character's main-attribute index (`0x00A198C0`) and fills the three
 /// `Primary*` fields only when it is a valid index (< 14), CONFIRMED. `PrimaryLevel` =
 /// `min(rank + 1, 9)` with the rank from `0x00A198D0` (`0x009AE759..0x009AE768`): the formula is
-/// CONFIRMED; the rank it reads is our `agents::rank` (the `character.rank` seam). PROVISIONAL with it:
-/// the pending-battle bonuses of generals and admirals are not modelled (see `agents::rank_original`).
+/// CONFIRMED; the rank it reads is our `agents::rank` (the `character.rank` seam), with the
+/// pending-battle bonuses of generals and admirals (`agents::pending_battle_bonus`).
 ///
 /// `character` is `None` for rows that are not a character (sabotage targets), and a character id
 /// with no record has no type: PROVISIONAL empty `Primary*` values so the card's unguarded reads still

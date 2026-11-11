@@ -62,6 +62,9 @@ pub struct TaiAtlas {
     pub pages: Vec<String>,
     /// Image name (as written, e.g. `flag_france.tga`) -> its rectangle.
     pub entries: BTreeMap<String, TaiEntry>,
+    /// Every distinct image name in the order the file first lists it: the battle grass sorts its
+    /// kinds by walking the entries in this order (`ntw_formats::grass`).
+    pub order: Vec<String>,
 }
 
 impl TaiAtlas {
@@ -112,7 +115,9 @@ impl TaiAtlas {
             if !out.pages.iter().any(|p| p == &entry.page) {
                 out.pages.push(entry.page.clone());
             }
-            out.entries.insert(name.to_owned(), entry);
+            if out.entries.insert(name.to_owned(), entry).is_none() {
+                out.order.push(name.to_owned());
+            }
         }
         Ok(out)
     }
@@ -157,6 +162,7 @@ flag_default.tga\t\tflags0.dds, 0, 2D, 0.250000, 0.125000, 0.000000, 0.250000, 0
         let a = TaiAtlas::read(SHIPPED).expect("parse");
         assert_eq!(a.pages, vec!["flags0.dds".to_string()]);
         assert_eq!(a.entries.len(), 3);
+        assert_eq!(a.order, ["flag_austria.tga", "flag_france.tga", "flag_default.tga"], "file order, not name order");
         let f = a.find("flag_france.tga").expect("france");
         assert_eq!(f.page, "flags0.dds");
         assert_eq!(f.page_index, 0);

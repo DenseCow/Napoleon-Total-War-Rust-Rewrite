@@ -30,7 +30,7 @@ use ntw_script::ui::{FrontEndFacts, NodeId, PointerEvent, UiRequest, UiScriptHos
 
 use crate::GameMode;
 use crate::config;
-use render::{UiAssets, UiSprite, spawn_world, ui_scale, ui_virtual_screen, window_to_ui};
+use render::{DrawnFor, UiAssets, UiSprite, spawn_world, ui_scale, ui_virtual_screen, window_to_ui};
 
 /// The UI script host plus pointer bookkeeping. Lua is single-threaded, so this is a
 /// non-`Send` resource used only from the main thread.
@@ -38,11 +38,8 @@ pub struct FrontEndUi {
     host: UiScriptHost,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
-    drawn_generation: u64,
-    /// The window size the sprites were last drawn for: the draw scale and centre follow the window,
-    /// and two windows with the same virtual screen (1024x768 and 800x600 both lay out in 1280x960)
-    /// leave the layout, and so its generation, unchanged.
-    drawn_screen: Vec2,
+    /// What the sprites were last drawn for.
+    drawn: DrawnFor,
     /// The window size in pixels (the scripts see its virtual screen, `render::ui_virtual_screen`).
     screen: Vec2,
     /// Milliseconds since the front end started (the `OnUpdatePulse` clock).
@@ -57,12 +54,12 @@ impl FrontEndUi {
     fn new(source: ScriptSource, loc: Localisation, facts: FrontEndFacts, screen: Vec2, limits: ntw_sim::limits::GameLimits) -> mlua::Result<Self> {
         let virt = ui_virtual_screen(screen);
         let host = UiScriptHost::new(source, loc, facts, (virt.x, virt.y), limits)?;
-        Ok(Self { host, hovered: None, pressed: None, drawn_generation: u64::MAX, drawn_screen: Vec2::ZERO, screen, clock_ms: 0.0, cursor: None })
+        Ok(Self { host, hovered: None, pressed: None, drawn: DrawnFor::NOTHING, screen, clock_ms: 0.0, cursor: None })
     }
 
     /// Whether the sprites are out of date: the UI tree changed, or the window they were drawn for.
     fn needs_redraw(&self) -> bool {
-        self.host.world().generation != self.drawn_generation || self.screen != self.drawn_screen
+        self.drawn.stale(self.host.world().generation, self.screen)
     }
 }
 
@@ -363,7 +360,7 @@ fn redraw(
             Some(h) => assets.movies.insert("movie_bg".into(), h),
             None => assets.movies.remove("movie_bg"),
         };
-        ui.drawn_generation = u64::MAX;
+        ui.drawn = DrawnFor::NOTHING;
     }
     if !ui.needs_redraw() {
         return;
@@ -375,8 +372,7 @@ fn redraw(
         spawn_world(&ui.host.world(), root, &mut commands, &mut assets, &mut images, ui.screen, ui_scale(ui.screen));
     }
     let generation = ui.host.world().generation;
-    ui.drawn_generation = generation;
-    ui.drawn_screen = ui.screen;
+    ui.drawn = DrawnFor { generation, screen: ui.screen };
 }
 
 /// `--screenshot <file.png>`: save one picture once the scene has settled (4 s after start, or
@@ -599,7 +595,7 @@ mod ui_scale_tests {
         let generation = {
             let ui = app.world().non_send::<FrontEndUi>();
             assert!(!ui.needs_redraw(), "drawn for the first window");
-            assert_eq!(ui.drawn_screen, Vec2::new(1024.0, 768.0));
+            assert_eq!(ui.drawn.screen, Vec2::new(1024.0, 768.0));
             ui.host.world().generation
         };
 
@@ -614,7 +610,7 @@ mod ui_scale_tests {
         let ui = app.world().non_send::<FrontEndUi>();
         assert_eq!(ui.host.world().generation, generation, "same virtual screen, same layout");
         assert!((ui_scale(ui.screen) - ui_scale(Vec2::new(1024.0, 768.0))).abs() > 0.1);
-        assert_eq!(ui.drawn_screen, Vec2::new(800.0, 600.0), "redrawn for the new window");
+        assert_eq!(ui.drawn.screen, Vec2::new(800.0, 600.0), "redrawn for the new window");
         assert!(!ui.needs_redraw());
         assert!(app.world().get_entity(old).is_err(), "the sprites drawn at the old window's scale are gone");
     }

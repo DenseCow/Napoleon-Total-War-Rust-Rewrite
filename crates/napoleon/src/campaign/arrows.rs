@@ -44,7 +44,7 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use ntw_campaign::map_display::MapDisplay;
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 
 use crate::GameMode;
 

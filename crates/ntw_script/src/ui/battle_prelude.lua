@@ -225,7 +225,14 @@ B.ToggleMinimisedCards = function()
     minimised.cards = not minimised.cards
     return not minimised.cards
 end
-B.SetSelectionProxy = function() end
+-- SetSelectionProxy(unit, on) (CONFIRMED 0x005D3430 -> the camera manager's SetTrackTarget
+-- 0x005F9B70): a unit card's InitState calls it with its m_item_address as the card is selected
+-- (true) or set back to Default (false); the unit becomes the tracking camera's target (the
+-- engine side is hud.rs, BattleUiRequest::SelectionProxy). It returns no values, as the exe's
+-- (0 results); what else it does is in camera.rs set_track_target and BATTLE_FIDELITY.md §59.5.
+B.SetSelectionProxy = function(u, on)
+    if u ~= nil then request({ kind = "selection_proxy", id = u, on = on == true }) end
+end
 B.UpdateBattleLocks = function() end
 B.TriggerPanelOpenEvent = function() end
 B.TriggerPanelClosedEvent = function() end
@@ -432,6 +439,11 @@ function __ntw_battle_create_cards()
         if addr ~= nil and u ~= nil then
             local info = __ntw_battle_card_info(u)
             for k, v in pairs(info) do entry[k] = v end
+            -- The card's unit, the global its handlers pass to BattleUI (SetSelectionProxy,
+            -- MouseMovedOntoCard, IsUnitSelectable, CameraZoomToSelection: CONFIRMED reads in
+            -- template.BattleUnitCard.lua's bytecode; the card never sets it itself, so the engine
+            -- does). INFERRED: ours is the unit id where the engine's is its own unit handle.
+            UIComponent(addr):SetGlobal("m_item_address", u.id)
             UIComponent(addr):LuaCall("SetInitialState", info, entry)
             __ntw_battle_cards[u.id] = addr
         end

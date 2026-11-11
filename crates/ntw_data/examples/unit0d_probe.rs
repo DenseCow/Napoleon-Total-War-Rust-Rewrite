@@ -138,10 +138,10 @@ fn slotfort(vfs: &Vfs) {
 /// How many settlements actually carry a fortification building in the shipped start positions --
 /// the number that decides whether the walls are visible without building any first.
 fn wallcount(vfs: &Vfs) {
-    let files = ntw_formats::campaign_map::GameFiles { vfs }.list("campaigns/");
+    let files = ntw_formats::pack::GameFiles { vfs }.list("campaigns/");
     let files: Vec<&String> = files.iter().filter(|p| p.to_ascii_lowercase().ends_with("startpos.esf")).collect();
     println!("== {} shipped start positions", files.len());
-    let gf = ntw_formats::campaign_map::GameFiles { vfs };
+    let gf = ntw_formats::pack::GameFiles { vfs };
     for f in &files {
         let Ok(b) = gf.read(f) else { println!("{f}: unreadable"); continue };
         let hay = String::from_utf8_lossy(&b);

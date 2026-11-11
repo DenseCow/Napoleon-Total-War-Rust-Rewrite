@@ -747,19 +747,21 @@ impl CampaignModel {
     /// The step that sets `character` down again at the end of a move or a placement: `0x00A285E0`
     /// (character vtable `0x0136A62C` slot +0x20) with its first argument 1. CONFIRMED by disassembly,
     /// in this order: the sight from the new place for him and each army he carries (`0x00A27F10` →
-    /// `0x00B1B8B0`; the model recomputes the faction's whole set, CHARACTERS_FIDELITY.md §10), his
-    /// zones of control (`0x00A28440` at `0x00A28843`, [`super::zones`], with the armies a navy
-    /// carries), the lifted byte +0x1B7 cleared (`0x00A28855`), then his own hidden flag
-    /// (`0x009D3000` at `0x00A2885C` on `this` alone, `0x00A285E5`; a carried army's flag is not
-    /// re-evaluated). Argument 1 comes from every step that ends a move: the step mover
-    /// `0x00972CA0` at the path's end (`0x00972DC9`, `0x00972EB1`, and `0x00973A01` with the
+    /// `0x00B1B8B0`; the model recomputes the faction's whole set, CHARACTERS_FIDELITY.md §10), then,
+    /// with argument 1 only, `0x00A28290` (its part is not described in the notes), his zones of
+    /// control (`0x00A28440(1)` at `0x00A28843`, [`super::zones`], with the armies a navy carries) and
+    /// his obstacle core (`0x009CC0E0`, [`super::zoc`]), the lifted byte +0x1B7 cleared (`0x00A28855`),
+    /// then his own hidden flag (`0x009D3000` at `0x00A2885C` on `this` alone, `0x00A285E5`; a carried
+    /// army's flag is not re-evaluated). Argument 1 comes from every step that ends a move: the step
+    /// mover `0x00972CA0` at the path's end (`0x00972DC9`, `0x00972EB1`, and `0x00973A01` with the
     /// finished flag) or when the move is stopped (`0x00960620`, `0x00921EE0`, `0x00921CD0`,
-    /// `0x00923140`), and the second call of every placement `0x0096C8D0` (`0x0096C9C4`). Ours: the
-    /// walk's end, the fleet's sail and the army's landing in [`Self::disembark`], and every placement
-    /// ([`Self::place_character`]). Argument 0
-    /// (a step in mid-move, `0x00973A01`; a placement's first call `0x0096C930`) runs only the sight
-    /// and keeps him lifted; argument 2 (a step waiting on a blocked path, `0x0097342C`,
-    /// `0x00973B44`) returns at `0x00A2860D`. The model's moves are whole, so it runs only this one.
+    /// `0x00923140`), and the second call of every placement `0x0096C8D0` (`0x0096C9C4`); the set-down
+    /// events, with the zone flood's other callers, are listed in PATHFINDING.md ("When it runs"). Ours:
+    /// the walk's end, the fleet's sail and the army's landing in [`Self::disembark`], and every
+    /// placement ([`Self::place_character`]). Argument 0 (a step in mid-move, `0x00973A01`; a
+    /// placement's first call `0x0096C930`) runs only the sight and keeps him lifted; argument 2 (a step
+    /// waiting on a blocked path, `0x0097342C`, `0x00973B44`) returns at `0x00A2860D`. The model's moves
+    /// are whole, so it runs only this one.
     pub(crate) fn set_down(&mut self, character: CharacterId) {
         let Some(faction) = self.world.characters.get(&character).map(|c| c.faction) else { return };
         self.refresh_shroud(faction, false);
@@ -866,7 +868,7 @@ impl CampaignModel {
         // so it cannot land again before next turn (the landing rule).
         self.world.characters.get_mut(&c).expect("checked").position = navy_pos;
         events.push(CampaignEvent::CharacterMoved { character: c, path: vec![from, to_f32(navy_pos)] });
-        events.push(CampaignEvent::CharacterEmbarksNavy { character: c, navy });
+        events.push(CampaignEvent::CharacterEmbarksNavy { character: c, agent_type: self.world.agent_type(c), navy });
         match carried {
             Some(a) => self.merge_units(force, a, &mut events),
             None => {
@@ -923,7 +925,7 @@ impl CampaignModel {
             ch.movement_points = (ch.movement_points - used).max(0);
             events.push(CampaignEvent::CharacterMoved { character: nc, path: plan.points[..=fleet_end].to_vec() });
             if had > 0 && ch.movement_points == 0 {
-                events.push(CampaignEvent::MovementPointsExhausted { character: nc });
+                events.push(CampaignEvent::MovementPointsExhausted { character: nc, agent_type: Some(ch.kind) });
             }
         }
         if let Some(l) = landing
@@ -944,7 +946,7 @@ impl CampaignModel {
             // (`0x00972EB1` / `0x00973A01`). The navy is not set down again at the landing.
             self.set_down(c);
             events.push(CampaignEvent::CharacterMoved { character: c, path: vec![plan.points[l - 1], plan.points[l]] });
-            events.push(CampaignEvent::CharacterDisembarksNavy { character: c, navy });
+            events.push(CampaignEvent::CharacterDisembarksNavy { character: c, agent_type: self.world.agent_type(c), navy });
         }
         Ok(events)
     }

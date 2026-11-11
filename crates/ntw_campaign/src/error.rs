@@ -202,15 +202,26 @@ pub enum LoadWarning {
         /// The region key.
         region: String,
     },
-    /// A faction's `ARMY_REINFORCEMENT_MANAGER/CHARACTER_REINFORCEMENTS_ARRAY` holds entries (new
-    /// armies on their way to the commander they were raised for). They are not loaded yet
+    /// A faction's `ARMY_REINFORCEMENT_MANAGER` holds entries the importer does not load: in
+    /// `CHARACTER_REINFORCEMENTS_ARRAY`, new armies on their way to the commander they were raised for
     /// (the model keeps them in `World::reinforcements`, but the importer does not map the entry's
-    /// character ids), so those armies stay where they are.
+    /// character ids), so those armies stay where they are; in `UNIT_REINFORCEMENTS_ARRAY`, the unit
+    /// reinforcements (not modelled).
     UnloadedReinforcements {
         /// The faction key (empty for the rebels).
         faction: String,
-        /// How many entries the array holds.
+        /// How many marches would still go on: entries not done, of a faction other than the rebels.
         entries: usize,
+        /// How many entries `UNIT_REINFORCEMENTS_ARRAY` holds.
+        units: usize,
+    },
+    /// Armies with a `REBEL_DATA` block that no region's risen list names (malformed). They are kept,
+    /// but their removal sets no crackdown (ntw_sim `crack_down_after_last_rising` finds no region and
+    /// does nothing). The exe would fault there: `0x00A91EB0` reads the null region's count in
+    /// `0x006A3110`, called at `0x00A91EB9`.
+    UnlistedRisenArmies {
+        /// The armies' raw force ids, in id order.
+        armies: Vec<u32>,
     },
     /// A recruitment manager (the region's or a port slot's) without its `REGION_RECRUITMENT_ITEM_ARRAY`:
     /// read as an empty queue (the save adds the array only when a new item is written to that manager).
@@ -309,8 +320,16 @@ impl fmt::Display for LoadWarning {
             Self::UnreadableRecruitmentItem { region } => {
                 write!(f, "region {region}: recruitment item without turns or unit key (skipped)")
             }
-            Self::UnloadedReinforcements { faction, entries } => {
-                write!(f, "faction {faction:?}: {entries} reinforcement marches (CHARACTER_REINFORCEMENTS_ARRAY) not loaded; those armies stay where they are")
+            Self::UnloadedReinforcements { faction, entries, units } => {
+                // Only the non-zero parts.
+                let marches = (*entries > 0).then(|| format!("{entries} reinforcement marches (CHARACTER_REINFORCEMENTS_ARRAY)"));
+                let unit_parts = (*units > 0).then(|| format!("{units} unit reinforcements (UNIT_REINFORCEMENTS_ARRAY)"));
+                let parts: Vec<String> = marches.into_iter().chain(unit_parts).collect();
+                let stay = if *entries > 0 { "; those armies stay where they are" } else { "" };
+                write!(f, "faction {faction:?}: {} not loaded{stay}", parts.join(" and "))
+            }
+            Self::UnlistedRisenArmies { armies } => {
+                write!(f, "armies {armies:?} have a REBEL_DATA block but are in no region's risen list (kept); their removal sets no crackdown")
             }
             Self::RecruitmentManagerWithoutItems { region, manager } => {
                 let manager = match manager {

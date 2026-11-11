@@ -57,7 +57,7 @@ impl TheatrePictures {
     /// Loads a theatre's pictures from the campaign map folder (e.g. `campaign_maps/nap_europe`).
     /// `None`, logged (once per load), when a picture is missing, unreadable or the two do not fit
     /// (the save header then has no picture for that theatre).
-    pub fn load(files: &ntw_formats::campaign_map::GameFiles<'_>, db: &ntw_data::GameDatabase, map_key: &str, theatre: &str) -> Option<TheatrePictures> {
+    pub fn load(files: &ntw_formats::pack::GameFiles<'_>, db: &ntw_data::GameDatabase, map_key: &str, theatre: &str) -> Option<TheatrePictures> {
         let folder = map_key.trim_start_matches("campaign_maps/").trim_start_matches("campaign_maps\\");
         let x = theatre_stem(theatre);
         let read = |name: &str| -> Option<Tga> {

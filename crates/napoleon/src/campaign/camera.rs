@@ -174,27 +174,14 @@ pub enum CameraFunc {
     BookmarkView(usize),
 }
 
-/// The bookmark funcs' prefixes, 20 characters each; the slot follows them (`0x0095A510`).
-const BOOKMARK_SAVE: &str = "camera_bookmark_save";
-const BOOKMARK_VIEW: &str = "camera_bookmark_view";
-
-/// The bookmark slot of a func whose prefix is followed by `rest` (CONFIRMED, `0x0095A510`): the
-/// one character after the prefix (`0x004F47D0`: position 20, length 1) read as leading digits
-/// (`0x004F37B0`), so a digit gives its value and anything else (nothing, a letter) slot 0;
-/// `camera_bookmark_save12` is slot 1. Vanilla binds slots 0..3 (`text/default_keys.xml`:
-/// SHIFT + F9..F12 save, F9..F12 view).
-fn bookmark_slot(rest: &str) -> usize {
-    rest.chars().next().and_then(|c| c.to_digit(10)).map_or(0, |d| d as usize)
-}
-
 impl CameraFunc {
-    /// The func a binding names, or None for one the camera ignores.
+    /// The func a binding names, or None for one the camera ignores. The bookmark funcs and their
+    /// slot: [`crate::shortcut_keys::CameraBookmark`] (`0x0095A510`).
     pub fn from_binding(func: &str) -> Option<Self> {
-        if let Some(rest) = func.strip_prefix(BOOKMARK_SAVE) {
-            return Some(Self::BookmarkSave(bookmark_slot(rest)));
-        }
-        if let Some(rest) = func.strip_prefix(BOOKMARK_VIEW) {
-            return Some(Self::BookmarkView(bookmark_slot(rest)));
+        match crate::shortcut_keys::CameraBookmark::from_binding(func) {
+            Some(crate::shortcut_keys::CameraBookmark::Save(n)) => return Some(Self::BookmarkSave(n)),
+            Some(crate::shortcut_keys::CameraBookmark::View(n)) => return Some(Self::BookmarkView(n)),
+            None => {}
         }
         Some(match func {
             "step_fwd" => Self::Forward,

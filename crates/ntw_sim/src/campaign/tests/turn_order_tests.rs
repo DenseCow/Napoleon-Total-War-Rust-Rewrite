@@ -556,8 +556,8 @@ fn the_turn_walks_the_faction_character_list_with_gains_last_and_losses_dropped(
     let of_a = |m: &CampaignModel, ev: &[CampaignEvent], end: bool| -> Vec<CharacterId> {
         ev.iter()
             .filter_map(|e| match *e {
-                CampaignEvent::CharacterTurnEnd { character } if end => Some(character),
-                CampaignEvent::CharacterTurnStart { character } if !end => Some(character),
+                CampaignEvent::CharacterTurnEnd { character, .. } if end => Some(character),
+                CampaignEvent::CharacterTurnStart { character, .. } if !end => Some(character),
                 _ => None,
             })
             .filter(|c| m.world.characters.get(c).is_some_and(|x| x.faction == A))
@@ -582,7 +582,7 @@ fn the_population_round_end_walks_the_faction_list_with_gains_last() {
     const OWNER: &str = "test_mod.walk_log";
     let mut reg = CampaignRuleRegistry::default();
     let maker = |prev: Arc<PopulationGrow>| {
-        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, w: &mut ModWrites| {
+        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, c: &[PopulationClassState], w: &mut ModWrites| {
             let key = ModKey::new(OWNER, ModScope::Campaign, "order");
             let mut order = match m.mod_state.get(&key) {
                 Some(ModValue::List(v)) => v.clone(),
@@ -590,7 +590,7 @@ fn the_population_round_end_walks_the_faction_list_with_gains_last() {
             };
             order.push(ModValue::Int(i64::from(r.id.raw())));
             w.set(key, ModValue::List(order));
-            prev(m, r, pop, s, w)
+            prev(m, r, pop, s, c, w)
         }) as Arc<PopulationGrow>
     };
     assert!(reg.population_grow.register(OWNER, Arc::new(maker)));
@@ -626,8 +626,8 @@ fn the_spy_network_step_comes_after_the_regions_and_before_the_faction_turn_star
     m.turn.humans = vec![A];
     let ev = m.start_campaign();
     // A's turn start comes last in the start events (B plays first as AI).
-    let a_chars = ev.iter().position(|e| matches!(e, CampaignEvent::CharacterTurnStart { character } if *character == CharacterId(103))).unwrap();
-    let network = ev.iter().position(|e| *e == CampaignEvent::CharacterBuildsSpyNetwork { character: CharacterId(103) }).unwrap();
+    let a_chars = ev.iter().position(|e| matches!(e, CampaignEvent::CharacterTurnStart { character, .. } if *character == CharacterId(103))).unwrap();
+    let network = ev.iter().position(|e| matches!(e, CampaignEvent::CharacterBuildsSpyNetwork { character: CharacterId(103), .. })).unwrap();
     for r in [10, 12] {
         assert_eq!(m.world.regions[&RegionId(r)].owner, A, "region {r} belongs to A");
     }

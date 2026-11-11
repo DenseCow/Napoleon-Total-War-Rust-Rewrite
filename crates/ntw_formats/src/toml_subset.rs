@@ -69,8 +69,10 @@ impl Value {
 }
 
 /// Parses a file's text into its tables, the top-level table first (always there, possibly
-/// empty), then each `[table]` in file order. An error names the first bad line (1-based).
+/// empty), then each `[table]` in file order. An error names the first bad line (1-based). A
+/// UTF-8 byte order mark at the start (some Windows editors write one) is skipped.
 pub fn parse(text: &str) -> Result<Vec<Table>, String> {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut tables = vec![Table { name: String::new(), line: 0, entries: Vec::new() }];
     for (i, raw) in text.lines().enumerate() {
         let line_no = i + 1;
@@ -197,22 +199,44 @@ fn parse_value(text: &str) -> Result<(Value, &str), String> {
     }
 }
 
-/// A TOML decimal number: an optional sign, digits (with `_` between them), an optional fraction
-/// and exponent. `inf`, `nan` and the hex, octal and binary forms are not in the subset.
+/// A TOML decimal number: an optional sign, an integer part without leading zeros, an optional
+/// fraction (`.` and digits) and exponent (`e`, an optional sign and digits), with `_` only
+/// between two digits. A number with neither fraction nor exponent is a TOML integer and must
+/// fit in an i64. `inf`, `nan` and the hex, octal and binary forms are not in the subset.
 fn parse_number(word: &str) -> Option<f64> {
-    let digits = word.strip_prefix(['+', '-']).unwrap_or(word);
-    if !digits.starts_with(|c: char| c.is_ascii_digit()) || !digits.ends_with(|c: char| c.is_ascii_digit()) {
+    let unsigned = word.strip_prefix(['+', '-']).unwrap_or(word);
+    let (mantissa, exponent) = match unsigned.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, Some(exponent)),
+        None => (unsigned, None),
+    };
+    let (integer, fraction) = match mantissa.split_once('.') {
+        Some((integer, fraction)) => (integer, Some(fraction)),
+        None => (mantissa, None),
+    };
+    if !is_digit_run(integer) || (integer.len() > 1 && integer.starts_with('0')) {
         return None;
     }
-    if !digits.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '_' | 'e' | 'E' | '+' | '-')) {
+    if fraction.is_some_and(|f| !is_digit_run(f)) {
         return None;
     }
-    // An underscore only between two digits.
-    let bytes = digits.as_bytes();
-    if (1..bytes.len() - 1).any(|i| bytes[i] == b'_' && !(bytes[i - 1].is_ascii_digit() && bytes[i + 1].is_ascii_digit())) {
+    if exponent.is_some_and(|e| !is_digit_run(e.strip_prefix(['+', '-']).unwrap_or(e))) {
         return None;
     }
-    word.replace('_', "").parse::<f64>().ok().filter(|v| v.is_finite())
+    let plain = word.replace('_', "");
+    if fraction.is_none() && exponent.is_none() {
+        // Past 2^53 the f64 rounds it, as every number of the subset is one f64.
+        return plain.parse::<i64>().ok().map(|v| v as f64);
+    }
+    plain.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+/// One or more ASCII digits, with `_` only between two digits.
+fn is_digit_run(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_digit)
+        && bytes.last().is_some_and(u8::is_ascii_digit)
+        && bytes.iter().all(|b| b.is_ascii_digit() || *b == b'_')
+        && !s.contains("__")
 }
 
 #[cfg(test)]
@@ -277,9 +301,41 @@ mod tests {
             ("a = 1_.5\n", "line 1"),
             ("a = 1979-05-27\n", "line 1"),
             ("a = yes\n", "line 1"),
+            ("a = 01\n", "line 1"),
+            ("a = -00.5\n", "line 1"),
+            ("a = 1.e5\n", "line 1"),
+            ("a = 1.\n", "line 1"),
+            ("a = 1.2.3\n", "line 1"),
+            ("a = 1e2.5\n", "line 1"),
+            ("a = 9223372036854775808\n", "line 1"),
+            ("a = -9_223_372_036_854_775_809\n", "line 1"),
         ] {
             let e = parse(src).expect_err(src);
             assert!(e.starts_with(line), "{src:?}: {e}");
         }
+    }
+
+    /// The edges of TOML's number forms that the subset takes: zero with a sign, a leading zero
+    /// before a fraction, an exponent with leading zeros, and the i64 limits.
+    #[test]
+    fn takes_the_edges_of_toml_numbers() {
+        for (word, expected) in [
+            ("-0", 0.0),
+            ("0.5", 0.5),
+            ("+1e05", 1e5),
+            ("1E-2", 0.01),
+            ("9_223_372_036_854_775_807", i64::MAX as f64),
+            ("-9223372036854775808", i64::MIN as f64),
+        ] {
+            let tables = parse(&format!("a = {word}\n")).expect(word);
+            assert_eq!(tables[0].entries[0].value, Value::Number(expected), "{word}");
+        }
+    }
+
+    /// A UTF-8 byte order mark before the first line is skipped.
+    #[test]
+    fn skips_a_byte_order_mark() {
+        let tables = parse("\u{feff}a = 1\n").expect("parses");
+        assert_eq!(tables[0].entries, [Entry { key: "a".into(), value: Value::Number(1.0), line: 1 }]);
     }
 }

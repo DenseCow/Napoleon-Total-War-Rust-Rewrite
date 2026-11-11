@@ -46,6 +46,14 @@ fn the_peace_record_is_proposed_and_cleared() {
 #[test]
 fn a_peace_deal_moves_both_sides_out_of_each_others_regions() {
     let mut m = war_model();
+    // Without the map a region is the circle of `REGION_AREA_RADIUS` round its settlement
+    // (`economy::in_region`), and the fixture's settlements stand 1 apart, so an army placed at 10
+    // would stand in 13 too and be moved (and told) again by the next region of the loop. The
+    // original places an army into its candidate region's own polygons (0x008D9DC0), which no other
+    // region shares, so each army is moved and told once: 12 and 13 are put out of reach here.
+    for r in [12, 13] {
+        m.world.regions.get_mut(&RegionId(r)).unwrap().settlement.position = pos(r as i32 * 100, 0);
+    }
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposePeace { clear: false }).unwrap();
     let ev = m.apply(CampaignCommand::AcceptDeal).unwrap();
@@ -56,6 +64,9 @@ fn a_peace_deal_moves_both_sides_out_of_each_others_regions() {
         let c = &m.world.characters[&CharacterId(ch)];
         assert_eq!((c.garrisoned_in, c.position), (None, pos(to, 0)), "character {ch}");
     }
+    // Each placed army tells its own faction, the proposer's first.
+    let notices = super::transfer::retreat_notices(&ev);
+    assert_eq!(notices, vec![(A, CharacterId(100), pos(10, 0)), (B, CharacterId(101), pos(11, 0))], "{ev:?}");
     assert_eq!(m.apply(CampaignCommand::AcceptDeal), Ok(Vec::new()));
 }
 

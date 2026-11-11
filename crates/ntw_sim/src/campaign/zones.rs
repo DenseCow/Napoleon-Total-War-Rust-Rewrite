@@ -280,12 +280,14 @@ impl CampaignModel {
 
     /// The commanders `faction` sees as obstacles, leaving out `character` and its own force, each with
     /// whether `faction` is at war with it (`CampaignModel::obstacles_seen_by`'s rule). A navy docked in a
-    /// blockaded port is no obstacle ([`CampaignModel::navies_docked_in_blockaded_ports`]).
+    /// blockaded port is no obstacle ([`CampaignModel::docked_in_blockaded_port`]), nor is the garrison
+    /// of a besieged settlement ([`CampaignModel::besieged_garrison`]).
     fn seen_commanders(&self, faction: FactionId, character: CharacterId) -> impl Iterator<Item = (Commander, bool)> + '_ {
         let own_force = self.force_of(character);
-        let shut_in = self.navies_docked_in_blockaded_ports();
+        let blockades = self.any_port_blockaded();
+        let shut_in = move |c: &Commander| blockades && c.navy && self.docked_in_blockaded_port(c.force);
         self.commanders()
-            .filter(move |c| Some(c.force) != own_force && c.id != character && !shut_in.contains(&c.force))
+            .filter(move |c| Some(c.force) != own_force && c.id != character && !shut_in(c) && !self.besieged_garrison(c.force))
             .filter(move |c| self.sees(faction, c.pos_f32()) && super::agents::knows_character(self, faction, c.id))
             .map(move |c| {
                 let at_war = c.faction != faction && self.world.stance(faction, c.faction) == Stance::War;
@@ -587,6 +589,15 @@ impl CampaignModel {
     /// The stored zone of `character`, if he has one.
     pub fn stored_zone(&self, character: CharacterId) -> Option<Arc<[u32]>> {
         self.stored_zones()?.get(&character).cloned()
+    }
+
+    /// Whether the point `p` lies in `character`'s stored zone: the map polygon holding it is one of the
+    /// zone's (`IsPointInsideOutline` `0x00B13690` on the flood layer the character keeps at +0x1C8, as the
+    /// zone-entry step `0x00B6A270` tests a mover's position). False without a stored zone or off the map.
+    pub(crate) fn in_stored_zone(&self, character: CharacterId, p: (f32, f32)) -> bool {
+        let (Some(map), Some(zones)) = (self.poly_map(), self.stored_zones()) else { return false };
+        let Some(zone) = zones.get(&character) else { return false };
+        map.polygon_at(p.0, p.1).is_some_and(|poly| zone.binary_search(&(poly as u32)).is_ok())
     }
 
     /// The obstacles `faction` sees, leaving out `character` and its force, with their stored zones
@@ -1027,7 +1038,10 @@ mod tests {
         assert_eq!(m.world.forces[&ForceId(1002)].units.len(), 1);
         assert_flooded(&m, GA);
         assert_flooded(&m, c);
+    }
 
+    #[test]
+    fn a_transfer_into_a_garrison_floods_the_source_only() {
         // Into a garrison (`0x008D5F10`): `0x008F9400` runs on the source alone (`0x008D71C1`).
         let mut m = full_target_and_two_unit_source();
         m.world.characters.get_mut(&GA).unwrap().garrisoned_in = Some(RegionId(10));

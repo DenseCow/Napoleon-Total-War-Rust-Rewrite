@@ -190,7 +190,8 @@ fn fleets_stay_at_sea() {
 /// (kind 6) or kind 7 polygon bridges them. Prints where kinds 6 and 7 meet rivers.
 #[test]
 fn rivers_are_kind_3_strips() {
-    use ntw_formats::campaign_map::{CampaignMap, GameFiles, DISPLAY_TO_LOGIC};
+    use ntw_formats::campaign_map::{CampaignMap, DISPLAY_TO_LOGIC};
+    use ntw_formats::pack::GameFiles;
     use ntw_formats::pack::Vfs;
     let dir = data_dir();
     if !dir.is_dir() {

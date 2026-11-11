@@ -16,7 +16,8 @@
 //! of that name ([`RegionMap::black_shroud_outlines`]); a map with any outline starts a new
 //! campaign's human under the black shroud.
 
-use crate::campaign_map::{GameFiles, RegionMap};
+use crate::campaign_map::RegionMap;
+use crate::pack::GameFiles;
 
 /// The black shroud outlines file's name in an open-format campaign folder.
 pub const BLACK_SHROUD_FILE: &str = "black_shroud.txt";

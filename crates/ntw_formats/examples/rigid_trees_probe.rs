@@ -2,7 +2,8 @@
 //! prints per-model instance counts and scale ranges, and compares each tree's stored height with
 //! the heightmap value under it (to calibrate the terrain's vertical scale).
 //!   cargo run -p ntw_formats --example rigid_trees_probe -- [map, default nap_europe]
-use ntw_formats::campaign_map::{CampaignMap, GameFiles, RigidTrees};
+use ntw_formats::campaign_map::{CampaignMap, RigidTrees};
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 
 const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";

@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::names::{lcg_step, shuffle_in_place};

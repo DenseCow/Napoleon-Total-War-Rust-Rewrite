@@ -34,13 +34,14 @@ use ntw_script::ui::{CampaignKey, CampaignKeys, CampaignLink, CampaignRequest, C
 use super::play::CampaignSim;
 use crate::GameMode;
 use crate::data::GameData;
-use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_to_window, ui_virtual_screen, window_to_ui};
+use crate::frontend::render::{DrawnFor, UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_to_window, ui_virtual_screen, window_to_ui};
 
 /// The HUD's script host and pointer state. Non-`Send` (Lua).
 pub struct CampaignHud {
     host: UiScriptHost,
     screen: Vec2,
-    drawn_generation: u64,
+    /// What the sprites were last drawn for.
+    drawn: DrawnFor,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     sim_generation: u64,
@@ -160,9 +161,7 @@ pub fn enter(world: &mut World) {
     if let Some(sim) = world.get_non_send::<CampaignSim>() {
         let ctx = ntw_script::ScriptContext { string: Some("Campaign UI".into()), component: Some("root".into()), ..Default::default() };
         let r = sim.host.fire("UICreated", ctx);
-        for e in r.errors {
-            warn!("Campaign script UICreated: {e}");
-        }
+        super::play::log_script_errors(&r);
         info!("Campaign: UICreated ({} handlers), {} restricted building levels", r.handlers, sim.host.state().model.world.restricted_buildings.len());
     }
     // A 2D camera over the 3D map for the HUD sprites.
@@ -174,7 +173,7 @@ pub fn enter(world: &mut World) {
     world.insert_non_send(CampaignHud {
         host,
         screen,
-        drawn_generation: u64::MAX,
+        drawn: DrawnFor::NOTHING,
         hovered: None,
         pressed: None,
         sim_generation: u64::MAX,
@@ -451,8 +450,9 @@ fn same_panel_movie(want: Option<&(NodeId, Rc<str>)>, playing: Option<&PanelMovi
 /// component is gone. It plays once with its sound track in the player's language, at the level
 /// every movie plays at (see the note in the body). CONFIRMED: the panel's open `0x00A23330` hands
 /// the bink control's open `0x00D9F600` the option bytes {+0 1, +1 0, +2 1, +3 1, +5 1, +6 1}, and
-/// +1 is the loop flag: the control passes it to its player's open (vtable +12, `0x01215C10`), which
-/// stores it at player +0x59; at the last frame the player's update (`0x0124DA70`, `0x0124DB74`) seeks
+/// +1 is the loop flag: the control passes it to the open of its movie controller (the Bink player,
+/// vtable `0x01429D90` slot +12, `0x01215C10`), which stores it at controller +0x59; at the last frame the
+/// controller's update (`0x0124DA70`, `0x0124DB74`) seeks
 /// back to frame 1 (vtable +16, `0x0121E110`) when it is set and closes the movie (vtable +20) when
 /// it is clear. So the panel's movie plays once.
 pub fn panel_movie(
@@ -468,7 +468,7 @@ pub fn panel_movie(
         if let Some(old) = hud.panel_movie.take() {
             stop.write(crate::video::StopMovie { path: Some(old.movie.to_string()) });
             assets.movies.remove(&old.component);
-            hud.drawn_generation = u64::MAX;
+            hud.drawn = DrawnFor::NOTHING;
         }
         if let Some((node, movie)) = want {
             let component = hud.host.world().get(node).map(|n| n.data.id.clone()).unwrap_or_default();
@@ -490,7 +490,7 @@ pub fn panel_movie(
         shown = true;
     }
     if shown {
-        hud.drawn_generation = u64::MAX;
+        hud.drawn = DrawnFor::NOTHING;
     }
 }
 
@@ -501,7 +501,8 @@ impl CampaignHud {
     }
 }
 
-/// Rebuilds the HUD sprites when the UI tree changed, and records the panel rectangles.
+/// Rebuilds the HUD sprites when the UI tree or the window size changed ([`DrawnFor`]), and
+/// records the panel rectangles.
 pub fn redraw(
     mut commands: Commands,
     hud: Option<NonSendMut<CampaignHud>>,
@@ -516,7 +517,7 @@ pub fn redraw(
     }
     let (Some(mut hud), Some(mut assets)) = (hud, assets) else { return };
     let generation = hud.host.world().generation;
-    if generation == hud.drawn_generation {
+    if !hud.drawn.stale(generation, hud.screen) {
         return;
     }
     for e in &sprites {
@@ -534,7 +535,7 @@ pub fn redraw(
         drop(world);
         hud.panels = panels;
     }
-    hud.drawn_generation = generation;
+    hud.drawn = DrawnFor { generation, screen: hud.screen };
 }
 
 /// The harness's state.

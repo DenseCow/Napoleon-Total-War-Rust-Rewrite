@@ -9,6 +9,11 @@ script `analysis/fidelity/ghidra_scripts/FidDecomp.java` (copy of the AI worker'
 Tags: CONFIRMED (code/bytes), INFERRED, UNKNOWN. Addresses are `Napoleon.exe` VAs.
 
 ## Where I am / what's next (updated with each push)
+- **Battle camera (§59.4, 2026-11-10, `work/battlecamera`).** The camera funcs, speeds, limits and bookmarks are
+  ported from `0x005EAF00` and its step functions, with the manager's steady frame time as the rate (`0x005FE410`,
+  `0x005F3790`). Next: the mouse handler `0x005EE600` (wheel, edge scrolling,
+  drag; leads in §59.4), the frame update's unported steps, the invert getters, the camera modes (tracking,
+  intelli zoom, context camera), the camera rectangle, and the double-click window and its script events (§59.3).
 - **Rally and Inspire (§60, 2026-11-10, `work/rallyinspire`).** Ported with the shared ability slots (active
   time, recharge, uses). Next: the gate's per-ability conditions, the Inspire approach move `0x00652950`, the
   artillery boosts' effects, the GENERAL_SUPPORT AI tactic, the ability button in the battle UI.
@@ -674,8 +679,8 @@ snapshot. The land card `0x00513320` (from `0x005363C0`) copies the record to `+
   launch real-time battles yet (`campaign::play` HOOK); the autoresolve reads it (below) and so do the tests
   (`the_battle_card_carries_the_rank_and_the_command_role`, `the_battle_card_reads_the_rank_through_its_seam`, real
   data `battle_cards_carry_the_commanders_rank`: every land unit of the eur start, Napoléon's bodyguard at his rank).
-  The rank still lacks the pending-battle bonuses (`rank_original` PROVISIONAL, CHARACTERS_FIDELITY.md §16); the card
-  will carry them once the model has them, since the card is built while the battle is pending.
+  The card's rank carries the pending-battle bonuses (CHARACTERS_FIDELITY.md §18), since the card is built while the
+  battle is pending.
 - **Autoresolve star ratings** (CONFIRMED, autostars): the resolver units are built from the same cards.
   `0x007CA330` (reached from `0x008F7880` → `0x008AE5A0` → `0x007ADDD0` → `0x007CA700`) walks the battle's armies
   (land cards at army `+0x48`, stride 0x114, appended at `0x008B0F1C` → `0x00531370`; naval cards at `+0x58`, stride
@@ -688,8 +693,7 @@ snapshot. The land card `0x00513320` (from `0x005363C0`) copies the record to `+
   `battle_general_card(..).rank`), `ArUnit::star_rating` / `NavalUnit::star_rating`, `autoresolve::side_star_rating`,
   `finalize_probabilities`; tests `the_autoresolve_star_ratings_are_the_battle_cards_ranks`,
   `a_sides_star_rating_is_the_signed_best_from_zero`, `the_side_with_more_stars_has_its_win_chance_scaled`.
-  The path is CONFIRMED; the rank it carries still lacks the pending-battle bonuses (`rank_original` PROVISIONAL,
-  CHARACTERS_FIDELITY.md §16, BACKLOG "Pending battles" line), so the star ratings do too until the model has them.
+  The path is CONFIRMED, and the rank it carries holds the pending-battle bonuses (CHARACTERS_FIDELITY.md §18).
   **ORIGINAL BUG:** the replace test is unsigned (`JBE` at `0x0078E00F` / `0x0078E290`) while the rank is signed
   (−1..9, `0x00A198D0`). A −1 rank is reachable: attribute levels start at −1 (`0x00984AD0`, called from the details
   constructor at `0x00992F37` with −1, before the type's starting rows) and trait / ancillary effects subtract with
@@ -858,12 +862,16 @@ men** (CONFIRMED, and the same pair §6 reads as `men = (unit+0x1C)+0xC8`).
   its index) without one; the campaign's reads the campaign's stored multiplier. `0x00DACE60` turns the scale
   into the navy's unit cap (6 / 8 / 10 / 20 by index). So the chain is **setting (scale) → step index → step
   scale → clamp → truncated men**, and the registered setting gives **0.75 ×** the card's men.
-  `0x00DAFBC0` returns 4 for a scale above every step (one past the table); ours takes the last step.
+  `0x00DAFBC0` returns 4 for a scale above every step (one past the table); ours takes the last step. For a
+  battle that is the same men: `0x00DAFBB0`(4) reads the 4 bytes after the table, the ASCII `UIPr` at
+  `0x01392780` (bytes `55 49 50 72`, read 2026-11-11), a float of about 4.1e30, which `0x004A6540`'s clamp
+  turns into 1.0, the last step's scale. Only the index differs: the options page would show index 4 where
+  ours shows 3.
 - **`gfx_unit_scale` (role UNKNOWN).** `0x00404230` registers it through the int constructor `0x00454300`: id
-  `0x1C`, object `0x0149D880`, default 2, help text "Set unit scale. 0 - lowest, 3 - ultra". The object is
-  referenced only by that registration, its exit destructor and the preferences writer `0x0045A6F0` (which hands
-  every setting to the line writer `0x0044CCF0`): no code reading its value was found, so it is written to the
-  preferences file and nothing else is known of it. (A struct serialiser, `0x00DA8BD0`, writes a `unit_size` key
+  `0x1C`, object `0x0149D880`, default 2, help text "Set unit scale. 0 - lowest, 3 - ultra". By-object xrefs
+  find only that registration, its exit destructor and the preferences writer `0x0045A6F0` (which hands every
+  setting to the line writer `0x0044CCF0`), and a pattern search for reads by its id finds none: no reader was
+  found. It is written to the preferences file; nothing else is known of it. (A struct serialiser, `0x00DA8BD0`, writes a `unit_size` key
   from a struct field `+0x34` at `0x00DA8C8F`; untraced.) Ours neither reads nor changes it.
 - **A single-player battle (INFERRED link).** `FrontEnd.StartBattle` (`0x004783E0` → `0x00488520`) builds no
   game-settings object; its setup parser (`0x00455F00`) reads no `unit_scale` and its army parser (`0x004553B0`,
@@ -2669,16 +2677,9 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   layer lock, `EnableShortcutHandler`), `shortcuts` machine tests.
 
 ### 59.2 Keys whose order the model lacks (listed, not invented)
-- Camera funcs with nothing in our camera yet (logged once, `view::CameraKeys::press`): `accel`, `decel`,
-  `increase_camera_rot`, `decrease_camera_rot`, `toggle_move_fast`, `toggle_tracking`, `intelli_zoom`,
-  `context_camera`, `camera_bookmark_save0..3`, `camera_bookmark_view0..3`. Their exe behaviour (`0x005EAF00`):
-  `accel` / `decel` divide / multiply the move scale (+0x24) by an exp factor, clamped to 0.01..2.0, and
-  `increase_camera_rot` / `decrease_camera_rot` the turn scale (+0x28) the same way; `toggle_move_fast` flips a byte;
-  tracking, context camera and intelli zoom toggle a camera mode when the camera's permission mask (`0x005DB870`,
-  bits 32 / 128 / 64) allows; the bookmark funcs take N from the name. A move step is the move scale times the
-  `0x005B7AE0` multiplier (doubled for `step_fwd_fast`), a turn step half the turn scale; each move kind is gated by
-  its own mask bit. The exp factor's argument, the scales' start values and the camera's step functions are not
-  traced (our speeds PROVISIONAL, `view::camera_key_step`).
+- Camera funcs with nothing in our camera yet (logged once, `view::CameraKeys::press`): `context_camera`
+  (`0x005F4CA0`, permission bit 128). `toggle_tracking` and `intelli_zoom` are done (§59.5), the other camera funcs
+  §59.4.
 - Card manager funcs not done (logged once, `__ntw_battle_card_shortcut`): `select_next`, `select_prev`,
   `usegroup0..9` (the card manager's handler and its lock are not traced; the lock is taken as the camera's,
   PROVISIONAL).
@@ -2714,6 +2715,258 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   Interface (ctor `0x0061AC40`, 29 embedded event signals at `+0x18`..`+0x398`, dtor `0x00622DA0`), referenced from
   `0x0133475C`. INFERRED: the exe posts it on a double click; who calls that slot was not traced. Ours does not post
   it yet (open; `battle_script::INPUT_EVENT_NAMES` lists only the camera actions).
+- Worker battlecamera (2026-11-10): the same interface's next slots include `0x006588A0`, "Double Click Unit Card"
+  (referenced from `0x01334798`), so the script events are posted by the HUD's card and cursor code through that
+  vtable; neither caller was reached (the slots are only ever called indirectly). No `WM_RBUTTONDBLCLK` (0x206)
+  handling, `CS_DBLCLKS` class style or `GetDoubleClickTime` call was found, so INFERRED: the exe times the two
+  clicks itself. The window stays PROVISIONAL. Next: a debugger sitting with a breakpoint on `0x005DD720` and on
+  `0x00658100`, double right-clicking in a battle, and reading the caller and the compared time.
+
+### 59.4 The battle camera (worker battlecamera, 2026-11-10; CONFIRMED unless tagged)
+- Ours: `battle::camera` (the rules, tested without a window) fed by `view::move_camera`. The camera is an eye, a
+  target one metre in front, and the height above the ground it keeps.
+- Speeds and limits are tweaks, each registered through `0x00454730` by its initialiser: `CAMERA_HEIGHT_MIN_LAND`
+  2.5 (`0x00408860`), `CAMERA_HEIGHT_MAX_LAND` 60 (`0x004087C0`), sea 15 / 150 (`0x004088B0` / `0x00408810`, not
+  used yet), `CAMERA_MOVE_SPEED_MAX` 100 (`0x00408900`), `CAMERA_MOVE_SPEED_MIN` 10 (`0x00408950`),
+  `CAMERA_TURN_SPEED` 5 (`0x004089F0`). The camera manager's constructor `0x00590020` and `0x005EA6D0` override them
+  from the preferences: `camera_move_speed` → MAX and a tenth of it → MIN, `camera_turn_speed` → TURN.
+  `0x005EAF00` negates the tilt when the preferences object (`0x00611A50`, battle UI `+0x2804C`) answers true to
+  vfunc `+0x1EC` and the turn for vfunc `+0x1FC`. INFERRED: `+0x1EC` reads `invert_cam_x_axis` (env var id 90,
+  object `0x0149FD00`) and `+0x1FC` `invert_cam_y_axis` (id 91, `0x0149DC30`), only from the order of the options'
+  help texts `0x0130F1B8` "tilting up/down" and `0x0130F224` "panning left/right". Not settled statically: the two
+  objects are referenced only by their registrations `0x004044A0` / `0x004044F0` (which call the registrar
+  `0x00454480`, the one reference to the table `0x014A06E0`), their atexit destructors `0x012E2740` / `0x012E2750`
+  and the saver `0x0045A5F0`; nothing references their table slots `0x014A0848` / `0x014A084C`; the preferences pointer is stored at
+  `+0x2804C` only by `0x00593BD0` (`0x00593CA6`, from a register, its source not followed). Next: follow
+  `0x00593BD0`'s caller to the object's vtable and read slots `+0x1EC` / `+0x1FC`, or a debugger sitting.
+- The handler `0x005EAF00` (after the input-layer test): a step's argument is (2 with move-fast, else 1) × the
+  controller's move scale (`0x005B7AE0`; INFERRED: its other byte `+0x21` is clear in a battle); `step_fwd_fast`
+  doubles it again; a turn's argument is the rotation scale × 0.5. Each step or turn then posts its input code 0..10
+  (§59.1); the other funcs post nothing. `accel` / `decel` multiply the move scale by e^±t and
+  `increase_camera_rot` / `decrease_camera_rot` the rotation scale, both held in [0.01, 2] (the controller
+  `0x00592CC0` starts them at 1); t is read from the battle UI's `+0x28224`, the frame time in seconds (the frame
+  update `0x005F5530` stores the frame-time struct's delta seconds there and passes it to the camera manager's frame
+  vfunc `+0x120`; `SetBattleUIFrameTimeFromMs` `0x005F4CF0` writes the field too). `toggle_move_fast`
+  flips the controller's byte `+0x48`.
+- The step functions, with h the kept height (`+0x150`) clamped to its limits (`0x005B73E0` / `0x005B73C0`) and
+  `rate` the camera's time. The handler's funcs go through the generic camera's vfuncs: forward (`+0x6C`) and right
+  (`+0x78`) axes, negated for back and left, through vfunc `+0x5C`; the up axis (`+0x54`) × ±arg through vfunc
+  `+0x60`. So there is one horizontal and one vertical step, each with its own speed helper:
+  - Horizontal step `0x005E5550` (vtable slots `0x0132CAE4`, `0x0132CC0C`, `0x0132CD34`, `0x0132CFC4`): eye and
+    target move by the axis × arg × the pan speed, then the constraint (vfunc `+0x124`). The pan speed `0x005E55C0` =
+    (MIN_HEIGHT + (MOVE_MAX − MOVE_MIN) × (h − MIN_HEIGHT) / (MAX_HEIGHT − MIN_HEIGHT)) × rate: 2.5 m/s at the
+    lowest height, 92.5 m/s at the highest. The base term is the minimum height, not MOVE_MIN (the code at
+    `0x005E565C`..`0x005E5674`); it may be a slip, but nothing proves the intent, so it is kept 1:1.
+  - Vertical step `0x005E5C30` (slots `0x0132CAE8`, `0x0132CC10`, `0x0132CD38`, `0x0132CE9C`, `0x0132CFC8`): eye
+    and target move along the axis by arg × the rise speed and the kept height by the same, then the constraint.
+    The rise speed `0x005E5D30` = |exp(ln(MAX / MIN) × rate) × h − h|, so the height changes by the factor 24 per
+    second.
+  - Turn (`0x005FBA10`): the generic yaw (vfunc `+0xA8`) by TURN × rate × arg × 0.5 × FOV (`+0x24`) × aspect
+    (`+0x30`) radians, then the constraint; TURN × rate is `0x005FBA70`. FOV is 70° (`0x01451468`); the aspect is
+    taken as 4:3 (INFERRED, the window's writer is not traced): 2.036 rad/s. INFERRED: a positive arg (`rot_r`)
+    turns right on screen (ours does; the exe's yaw sign is not verified).
+  - Tilt (`0x005F9890`): TURN × rate × arg × 0.25 × FOV: 0.764 rad/s.
+  - The alternative rate: `0x005E55C0`, `0x005E5D30`, `0x005FBA70` and `0x00600480` use float `+0x144` instead of
+    the rate `+0x13C` while byte `+0x140` is set. The base camera constructor `0x0058F3E0` clears both
+    (`0x0058F478` / `0x0058F47F`); only the mouse handler `0x005EE600` sets it, around its wheel's up step (1/30,
+    cleared again at `0x005EE85D`), and the `BCQ_FORCE_TICK` command `0x005BF8B0` (registered by `0x0040CD80`),
+    which never clears it. The keys run with it clear, so ours uses the rate alone.
+- The constraint `0x005B3DF0`, after every step and every frame: the height is clamped; the view is made one metre
+  long with its elevation within ±0.6 rad (INFERRED: the generic camera's limit fields at their start value, no
+  battle writer found); the eye goes to the kept height above the ground, but never lower than the minimum height
+  above the higher of the two ground points one metre ahead to the left and right (`0x005D79A0`); the target moves
+  by the same height. PROVISIONAL in ours: the exe also keeps the eye inside the battle's camera rectangle (manager
+  `+0x2EC`..`+0x2F8`, copied by `0x00590B20`; its source is not traced).
+- The camera's frame update `0x00600480` (its vfunc `+0x120`, profiled as "TW Cam"; vtable slot `0x0132CBA8`, also
+  called by the tracking camera's update `0x005FDCC0` at `0x005FE2E3`): the constraint (vfunc `+0x124`); then
+  `0x010FBB40` on `+0x154` and on `+0x16C` with the rate (or `+0x144`), each setting three floats from
+  `0x010FBB00` of the float, its goal three floats on, and the rate; then `0x006084D0` with the kept height, 0, 0,
+  500.0, 1500.0, 2.5 and 0; last `0x005FD7B0`, which stores its first argument as the rate `+0x13C` and returns
+  whether byte `+0x138` is clear. PROVISIONAL in ours: the `0x010FBB40` and `0x006084D0` steps are not ported
+  (their fields are not traced; `0x006084D0` may be drawing work, which is our own renderer's, DESIGN.md §3.7.1).
+  CONFIRMED (2026-11-11): `0x006084D0` takes t = where the height lies between the camera's minimum and maximum
+  (`0x005B73E0` / `0x005B73C0`; 0 below, 1 above, 0 when the range is under 0.001) and calls the camera's vfuncs
+  `+0x84` / `+0x88` / `+0x8C` (type 0: `0x005F5520` / `0x005F5510` / `0x005F5500`, which store floats `+0x3C`,
+  `+0x40`, `+0x4C`) with lerp(0, 0), lerp(500, 1500) and lerp(2.5, 0); `0x005F54D0` starts that block as (arg, 0,
+  −100, 100, …) and vfuncs `+0x78` / `+0x7C` / `+0x80` (`0x005C3940` / `0x005C3930` / `0x005C3920`) read them back.
+  Their readers are not traced.
+  INFERRED: the key presses run before the frame update (the key poll's place relative to `0x005F5530` was not
+  found statically), so each step uses the previous frame's rate.
+- The camera's rate is a steady frame time, not the frame's own (ported, `FrameTimes` in `battle::camera`). The
+  battle UI's frame update `0x005F5530` stores the frame-time struct's delta seconds at `+0x28224` and calls the
+  camera manager's frame vfunc `0x005FE410` (manager vtable `0x0132D520`, slot `+0x120` = `0x0132D640`, its one
+  reference; called at `0x005F5614`) with that and (100 − its second stack argument) × 0.001, the argument forced
+  to 0 while byte `+0x282A4` is set (`0x005F5566`). `0x005FE410` ignores its first argument; it:
+  - first calls `0x005FE6A0` on manager `+0x300` (battle UI `+0x2821C`; the vfunc `+0x108` result of camera
+    `+0x828`, else the current `+0x814`; battle UI `+0x28200`'s `+0x70`; battle UI `+0x28234` × 0.001; not traced);
+  - keeps battle UI `+0x28224` in a 100-slot ring at manager `+0x850` (count `+0x9E0`, next slot `+0x9E4`, both
+    zeroed by the constructor `0x00590020` at `0x00590427` / `0x00590431`): the time goes in the next slot, the
+    count grows by one while the next slot is at the count, and the next slot wraps mod 100 (`0x005FE4C4`..
+    `0x005FE4ED`);
+  - takes `0x005F3790` of the ring: over the first min(count, 100) slots in slot order, the mean m, the population
+    standard deviation s (the square root of the summed (m − t)² over the count), then the mean of only the times
+    with m − s ≤ t ≤ s + m, all single-precision SSE. At least one time is always in range (were all farther than
+    s, their variance would exceed s²); if rounding ever left none it returns 0/0. With fewer than 100 frames only
+    the filled slots count (the count is at least 1 here, the push comes first);
+  - holds it in [1/120 (`0x01331B00` = `0x3C088889`), 1.0] (`0x005FE4F8`..`0x005FE520`: below the floor gives the
+    floor, else `minss` with 1.0, which gives 1.0 for 0/0); while byte `0x014A417E` is 1 it is battle UI
+    `+0x2822C` × 0.001 instead (game time; set only by `0x005B4960`, the console command
+    `battle_camera_use_game_time`, registered by `0x0040F980`; debug only, not ported);
+  - calls the current camera's (`+0x814`) vfunc `+0x120` with that rate and its second argument. When it returns
+    false the next camera `+0x810` replaces it, or, with none, a new one through `0x005F48F0` (manager type
+    `+0x838`) when the current is `+0x808`, else `+0x800`; `+0x810` is cleared (`0x005FE589`..`0x005FE5C4`). A
+    second camera `+0x81C` gets the same call and is destroyed (vfunc `+0x104`) when it returns false. Then
+    `0x005F7B00` when `+0x9E8` passes `0x007B2750`; float `0x01459B04` = 1.0 when the current camera is not
+    `+0x820`; and while byte `0x014A417F` is set the current camera's vfunc `+0x70` with float `0x014A6D28`, the
+    byte cleared. It returns 1.
+
+  So at a steady frame rate the rate is the frame time; a hitch is left out of it; above 120 fps the camera moves
+  as at 120 (20% faster than the frame time at 144 fps). The keys' `accel` / `decel` read the raw `+0x28224`
+  (`0x005EAF00`), so ours passes them the frame's own time.
+- A new camera's rate is 0.01, stored by the base camera constructor `0x0058F3E0` (`0x0058F46E`), which also clears
+  bytes `+0x138` and `+0x140`; its kept height is the eye's height above the ground (the type-0 camera's
+  constructor `0x00592760`). The ring is the manager's, so a new camera (a bookmark's view) does not reset it. Ours
+  caps the frame time at `shortcut_keys::MAX_FRAME_TIME` as the campaign does (the frame clock `0x0048A650`).
+- Bookmarks: `camera_bookmark_save<n>` (`0x005F35D0`) frees the slot's old view and keeps the eye and target in the
+  manager's array at `+0xA00`; `camera_bookmark_view<n>` (`0x00610770`) does nothing for an empty slot, otherwise
+  makes a new camera of the manager's type (`+0x838`) at that view, in place at once. Ours keeps any number of slots
+  (the name's digit picks it; the exe's array size is not traced, its key files use 0..3).
+- The permission mask: `0x005DB870` tests (mask & bits) == bits on manager `+0x9EC`. The constructor sets it to all
+  bits (`0x00590445`); the only other writer is the message handler `0x005E6580` (vtable slot `0x0132D6FC`), which
+  ORs the message's bits in (`0x005CBBB0`) when its first byte is 1 and clears them otherwise. The message's
+  sender is not traced; ours allows everything.
+- PROVISIONAL, ours: the mouse wheel changes the kept height by a tenth per notch. The start view without a battle
+  file's camera is ours (behind the player's army). Harness views (`NAPOLEON_BATTLE_CAMERA`,
+  `NAPOLEON_BATTLE_ZOOM`) are never constrained.
+- Leads, not ported (from the review of 2026-11-10; static, not re-traced here): the battle camera's mouse handler
+  is `0x005EE600` (vtable slot `0x0132FAC4`).
+  - Wheel: when the wheel moved and permission bit 256 allows, arg = the wheel delta (`0x00E23470`, kept against
+    current value) × preferences vfunc `+0x1F4` × 0.00025, × 0.025 more while key 28 is held (`0x00E20190`; the
+    key's meaning is not traced); then camera vfunc `+0xA0` (cam_up, the vertical step) with that arg at the fixed
+    rate 1/30 (`+0x144` = `0x3D088889`, `+0x140` set, cleared at `0x005EE85D`); posts input 7 (move up) when
+    arg > 0, else 8.
+  - Edge scrolling, with preferences vfunc `+0x1E4` true and the cursor in the window: x < 0.0035 or x > 0.9965
+    above y 0.75 (bit `0x20000`) turns left / right (inputs 12 / 11); below y 0.75 (bit `0x100000`) step_l /
+    step_r (13 / 14); y < 0.0035 (bit `0x80000`) forward (15), y > 0.9965 back (16): `INPUT_EVENT_NAMES` 11..16.
+  - Mouse drag (INFERRED): the handler's head, through battle UI vfunc `+0x128` with keys 55 / 116 as modifiers,
+    turns or strafes (inputs 6 / 5 or 3 / 4) and tilts or moves vertically (9 / 10 or 2 / 0).
+- Tests: `battle::camera::tests` (pan speeds at both heights, the move-fast back step, the height factor and
+  clamps, the start rate and the rate a frame keeps, up and down alike, the steady rate and the ring's wrap, a
+  hitch left out and a part-filled ring, the [1/120, 1] hold, yaw and pitch rates, the invert
+  preferences, the preference speeds, the elevation clamp, the wall clearance, the scales' clamps, bookmarks, the
+  bindings).
+
+### 59.5 The camera modes (worker cameramodes, 2026-11-11; static, CONFIRMED unless tagged)
+- The camera manager holds the free camera `+0x800`, the tracking camera `+0x808`, the current `+0x814`, the next
+  `+0x810` (a transition's destination) and the track target `+0x82C`. Ours: one `Mode` (free / tracking / zoom) and
+  an optional `Transition` in `battle::camera::BattleCamera`; the view on screen is `BattleCamera::view`.
+- The toggles (`0x005EAF00`, permission bits 32 / 64 / 128): each one's "on" is (its camera ≠ the current one).
+  - `toggle_tracking` `0x005F67B0`: on → `StartTracking` `0x005F7BE0`, only when a track target is set; off →
+    `0x005CDD80` (only when the current camera is the tracking one): `NewCameraOfType` `0x005F48F0` puts a free
+    camera at the view and reaches it through a transition (`0x005FB4D0`, speed 1.0).
+  - `intelli_zoom` `0x005F6840`: on → `StartIntelliZoom` `0x005F7D30`; off → `0x005CDD90`: the zoom camera is freed
+    and the kept free camera `+0x800` is current again at once (no transition).
+  - `context_camera` `0x005F4CA0`: on (only with a track target) clears `+0x830` and calls `0x005F79C0` (camera ctor
+    `0x0058F530`, update `0x005FD7D0`); off clears `+0x830` and makes the free camera `+0x800` current at once
+    (`0x005CDD70`). Not ported.
+  - The toggles take the on / off as their argument; `StartTracking` calls the other two with off.
+- `StartTracking` `0x005F7BE0`: the zoom's and the context camera's toggles with off (`0x005F6840` / `0x005F4CA0`,
+  each acting only when its camera is current: a zoom still in its transition stays in its slot `+0x80C`, unseen),
+  then the manager copies the current camera's view into its own view block (`0x005F7470`, `0x005F7C01`), releases
+  the old tracking camera, builds a tracking camera (ctor `0x00591BC0`, update `0x005FF450`) on the target at that eye
+  and target (its heading from them, `0x005922A8`) with a 70° field of view, keeps it at `+0x808` and reaches it
+  through `StartTransition` (flag 1, speed 1.0). With the manager's camera type `+0x838` at 2 it builds another class
+  (`0x0058F6E0`, 520 bytes; not traced, ours has the type-0 cameras only). The update refreshes the target entity's
+  matrix (`+0x194`) and inverse (`+0x1D4`) so the view rides with the unit, constrains, and returns false when the
+  entity is gone (its vfunc `+0x14`); the manager (`0x005FE410`) then calls `NewCameraOfType` for the tracking camera.
+  INFERRED: gone means no men or off the field (the entity is one of four kinds by battle type, `0x005D3430`:
+  `0x007D3510`, `0x005FC180`, `0x005F72B0`, `0x007A6FB0`; their vfuncs `+0x04` / `+0x14` are not traced).
+- `StartTransition` `0x005FB4D0`: the destination becomes `+0x810` (`0x005FB4E1`), the old transition `+0x804` is
+  released, and the transition camera (ctor `0x00592410`) is built from the manager's view block (the view on screen)
+  to the destination and made current. Its flag argument (`+0x164`): 1 starts elapsed at 0; 0 starts it at the length
+  (`0x00592738`), so the first frame shows the destination and ends it: in place at once. Tracking, zoom and
+  `NewCameraOfType` from `0x005CDD80` pass 1; a bookmark view (`0x00610770`, a new free camera at `+0x800`) passes 0.
+  Its byte argument (`+0x15C`, 0 from every caller) would take the speed as the length instead and change the curve.
+- `StartIntelliZoom`: ends tracking first; the zoom camera (`0x00592860`, update `0x00600600` = `0x005FD7B0` only, so
+  never constrained) has the shown eye, a target one metre along the cursor's ray (`0x010EC7D0`) and a quarter of
+  the camera's field of view; it takes over through a transition. Ours: the ray through our renderer's view under
+  the cursor (`view::move_camera`), and the view's own direction while the cursor is off the window (our choice:
+  the exe always has a cursor). `0x010EC7D0` is the ray's point: the eye plus the normalised ray through the cursor
+  times its last argument (1 here). The zoom camera's rate starts again (`0x0058F46E`), as does the tracking
+  camera's and a free camera's from `NewCameraOfType`; the kept free camera `+0x800` is not touched, so a zoom
+  started while the tracking camera is still in its transition comes back to that free camera, not to the tracking
+  view (ours keeps it in `Mode::Tracking { free }`). The function returns the new transition camera (`0x005FB4D0`'s
+  result).
+  - ORIGINAL BUG (`0x005F7E9B` / `0x005F8060`): the branch that zooms onto the unit under the cursor never runs. It
+    loops over every unit of every alliance's armies (`0x005F7EBE`..`0x005F802F`): the unit's squad summary centre
+    on the ground (`0x005F7F25` / `0x005F7F31`) and radius (summary `+0x670`, `0x005F7F76`), keeping the unit with
+    the largest cosine between the cursor's ray and the way to that centre over all units, a later one winning a
+    tie (`0x005F7FC5`..`0x005F7FF6`); after the loop that one best cosine is tested against a single threshold
+    (`0x005F8060`), and when it passes the zoom's target is the best unit's centre and its field of view half of
+    atan2(radius, distance), held in [5°, 85°] (`0x005F80B3`..`0x005F80DB`). But the running best starts at
+    1.3853649 (float `0x01331B64`) and the threshold is 1.3953649 (`0x01331B68`), above any cosine, so no unit is
+    ever kept and the zoom always aims one metre along the ray. Our fix (`battle::camera::zoom_onto`): the same
+    structure (the best over all units, then one test of it), the running best starting below any cosine, and our
+    threshold (PROVISIONAL, the one meant is lost): the best unit counts when the ray passes within its radius as
+    seen from the eye (cosine ≥ cos atan2(radius, distance)); when it fails, no unit is zoomed onto, even if another
+    unit's radius holds the ray. Test `intelli_zoom_zooms_onto_the_unit_under_the_cursor`.
+- The transition `0x005FFB00` (started by `0x005FB4D0`; its constructor `0x00592410` sets the length and returns
+  the camera): length = max(0.025 s per metre the eye moves, 3/π s per radian between the directions, the cosine
+  held in [0, 1]) held in [0.5, 3] s, times the speed (1.0 from every caller here). Each frame its update runs the
+  base update `0x005FD7B0` (the rate, the leave flag), then the destination's update, then r = sin(elapsed / length × π/2) held in [0, 1] (ease byte `+0x15C` clear); eye and field of view
+  lerp, the direction's yaw turns the short way and its pitch and length lerp, target = eye + direction, then the
+  eye is lifted to 2 m over the ground; elapsed += rate. It returns length > elapsed; the manager then makes `+0x810`
+  current.
+- Keys on a mode camera go through its vtable. Each camera's leave flag `+0x138` (vfunc `+0x100`) makes its frame
+  update (`0x005FD7B0`) return false:
+  - transition: every step, rise, turn and tilt sets it (`0x005F9360`, through `0x005E5540` / `0x005E5C20`); the
+    press only ends the transition and the destination `+0x810` becomes current (`0x005FE410`);
+  - zoom: up / down `0x005E5CD0` change the field of view by the step's vertical part × 0.005 (float `0x014514D4`),
+    held in [5°, 85°], no rate. The step's vector is the up axis `+0x54` × arg (`0x010EA4C0`), and that axis is
+    (0, 1, 0): `NewCameraOfType` `0x005F48F0` builds every camera with it (`0x005F497F`), the base constructor
+    `0x010CF360` stores it (`0x010CF44B`), the zoom takes the manager's copy (`0x005F7470` → `0x00592860`), and the
+    only later writers of `+0x54` are the copy `0x010E9B80` and the transition's blend (`0x005FFE65`), so the
+    vertical part is the arg. The rest set the flag through `0x005F9370`, which also calls vfunc `+0x4C` of the
+    battle UI's `+0x2804C` object (`0x00611A50`) with 0; the zoom camera's constructor called it with 1
+    (`0x005928D0`). What it switches is not traced (PROVISIONAL in `BattleCamera::leave_zoom`);
+  - tracking: horizontal steps set the flag (`0x005F9360`; the RTS update `0x005FEF80` then returns false), up / down
+    are the free rise `0x005E5C30`, the turn `0x005FB9B0` is the free turn, the tilt `0x005F9850` is a rise by
+    arg × 10.
+- `SetTrackTarget` `0x005F9B70`: on sets `+0x82C` and restarts a current tracking camera on it; off makes a current
+  tracking camera on that unit give way (`0x005CDD80`). With the context camera current, on with a new target
+  restarts the context camera (`0x005F79C0`) and off changes nothing (not ported). Callers: the script function `SetSelectionProxy` `0x005D3430`
+  (registered by `0x0040B710`), which `template.BattleUnitCard.lua`'s InitState calls with its `m_item_address` on
+  Selected (true) and Default (false); and `CameraFocusOnSelection` `0x005CE6A0` (registered by `0x00408C80`; no
+  caller in our scripts, not wired). Ours: `battle_prelude.lua` → `BattleUiRequest::SelectionProxy` → `hud::frame`.
+  INFERRED: the engine sets each card's `m_item_address` (the card never does); ours sets the unit id.
+- `SetSelectionProxy` `0x005D3430` in full: it pops the boolean `on` before the gate (`0x005D3455`) and the unit after it (`0x0044D320`
+  at `0x005D348B` / `0x005D3551`), and returns 0 (no Lua values) on
+  every path. (1) The gate: nothing happens while the battle UI manager's byte `+0x9CD` is set (written only by its
+  destructor `0x005A8FC0`); ours serves the request only while the battle UI runs (`hud::frame`). (2) The entity:
+  the battle UI (`+0xF8`) holds one of two battle objects, `+0x28200` or `+0x28204`, and the manager's dword `+0x3F8` (`0x005D346F`)
+  picks one of two lookups for each, so the unit's battle entity comes from `0x007D3510` or `0x007A6FB0` (the
+  `+0x28200` object; with `+0x3F8` set only when that object's `+0x7C` is set) or `0x005FC180` / `0x005F72B0` (the
+  `+0x28204` object); what the objects and `+0x3F8` are is not traced (ours: the land battle's unit id). (3) It calls
+  the camera manager's (`+0x281B8`) vfunc `+0x12C`, `SetTrackTarget`, with that entity and `on` (ported). (4) On the
+  `+0x28200` paths only: when the unit is the subject of the UI manager's `+0x100` object's `+0x14` (compared at
+  that subject's `+0x1F0`, or `+0x1F8` with `+0x3F8` set), the camera manager's `+0x830` (the context camera's
+  subject) becomes that subject; then (5) the entity's flag becomes `on`: `0x007C8D70` (byte `+0x88`), or byte
+  `+0x5D1` with `+0x3F8` set; `0x005F3E60` and the 12-value script getter `0x008590B0` read it back, for what is
+  not traced. (4) and (5) are not ported (PROVISIONAL in `BattleCamera::set_track_target`: the context camera is not
+  done, and the flag's reader is not traced).
+- Not traced, left as is: the manager's frame vfunc `0x005FE410` also sets `dword_1459B04` to 1.0 when the current
+  camera is not the context camera (`+0x820`), and applies `byte_14A417F` through the current camera's vfunc
+  `+0x70`.
+- Battle speed and pause are done (`0x005D02A0`, `ntw_sim::battle::speed`). The original has no "general" or "unit"
+  camera mode: `ZoomToGeneral`, `ZoomToUnit` and `CameraZoomToSelection` are script zooms (`ZoomTo` requests, not
+  done yet).
+- Not settled: who routes the wheel while a mode camera is current (ours leaves the zoom alone, §59.4).
+- Tests: `battle::camera::tests` (tracking needs a target and toggles, rides with the unit, its keys, the selection
+  proxy, the zoom's aim and cut back, the zoom onto a unit, the zoom during the tracking transition, the new
+  cameras' rate, the kept free camera's rate through a zoom (`0x005FE410` updates the current camera
+  `+0x814` and the second camera `+0x81C`, never the kept one `+0x800`), zoom from tracking, the transition's
+  ease and short turn, a bookmark ending the modes),
+  `ui::battle::tests::selection_proxy_is_a_request`.
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.

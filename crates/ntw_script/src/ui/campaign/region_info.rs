@@ -303,7 +303,7 @@ pub(super) fn region_info(lua: &Lua, inner: &Inner, ui: &CampaignUi, r: RegionId
 fn region_facts(ui: &CampaignUi, r: RegionId, details: bool) -> Option<(Facts, Option<DetailFacts>)> {
     let m = ui.model();
     let reg = m.world.regions.get(&r)?;
-    let governing = m.world.governing_faction(r).unwrap_or(reg.owner);
+    let governing = economy::governing_faction(&m, reg);
     // The governorship that lists the region (region +0x248) and its governor.
     let post = m
         .world

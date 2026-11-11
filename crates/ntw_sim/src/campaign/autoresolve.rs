@@ -39,8 +39,8 @@ pub struct ArUnit {
     /// value that `0x007CA330` passes from the land battle card `+0xBC` at `0x007CA5CE`, and `0x0070D580` from
     /// the naval card `+0xE8`): the card's rank, so any character's, not only the army general's; 0 without
     /// a character (the default record `0x00513A50`). Signed like the rank (`0x00A198D0`: −1..9). The path
-    /// is CONFIRMED; the rank itself still lacks the pending-battle bonuses (`agents::rank_original`
-    /// PROVISIONAL, CHARACTERS_FIDELITY.md §16), so this value does too until the model has them.
+    /// is CONFIRMED, and the rank holds the pending-battle bonuses (`agents::pending_battle_bonus`), since the
+    /// autoresolve reads it while the battle is still pending, as the exe's does in battle state 1.
     pub star_rating: i32,
     /// The unit belongs to a human player (unit `+0xB8`).
     pub human: bool,

@@ -7,6 +7,11 @@ fn capture_rolls_the_fortification_after_the_town_buildings() {
     use super::capture::{damage_roll, CaptureChoice, LOOT_DAMAGE, OCCUPY_DAMAGE};
     let mut m = capture_model(vec![A]);
     m.world.regions.get_mut(&RegionId(11)).unwrap().fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
+    // A siege unit, so that the army takes the empty walled settlement at once (`0x008B26C0`) instead of
+    // besieging it.
+    let mut rules = (*m.rules).clone();
+    rules.units.get_mut("test_unit").unwrap().siege_capable = true;
+    m.rules = Arc::new(rules);
     let mut rng = m.rng;
     damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
     let (fort_loot, _) = damage_roll(&mut rng, 100, 300, LOOT_DAMAGE, (4, 15_000));
@@ -16,8 +21,19 @@ fn capture_rolls_the_fortification_after_the_town_buildings() {
     assert_eq!(m.rng, rng);
     let p = m.pending_capture.clone().unwrap();
     assert_eq!((p.loot.fortification, p.occupy.fortification), (Some(fort_loot), Some(fort_occ)));
+    // The walls go through their damage entry (`0x00B582E0`): with none the walls' health is 0.
+    let mut no_entry = m.clone();
+    no_entry.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
+    assert_eq!(no_entry.world.regions[&RegionId(11)].fortification.as_ref().unwrap().health, 0);
+    // With one, its factor loses (100 − roll) hundredths, and the health is trunc(factor × 100).
+    m.world.regions.get_mut(&RegionId(11)).unwrap().siege.fortifications = vec![FortificationDamage { factor: 0.9, kind: 0, ..Default::default() }];
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Occupy }).unwrap();
-    assert_eq!(m.world.regions[&RegionId(11)].fortification.as_ref().unwrap().health, fort_occ);
+    let factor = 0.9f32 - (100 - fort_occ) as f32 * 0.01f32;
+    let r = &m.world.regions[&RegionId(11)];
+    assert_eq!(r.siege.fortifications[0].factor, factor);
+    let expected = FortificationDamage { factor, ..Default::default() }.walls_health();
+    assert_eq!(r.fortification.as_ref().unwrap().health, expected);
+    assert!(expected < fort_occ, "{expected} {fort_occ}");
 }
 
 #[test]
@@ -62,8 +78,11 @@ fn fortifications_are_built_and_repaired() {
     m.end_turn();
     assert_eq!(m.world.regions[&RegionId(10)].fortification.as_ref().map(|b| b.level_key.as_str()), Some("test_walls"));
     assert!(m.can_build(RegionId(10), SlotRef::Walls, "test_keep").is_ok(), "intact walls can be upgraded");
-    // Damaged to 40: repair costs round(1000 × 0.6) and takes floor(0.6 × 2) = 1 turn.
-    m.world.regions.get_mut(&RegionId(10)).unwrap().fortification.as_mut().unwrap().health = 40;
+    // Damaged to 40 (factor 0.4): repair costs round(1000 × (1 − factor)) (`0x00B66410`) and takes
+    // floor(0.6 × 2) = 1 turn.
+    let r10 = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r10.fortification.as_mut().unwrap().health = 40;
+    r10.siege.fortifications = vec![FortificationDamage { factor: 0.4, kind: 0, hits: 4, ..Default::default() }];
     // ... and the command refuses to upgrade it: one rule for the panel and the command.
     assert!(m.can_build(RegionId(10), SlotRef::Walls, "test_keep").is_err(), "no upgrade of damaged walls");
     // An AI owner repairs its damaged walls at its turn start (`ai_repairs`), so they can be
@@ -87,6 +106,81 @@ fn fortifications_are_built_and_repaired() {
     assert_eq!(m.repair_turns(RegionId(10), SlotRef::Walls), 1);
     m.world.regions.get_mut(&RegionId(10)).unwrap().fortification.as_mut().unwrap().health = 0;
     assert_eq!(m.repair_turns(RegionId(10), SlotRef::Walls), 2);
+}
+
+/// The walls' repair cost comes from their damage entry's factor, not their health (`CalculateSlotRepairCost`
+/// `0x00B66410`): FISTP(cost × (1 − factor)); with no entry it is 0, whatever the health.
+#[test]
+fn the_walls_repair_cost_follows_the_damage_factor() {
+    let mut m = test_model();
+    let r10 = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r10.fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 40 });
+    assert_eq!(m.repair_cost_uncapped(RegionId(10), SlotRef::Walls), 0, "no entry");
+    let entry = |factor: f32| FortificationDamage { factor, kind: 0, ..Default::default() };
+    // A non-walls entry is not the walls'.
+    m.world.regions.get_mut(&RegionId(10)).unwrap().siege.fortifications = vec![FortificationDamage { kind: 1, ..entry(0.5) }];
+    assert_eq!(m.repair_cost_uncapped(RegionId(10), SlotRef::Walls), 0, "no walls entry");
+    // test_building_level costs 300: 300 × 0.75 = 225, 300 × 0.5 = 150 (the health, 40, plays no part).
+    for (factor, cost) in [(0.25, 225), (0.5, 150), (1.0, 0)] {
+        m.world.regions.get_mut(&RegionId(10)).unwrap().siege.fortifications = vec![entry(factor)];
+        assert_eq!(m.repair_cost_uncapped(RegionId(10), SlotRef::Walls), cost, "factor {factor}");
+    }
+}
+
+/// A finished walls repair restores their damage entry (`StepRepairConstructionItem` `0x00B78490` → `0x00576850`:
+/// every hit point 0, factor 1, no hits, the kind kept) and the walls' health to 100; then the finished walls
+/// item adds the kinds the list lacks (`0x00B143E0` at `0x00B788CF`).
+#[test]
+fn a_finished_walls_repair_restores_the_damage_entry() {
+    let mut m = test_model();
+    let r10 = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r10.fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 60 });
+    r10.siege.fortifications = vec![FortificationDamage { hit_points: vec![0.3, 0.1], factor: 0.6, kind: 0, hits: 4 }];
+    r10.construction = vec![ConstructionItem { slot: SlotRef::Walls, level_key: "test_building_level".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Repair { health_per_turn: 40, turns: 1 }, active: true }];
+    m.end_turn();
+    let r10 = &m.world.regions[&RegionId(10)];
+    assert!(r10.construction.is_empty(), "{:?}", r10.construction);
+    assert_eq!(r10.fortification.as_ref().unwrap().health, 100);
+    let full = |kind| FortificationDamage { kind, ..Default::default() };
+    assert_eq!(r10.siege.fortifications, [FortificationDamage { hit_points: vec![0.0, 0.0], factor: 1.0, kind: 0, hits: 0 }, full(1), full(2), full(3)]);
+}
+
+/// Finished walls items give the settlement its default fortification entries (`StepSlotConstructionItem`
+/// `0x00B78800` → `0x00B143E0` at `0x00B788CF`: kinds 0 to 3 at full health), so walls built in a campaign
+/// take siege damage and cost to repair; the list stays bounded (the exe appends four more every time). A
+/// non-walls item adds none.
+#[test]
+fn a_finished_walls_item_adds_the_default_fortification_entries() {
+    let mut m = test_model();
+    let mut rules = (*m.rules).clone();
+    rules.buildings.insert("test_walls".into(), BuildingRules { chain: "test_fort".into(), level: 0, cost: 1000, turns: 1, ..Default::default() });
+    rules.chain_slots.insert("test_fort".into(), vec!["settlement_fortification".into()]);
+    m.rules = Arc::new(rules);
+    let full = |kind| FortificationDamage { kind, ..Default::default() };
+    let r10 = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r10.construction = vec![ConstructionItem { slot: SlotRef::Slot(0), level_key: "test_building_level".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Repair { health_per_turn: 40, turns: 1 }, active: true }];
+    r10.slots[0].building = Some(BuildingRef { level_key: "test_building_level".into(), health: 60 });
+    m.end_turn();
+    assert!(m.world.regions[&RegionId(10)].siege.fortifications.is_empty(), "a town slot's item adds none");
+    // The end of turn passed the turn on; give it back to the region's owner.
+    m.turn = TurnState::in_turn_of(A, vec![A]);
+    m.world.factions.get_mut(&A).unwrap().treasury = 5000;
+    m.apply(CampaignCommand::ConstructBuilding { region: RegionId(10), slot: SlotRef::Walls, level_key: "test_walls".into() }).unwrap();
+    m.end_turn();
+    let r10 = &m.world.regions[&RegionId(10)];
+    assert_eq!(r10.fortification.as_ref().map(|b| b.level_key.as_str()), Some("test_walls"));
+    assert_eq!(r10.siege.fortifications, [full(0), full(1), full(2), full(3)]);
+    assert_eq!(m.repair_cost_uncapped(RegionId(10), SlotRef::Walls), 0, "intact walls cost nothing");
+    // A second finished walls item keeps the entries, damage included, and adds no duplicate.
+    let r10 = m.world.regions.get_mut(&RegionId(10)).unwrap();
+    r10.siege.fortifications[0] = FortificationDamage { factor: 0.4, kind: 0, hits: 4, ..Default::default() };
+    r10.fortification.as_mut().unwrap().health = 40;
+    let before = r10.siege.fortifications.clone();
+    r10.construction = vec![ConstructionItem { slot: SlotRef::Walls, level_key: "test_walls".into(), turns_remaining: 1, cost: 0, kind: ConstructionKind::Demolish, active: true }];
+    m.end_turn();
+    let r10 = &m.world.regions[&RegionId(10)];
+    assert!(r10.fortification.is_none(), "demolished");
+    assert_eq!(r10.siege.fortifications, before);
 }
 
 /// A damaged road is never repaired (PROVISIONAL: the exe's road repair is not traced, nothing

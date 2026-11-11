@@ -34,6 +34,9 @@ pub struct CampaignSim {
     /// Writes this campaign's saves (the HUD's save panel and quick save call it) and holds the
     /// facts of the campaign as loaded.
     pub saver: Rc<CampaignSaver>,
+    /// This campaign session, unique in the process ([`CampaignSim::new_session`]): a display that
+    /// outlives a session (a system's `Local`) tells two sessions' equal generations apart by it.
+    pub session: u64,
     /// Bumped after every change, so displays know when to refresh.
     pub generation: u64,
     /// The selected character.
@@ -107,9 +110,7 @@ impl ntw_script::ui::CampaignSaves for CampaignSaver {
     fn save(&self, path: &std::path::Path, season_name: &str) -> Result<(), String> {
         // The scripts write their `save_value` slots during `SavingGame` (CAMPAIGN_DATA.md §4).
         let (values, report) = self.script.save_values();
-        for e in report.errors {
-            warn!("Campaign script SavingGame: {e}");
-        }
+        log_script_errors(&report);
         let (saved, hash) = {
             let st = self.script.state();
             // The hash the load logs ("save state hash"): equal when the save keeps the state. Taken as the
@@ -152,6 +153,17 @@ impl CampaignSim {
         &self.saver.human
     }
 
+    /// A session number not handed out before in this process.
+    pub fn new_session() -> u64 {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The model's state as displays track it: (session, generation).
+    pub fn stamp(&self) -> (u64, u64) {
+        (self.session, self.generation)
+    }
+
     /// The human faction's id.
     pub fn human_id(&self) -> Option<FactionId> {
         self.model().faction_by_key(self.human()).map(|f| f.id)
@@ -164,12 +176,12 @@ impl CampaignSim {
         let label = format!("{cmd:?}");
         match self.host.apply(cmd) {
             Ok(fired) => {
-                let mut events: Vec<CampaignEvent> = fired.into_iter().map(|(e, _)| e).collect();
+                let mut events: Vec<CampaignEvent> = fired_events(fired).collect();
                 if self.model().pending_battle.is_some() {
                     // HOOK: launch GameMode::Battle with the pending battle's armies here and
                     // apply its outcome with `CampaignModel::apply_battle_result`.
                     match self.host.apply(CampaignCommand::Autoresolve) {
-                        Ok(f) => events.extend(f.into_iter().map(|(e, _)| e)),
+                        Ok(f) => events.extend(fired_events(f)),
                         Err(e) => warn!("Autoresolve: {e}"),
                     }
                 }
@@ -187,9 +199,10 @@ impl CampaignSim {
     }
 
     /// Takes what the game side needs from the events a command, an end turn or the opening of turn 1
-    /// fired: the walks to animate, the outcome movies, the factions the victory check found lost, the
-    /// dropped construction items to log (the model has no logger) and the battle result for the status
-    /// line.
+    /// fired: the walks to animate (turn 1's are recorded but never animated: no marker exists before
+    /// the first [`sync_markers`], which spawns each marker where the model has its character), the
+    /// outcome movies, the factions the victory check found lost, the dropped construction items to
+    /// log (the model has no logger) and the battle result for the status line.
     pub fn note_events(&mut self, events: &[CampaignEvent]) {
         for e in events {
             if let CampaignEvent::CharacterMoved { character, path } = e {
@@ -226,6 +239,23 @@ impl CampaignSim {
         info!("Campaign: end turn -> {msg}");
         self.last_message = msg;
     }
+}
+
+/// Logs the script errors of one fired event as warnings, each once (each message starts with its
+/// event's name, [`ntw_script::FireReport::errors`]).
+pub(crate) fn log_script_errors(report: &ntw_script::FireReport) {
+    for e in &report.errors {
+        warn!("Campaign script {e}");
+    }
+}
+
+/// The events of a command, an end turn or the opening of turn 1, with each script error they
+/// raised logged ([`log_script_errors`]).
+pub(crate) fn fired_events(fired: Vec<(CampaignEvent, ntw_script::FireReport)>) -> impl Iterator<Item = CampaignEvent> {
+    fired.into_iter().map(|(e, r)| {
+        log_script_errors(&r);
+        e
+    })
 }
 
 /// Adds a `CharacterMoved` path to the moves to animate. A character moving more than once (an AI's
@@ -296,6 +326,16 @@ fn marker_lift(kind: CharacterKind, navy: bool, army: bool) -> f32 {
     }
 }
 
+/// Whether a display gated on the model looks at it now: when the model's [`CampaignSim::stamp`]
+/// differs from the one it last looked at (`seen`, kept), so a new session always counts.
+pub(crate) fn model_moved(seen: &mut Option<(u64, u64)>, now: (u64, u64)) -> bool {
+    if *seen == Some(now) {
+        return false;
+    }
+    *seen = Some(now);
+    true
+}
+
 /// Keeps one marker per character on the map, at the model's position (or animating there),
 /// and recolours settlement flags.
 #[allow(clippy::too_many_arguments)]
@@ -304,16 +344,15 @@ pub fn sync_markers(
     sim: Option<NonSendMut<CampaignSim>>,
     ground: Option<Res<CampaignGround>>,
     assets: Option<Res<MarkerAssets>>,
-    mut synced: Local<u64>,
+    mut synced: Local<Option<(u64, u64)>>,
     mut markers: Query<(Entity, &CharacterMarker, &mut Transform, Option<&mut MoveAnimation>)>,
     flags: Query<(&SettlementFlag, &MeshMaterial3d<StandardMaterial>)>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
     let (Some(mut sim), Some(ground), Some(assets)) = (sim, ground, assets) else { return };
-    if *synced == sim.generation + 1 {
+    if !model_moved(&mut synced, sim.stamp()) {
         return;
     }
-    *synced = sim.generation + 1;
     let moves = std::mem::take(&mut sim.moves);
     let m = sim.model();
     let navies: HashMap<CharacterId, bool> =
@@ -749,9 +788,10 @@ pub fn right_click(sim: &mut CampaignSim, x: f32, z: f32) {
     }
 }
 
-/// What [`preview`] caches between frames: the cursor cell the path was planned for, the model
-/// generation it was planned at, and the path itself.
-type PreviewCache = Option<((i32, i32), u64, super::arrows::ArrowPath)>;
+/// What [`preview`] caches between frames: the cursor cell the path was planned for, the model's
+/// [`CampaignSim::stamp`] it was planned at (so a new session at an equal generation plans again),
+/// and the path itself.
+type PreviewCache = Option<((i32, i32), (u64, u64), super::arrows::ArrowPath)>;
 
 /// Draws the selection ring and, while hovering, publishes the planned path for
 /// [`super::arrows::draw`], which draws the original's textured arrows along it (the two colours:
@@ -796,7 +836,8 @@ pub fn preview(
         return;
     };
     let key = ((x * 2.0) as i32, (z * 2.0) as i32);
-    let fresh = !matches!(&*cache, Some((k, g, _)) if *k == key && *g == sim.generation);
+    let stamp = sim.stamp();
+    let fresh = !matches!(&*cache, Some((k, s, _)) if *k == key && *s == stamp);
     if fresh {
         let to = (Fixed20::from_f64(x as f64), Fixed20::from_f64(z as f64));
         let plan = {
@@ -809,7 +850,7 @@ pub fn preview(
                 points: p.path.points.clone(),
                 reachable: p.reachable,
             };
-            (key, sim.generation, path)
+            (key, stamp, path)
         });
     }
     // Hand the path to the arrow renderer, which owns the movement arrow from here on.
@@ -849,6 +890,21 @@ pub fn leave(world: &mut World) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A display's `Local` outlives a campaign session: leaving one without a command (generation 0)
+    /// and opening the next (generation 0 again) must still look at the new model once. Under the
+    /// old gate (`seen == generation + 1`) the second session's first look returned early.
+    #[test]
+    fn a_new_session_is_looked_at_even_at_an_equal_generation() {
+        let (first, second) = (CampaignSim::new_session(), CampaignSim::new_session());
+        assert_ne!(first, second);
+        let mut seen = None;
+        assert!(model_moved(&mut seen, (first, 0)));
+        assert!(!model_moved(&mut seen, (first, 0)), "nothing changed");
+        assert!(model_moved(&mut seen, (second, 0)), "a new session at the same generation");
+        assert!(!model_moved(&mut seen, (second, 0)));
+        assert!(model_moved(&mut seen, (second, 1)), "a command");
+    }
 
     #[test]
     fn a_characters_moves_walk_as_one_path() {

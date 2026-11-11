@@ -162,8 +162,19 @@ fn handler_errors_are_reported_and_others_still_run() {
     let r = h.fire("NewSession", ScriptContext::default());
     assert_eq!(r.handlers, 3);
     assert_eq!(r.errors.len(), 1);
-    assert!(r.errors[0].contains("boom"));
+    assert!(r.errors[0].starts_with("NewSession: ") && r.errors[0].contains("boom"), "{:?}", r.errors);
     assert!(h.lua().load("return after_error").eval::<bool>().unwrap());
+}
+
+/// Every error message starts with the event's name, also when the handler list cannot be read, so
+/// the game side logs each as it comes and never adds the name a second time.
+#[test]
+fn an_unreadable_handler_list_is_reported_with_the_events_name() {
+    let h = host();
+    h.exec("package = 5").unwrap();
+    let r = h.fire("NewSession", ScriptContext::default());
+    assert_eq!((r.handlers, r.errors.len()), (0, 1), "{:?}", r.errors);
+    assert!(r.errors[0].starts_with("NewSession: "), "{:?}", r.errors);
 }
 
 #[test]
@@ -220,6 +231,50 @@ fn war_started_character_faction_reads_the_faction_flag() {
     h.fire("FactionTurnEnd", ScriptContext::for_faction("france"));
     let seen: Vec<bool> = h.lua().load("return war_started").eval().unwrap();
     assert_eq!(seen, vec![false, true, false]);
+}
+
+#[test]
+fn sieges_fought_read_the_character_counters() {
+    // 0x008A21F0 / 0x0089EC50: the context character's +0x4D8 / +0x4D0 (`CHARACTER` #20 / #18,
+    // raised by LaySiege 0x008AF6A0); 0 without a character.
+    use ntw_sim::campaign::{Character, CharacterId, CharacterKind};
+    use ntw_sim::fixed::Fixed20;
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let mut model = common::tiny_model();
+    let fr = model.faction_by_key("france").unwrap().id;
+    let c = CharacterId(7);
+    model.world.characters.insert(
+        c,
+        Character {
+            id: c,
+            faction: fr,
+            kind: CharacterKind::General,
+            position: (Fixed20::from_int(0), Fixed20::from_int(0)),
+            movement_points: 10,
+            max_movement_points: 10,
+            base_movement_points: 10,
+            garrisoned_in: None,
+        },
+    );
+    let d = model.world.character_details.entry(c).or_default();
+    d.offensive_sieges = 3;
+    d.defensive_sieges = 2;
+    let h = ScriptHost::new(model, "france", src).unwrap();
+    h.run_file("data/test.lua").unwrap();
+    h.exec(
+        r#"local e = require "data.events"
+           e.CharacterTurnEnd = {}
+           e.CharacterTurnEnd[1] = function(context)
+               sieges[#sieges+1] = conditions.OffensiveSiegesFought(context) * 10 + conditions.DefensiveSiegesFought(context)
+           end
+           e.FactionTurnEnd = { e.CharacterTurnEnd[1] }
+           sieges = {}"#,
+    )
+    .unwrap();
+    assert!(h.fire("CharacterTurnEnd", ScriptContext { character: Some(c.0), ..Default::default() }).errors.is_empty());
+    h.fire("FactionTurnEnd", ScriptContext::for_faction("france"));
+    let seen: Vec<i64> = h.lua().load("return sieges").eval().unwrap();
+    assert_eq!(seen, vec![32, 0]);
 }
 
 #[test]
@@ -344,7 +399,7 @@ fn a_handover_from_a_handler_returns_its_destruction_events() {
     let colonel = garrison.commander.expect("its colonel");
     assert_ne!(colonel, prussian);
     assert!(
-        fired.iter().any(|(e, _)| matches!(e, CampaignEvent::CharacterCreated { character } if *character == colonel)),
+        fired.iter().any(|(e, _)| matches!(e, CampaignEvent::CharacterCreated { character, .. } if *character == colonel)),
         "the new colonel's CharacterCreated is returned: {:?}",
         fired.iter().map(|(e, _)| e).collect::<Vec<_>>()
     );
@@ -439,44 +494,11 @@ fn garrison_in_a_region_of(
     owner: ntw_sim::campaign::FactionId,
     garrison_faction: ntw_sim::campaign::FactionId,
 ) -> (ntw_sim::campaign::RegionId, ntw_sim::campaign::CharacterId) {
-    use ntw_sim::campaign::{Character, CharacterId, CharacterKind, ForceId, MilitaryForce, Region, RegionId, Settlement};
+    use ntw_sim::campaign::{Character, CharacterId, CharacterKind, ForceId, MilitaryForce, Region, RegionId};
     use ntw_sim::fixed::Fixed20;
     let (region, general, force) = (RegionId(1), CharacterId(7), ForceId(70));
     let origin = (Fixed20::from_int(0), Fixed20::from_int(0));
-    model.world.regions.insert(
-        region,
-        Region {
-            id: region,
-            key: "test_region_1".into(),
-            owner,
-            settlement: Settlement { key: "settlement:test_region_1:town".into(), position: origin },
-            slots: Vec::new(),
-            road: None,
-            fortification: None,
-            road_holder: None,
-            fortification_holder: None,
-            population: 1000,
-            base_gdp: 100,
-            gdp: 100,
-            wealth_growth_offset: 0,
-            discontent_growth: 0,
-            town_wealth: 0,
-            town_wealth_growth: 0,
-            town_wealth_refresh: Default::default(),
-            commodity_demand: Vec::new(),
-            tax_exempt: false,
-            religions: Vec::new(),
-            class_bases: Vec::new(),
-            unit_resources: Vec::new(),
-            population_state: Default::default(),
-            recruitment_queue: Vec::new(),
-            construction: Vec::new(),
-            garrison: Some(force),
-            fleet: None,
-            siege: Default::default(),
-            traits: Vec::new(),
-        },
-    );
+    model.world.regions.insert(region, Region { garrison: Some(force), ..common::region(1, owner) });
     model.world.characters.insert(
         general,
         Character {
@@ -633,7 +655,7 @@ fn force_make_protectorate_with_a_battle_pending_changes_nothing() {
     let mut model = common::tiny_model();
     let (fr, au) = (model.faction_by_key("france").unwrap().id, model.faction_by_key("austria").unwrap().id);
     model.apply(CampaignCommand::DeclareWar { a: fr, b: au }).unwrap();
-    model.pending_battle = Some(PendingBattle { attacker: ForceId(1), defenders: vec![ForceId(2)], settlement: None, resume: None });
+    model.pending_battle = Some(PendingBattle { attacker: ForceId(1), defenders: vec![ForceId(2)], settlement: None, resume: None, ambush: false });
     let h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();
     h.fire("NewSession", ScriptContext::default());
@@ -1092,10 +1114,7 @@ fn the_liberation_protectorate_event_gives_handlers_the_liberator() {
 /// faction, before the region passes to the liberated faction.
 #[test]
 fn a_liberate_choice_fires_the_protectorate_event_with_the_liberator() {
-    use ntw_sim::campaign::{
-        CampaignCommand, CampaignEvent, CaptureChoice, Region, RegionId, Settlement,
-    };
-    use ntw_sim::fixed::Fixed20;
+    use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CaptureChoice, RegionId};
     let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
     let mut model = common::tiny_model();
     let id = |m: &ntw_sim::campaign::CampaignModel, k: &str| m.faction_by_key(k).unwrap().id;
@@ -1103,40 +1122,7 @@ fn a_liberate_choice_fires_the_protectorate_event_with_the_liberator() {
     model.turn.humans = vec![fr];
     // Made-up region of austria's whose rebels are prussia, out of the game: a liberation target.
     let region = RegionId(1);
-    model.world.regions.insert(
-        region,
-        Region {
-            id: region,
-            key: "test_region_1".into(),
-            owner: au,
-            settlement: Settlement { key: "settlement:test_region_1:town".into(), position: (Fixed20::from_int(0), Fixed20::from_int(0)) },
-            slots: Vec::new(),
-            road: None,
-            fortification: None,
-            road_holder: None,
-            fortification_holder: None,
-            population: 1000,
-            base_gdp: 100,
-            gdp: 100,
-            wealth_growth_offset: 0,
-            discontent_growth: 0,
-            town_wealth: 0,
-            town_wealth_growth: 0,
-            town_wealth_refresh: Default::default(),
-            commodity_demand: Vec::new(),
-            tax_exempt: false,
-            religions: Vec::new(),
-            class_bases: Vec::new(),
-            unit_resources: Vec::new(),
-            population_state: Default::default(),
-            recruitment_queue: Vec::new(),
-            construction: Vec::new(),
-            garrison: None,
-            fleet: None,
-            siege: Default::default(),
-            traits: Vec::new(),
-        },
-    );
+    model.world.regions.insert(region, common::region(1, au));
     model.world.region_rebel_factions.insert(region, "prussia".into());
     model.world.faction_details.entry(pr).or_default().out_of_game = Some(true);
     model.capture_by_force(region, fr, None);
@@ -1226,7 +1212,7 @@ fn character_looted_settlement_gives_the_character_and_no_faction() {
     );
     let h = ScriptHost::new(model, "france", src).unwrap();
     h.run_file("data/test.lua").unwrap();
-    let ev = CampaignEvent::CharacterLootedSettlement { character: c };
+    let ev = CampaignEvent::CharacterLootedSettlement { character: c, agent_type: Some(CharacterKind::General) };
     assert_eq!(ev.script_name(), Some("CharacterLootedSettlement"));
     let ctx = h.context_for(&ev);
     assert_eq!(ctx, ScriptContext { character: Some(c.0), ..Default::default() });

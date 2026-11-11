@@ -1,7 +1,8 @@
 //! Research helper (read-only): compares each town/port slot's angle with the direction from its
 //! position to its dock point in `regions.esf`.
 //!   cargo run -p ntw_formats --example slot_facing_probe -- [map, default nap_europe]
-use ntw_formats::campaign_map::{GameFiles, RegionMap};
+use ntw_formats::campaign_map::RegionMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 
 const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";

@@ -148,7 +148,7 @@ fn move_force_spends_and_end_turn_refills_movement_points() {
     let ev = m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: pos(18, 24) }).unwrap();
     assert_eq!(ev.len(), 2);
     assert!(matches!(&ev[0], CampaignEvent::CharacterMoved { character: CharacterId(100), path } if path.len() == 2));
-    assert_eq!(ev[1], CampaignEvent::MovementPointsExhausted { character: CharacterId(100) });
+    assert_eq!(ev[1], CampaignEvent::MovementPointsExhausted { character: CharacterId(100), agent_type: Some(CharacterKind::General) });
     let general = &m.world.characters[&CharacterId(100)];
     assert_eq!(general.movement_points, 0);
     assert_eq!(general.position, pos(18, 24));
@@ -318,7 +318,7 @@ fn armies_board_navies_sail_and_land() {
     assert!(m.apply(CampaignCommand::Embark { force: ForceId(1001), navy: ForceId(1002) }).is_err());
     assert!(m.apply(CampaignCommand::Embark { force: ForceId(1002), navy: ForceId(1002) }).is_err());
     let ev = m.apply(CampaignCommand::Embark { force: ForceId(1000), navy: ForceId(1002) }).unwrap();
-    assert!(ev.contains(&CampaignEvent::CharacterEmbarksNavy { character: CharacterId(100), navy: ForceId(1002) }));
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CharacterEmbarksNavy { character: CharacterId(100), navy: ForceId(1002), .. })));
     assert_eq!(m.carrier_of(ForceId(1000)), Some(ForceId(1002)));
     assert_eq!(m.passengers_of(ForceId(1002)), vec![ForceId(1000)]);
     // Boarding spends nothing itself; the walk to the fleet did.
@@ -349,7 +349,7 @@ fn armies_board_navies_sail_and_land() {
         c.movement_points = c.max_movement_points;
     }
     let ev = m.apply(CampaignCommand::MoveForce { force: ForceId(1000), to: pos(14, 0) }).unwrap();
-    assert!(ev.contains(&CampaignEvent::CharacterDisembarksNavy { character: CharacterId(100), navy: ForceId(1002) }), "{ev:?}");
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CharacterDisembarksNavy { character: CharacterId(100), navy: ForceId(1002), .. })), "{ev:?}");
     assert_eq!(m.carrier_of(ForceId(1000)), None);
     let general = &m.world.characters[&CharacterId(100)];
     assert_eq!((general.position, general.movement_points), (pos(14, 0), 0));

@@ -159,6 +159,10 @@ pub enum BattleUiRequest {
     SummaryDismissed,
     /// `ZoomToUnit(unit)` / `CameraZoomToSelection()`.
     ZoomTo(Option<u32>),
+    /// `BattleUI.SetSelectionProxy(unit, on)` (CONFIRMED `0x005D3430`): the tracking camera's
+    /// target set (`on`) or let go, `SetTrackTarget` `0x005F9B70`; the rest of what it does is in
+    /// `napoleon::battle::camera::BattleCamera::set_track_target` (BATTLE_FIDELITY.md §59.5).
+    SelectionProxy { id: u32, on: bool },
 }
 
 /// Installs the battle UI's engine side into a UI host. Call before loading
@@ -415,6 +419,7 @@ pub fn take_requests(host: &UiScriptHost) -> mlua::Result<Vec<BattleUiRequest>> 
             "continue" => BattleUiRequest::ContinueBattle,
             "summary_dismissed" => BattleUiRequest::SummaryDismissed,
             "zoom" => BattleUiRequest::ZoomTo(r.get("id")?),
+            "selection_proxy" => BattleUiRequest::SelectionProxy { id: r.get("id")?, on: r.get("on")? },
             _ => continue,
         });
     }
@@ -808,6 +813,19 @@ mod tests {
         let log = host.take_log();
         assert_eq!(log.iter().filter(|l| l.contains("UNKNOWN card manager shortcut select_next")).count(), 1, "{log:#?}");
         assert!(!log.iter().any(|l| l.starts_with("ERROR")), "{log:#?}");
+    }
+
+    /// `BattleUI.SetSelectionProxy(unit, on)` (`0x005D3430`) reaches the engine as the tracking
+    /// camera's target; a card with no unit (nil) asks nothing.
+    #[test]
+    fn selection_proxy_is_a_request() {
+        let host = UiScriptHost::new(ScriptSource::empty(), ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        host.lua().load("BattleUI.SetSelectionProxy(7, true); BattleUI.SetSelectionProxy(7, false); BattleUI.SetSelectionProxy(nil, true)").exec().unwrap();
+        assert_eq!(
+            take_requests(&host).unwrap(),
+            [BattleUiRequest::SelectionProxy { id: 7, on: true }, BattleUiRequest::SelectionProxy { id: 7, on: false }]
+        );
     }
 
     /// ORIGINAL BUG (0x005D3C60 / 0x005D3BF0): the exe's toggles returned the new minimised flag,

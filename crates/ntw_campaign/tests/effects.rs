@@ -6,10 +6,10 @@ use std::path::PathBuf;
 
 use ntw_campaign::save;
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
-use ntw_sim::campaign::effects::{apply_start_handicaps, saved_set, EffectKey, Effects, TECH_RESEARCHED};
+use ntw_sim::campaign::effects::{agent_bonus_key, apply_start_handicaps, saved_set, EffectKey, Effects, TECH_RESEARCHED};
 
 fn data_dir() -> PathBuf {
     std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -75,6 +75,57 @@ fn effect_tables_and_start_sums() {
     fx_rules.insert_technology("test".into(), [(row.effect.as_str(), 2.0)]);
     let k = EffectKey::pop_class_religion(&row.bonus, &row.class, &row.religion);
     assert_eq!(fx_rules.technology()["test"].get_qualified(k.kind, &k.bonus, &k.qualifier), 2.0);
+}
+
+/// `EffectKey` folds the qualifier's case (the exe keys the record, not its text); vanilla data spells
+/// each qualifier one way, so the folding shows only with a mod's rows: every junction's qualifiers and
+/// the start position's saved entries (the agent caps, which add to the agent junction's keys) give one
+/// spelling per (kind, bonus, folded qualifier).
+#[test]
+fn vanilla_data_spells_each_effect_qualifier_one_way() {
+    use std::collections::BTreeMap;
+    let Some((db, source)) = load() else { return };
+    let t = &db.campaign.effects;
+    // (kind, bonus, folded qualifier) → the spellings seen.
+    let mut seen: BTreeMap<(String, String, String), std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut add = |kind: &str, bonus: &str, qualifier: &str| {
+        seen.entry((kind.to_string(), bonus.to_string(), qualifier.to_ascii_lowercase())).or_default().insert(qualifier.to_string());
+    };
+    for r in t.bonus_unit_category.iter() {
+        add("unit_category", &r.bonus, &r.category);
+    }
+    for r in t.bonus_unit_class.iter() {
+        add("unit_class", &r.bonus, &r.class);
+    }
+    for r in t.bonus_pop_class.iter() {
+        add("pop_class", &r.bonus, &r.class);
+    }
+    for r in t.bonus_pop_class_religion.iter() {
+        add("pop_class_religion", &r.bonus, &format!("{}|{}", r.class, r.religion));
+    }
+    for r in t.bonus_religion.iter() {
+        add("religion", &r.bonus, &r.religion);
+    }
+    for r in t.bonus_chain.iter() {
+        add("chain", &r.bonus, &r.chain);
+    }
+    // The agent junction's key is the saved type-0 entry's ([`agent_bonus_key`]), so both add up.
+    for r in t.bonus_agent.iter() {
+        match agent_bonus_key(&r.bonus, &r.agent) {
+            Some(k) => add("saved 0", &k.bonus, &k.qualifier),
+            None => add("agent", &r.bonus, &r.agent),
+        }
+    }
+    let loaded = ntw_campaign::read_esf(&source, &db).expect("load");
+    for d in loaded.model.world.faction_details.values() {
+        for e in d.bonus_base.iter().chain(&d.bonus_with_difficulty) {
+            let k = e.key();
+            add(&format!("saved {}", e.kind), &k.bonus, &k.qualifier);
+        }
+    }
+    assert!(seen.keys().filter(|(kind, _, _)| kind == "saved 0").count() > 1, "the agent junction and caps were read");
+    let spelled_twice: Vec<_> = seen.iter().filter(|(_, s)| s.len() > 1).collect();
+    assert!(spelled_twice.is_empty(), "{spelled_twice:?}");
 }
 
 #[test]

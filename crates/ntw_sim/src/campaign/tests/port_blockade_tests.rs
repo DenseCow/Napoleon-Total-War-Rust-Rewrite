@@ -249,7 +249,7 @@ fn a_blockading_navy_that_sails_off_to_land_its_army_lifts_the_blockade() {
     m.world.embarked.insert(ForceId(1001), NAVY);
     let mut events = Vec::new();
     let updates = price_updates(|| events = m.apply(CampaignCommand::Disembark { force: ForceId(1001), to: pos(15, 5) }).unwrap());
-    assert!(events.contains(&CampaignEvent::CharacterDisembarksNavy { character: CharacterId(101), navy: NAVY }), "{events:?}");
+    assert!(events.iter().any(|e| matches!(e, CampaignEvent::CharacterDisembarksNavy { character: CharacterId(101), navy: NAVY, .. })), "{events:?}");
     assert_ne!(m.world.characters[&CharacterId(109)].position, off_port, "the navy sailed");
     assert_eq!((blockade(&m), price_state(&m)), (None, updated()));
     assert_eq!(updates, vec![false], "the lift's one update");
@@ -323,7 +323,7 @@ fn a_beaten_blockader_that_survives_the_docked_navys_attack_loses_its_blockade()
 #[test]
 fn the_post_battle_placement_keeps_a_navy_docked_in_a_blockaded_port() {
     use super::battles::PendingBattle;
-    let battle = PendingBattle { attacker: DOCKED, defenders: vec![NAVY], settlement: None, resume: None };
+    let battle = PendingBattle { attacker: DOCKED, defenders: vec![NAVY], settlement: None, resume: None, ambush: false };
     for (blockaded, sally) in [(true, false), (false, true)] {
         let mut m = order_model(blockaded, true);
         m.undock_after_battle(&battle, sally);
@@ -365,7 +365,9 @@ fn a_blockaded_port_holds_its_ships_and_a_siege_its_land_units() {
         (r.slots[1].port, r.slots[1].position) = (true, Some(pos(5, 5)));
         r.slots[1].blockade = blockaded.then_some(PortBlockade { navy: NAVY, docked_navy_attacked: false });
         if besieged {
-            r.siege.besiegers.push(ForceId(1001));
+            // Garrisoned, with turns to hold, so that B's turn (before A's) does not take it (`0x008F9160`).
+            r.garrison = Some(ForceId(1000));
+            r.siege = SiegeState { besiegers: vec![ForceId(1001)], surrender_turns: 4, turns_besieged: 0, ..Default::default() };
         }
         for (id, unit_key) in [(9001, "test_unit"), (9002, "test_ship")] {
             let item = RecruitmentItem { id: RecruitmentItemId(id), unit_key: unit_key.into(), turns_remaining: 0, cost: 0, target: None, target_lost: false };

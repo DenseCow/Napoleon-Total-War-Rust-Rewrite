@@ -81,20 +81,20 @@ impl CampaignModel {
         };
         let mut group: BTreeMap<RegionId, usize> = BTreeMap::new();
         let mut members: Vec<Vec<RegionId>> = Vec::new();
-        for &seed in owner.keys() {
+        // One flood stack for every group (emptied by each flood).
+        let mut stack: Vec<RegionId> = Vec::new();
+        for (&seed, &f) in &owner {
             if group.contains_key(&seed) {
                 continue;
             }
             let g = members.len();
-            let f = owner[&seed];
-            let rebels = w.is_rebel_faction(f);
             group.insert(seed, g);
             let mut found = vec![seed];
-            let mut stack = vec![seed];
+            // A rebel region is a group of its own: no flood.
+            if !w.is_rebel_faction(f) {
+                stack.push(seed);
+            }
             while let Some(x) = stack.pop() {
-                if rebels {
-                    break;
-                }
                 for &n in links.get(&x).map_or(&[][..], Vec::as_slice) {
                     if owner.get(&n) == Some(&f) && !group.contains_key(&n) && same_land(x, n) {
                         group.insert(n, g);
@@ -122,17 +122,17 @@ impl RegionGroups {
                 _ => GroupChange::Reduced,
             };
         }
-        let mut theirs: Vec<usize> = Vec::new();
+        // The first of the faction's neighbour groups; a second distinct one makes it MERGED.
+        let mut first = None;
         for n in self.links(r) {
-            if let Some(&h) = self.group.get(n).filter(|&&h| h != g && self.owner.get(n) == Some(&faction) && !theirs.contains(&h)) {
-                theirs.push(h);
+            let Some(&h) = self.group.get(n).filter(|&&h| h != g && self.owner.get(n) == Some(&faction)) else { continue };
+            match first {
+                None => first = Some(h),
+                Some(f) if f != h => return GroupChange::Merged,
+                Some(_) => {}
             }
         }
-        match theirs.len() {
-            0 => GroupChange::New,
-            1 => GroupChange::Increased,
-            _ => GroupChange::Merged,
-        }
+        if first.is_some() { GroupChange::Increased } else { GroupChange::New }
     }
 
     fn links(&self, r: RegionId) -> &[RegionId] {

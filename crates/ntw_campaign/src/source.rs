@@ -14,7 +14,8 @@
 use std::sync::Arc;
 
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::{CampaignMap, FileSpan, GameFiles, SuperTexture, DISPLAY_TO_LOGIC, HEIGHT_SCALE};
+use ntw_formats::campaign_map::{CampaignMap, SuperTexture, DISPLAY_TO_LOGIC, HEIGHT_SCALE};
+use ntw_formats::pack::{FileSpan, GameFiles};
 use ntw_sim::campaign::features::CampaignFeatures;
 use ntw_sim::campaign::{CampaignModel, Terrain};
 

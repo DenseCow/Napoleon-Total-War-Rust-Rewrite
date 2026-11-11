@@ -11,7 +11,9 @@
 //!    `take_turn`'s draws (the BDI pool jitter, the recruitment draws) use in the original is
 //!    untraced, so they stay on `CampaignModel::rng` (BACKLOG §6 "CAI turn draws' stream");
 //! 3. applies the orders through the model's validated commands ([`apply_orders_with_events`]);
-//!    a battle an order starts is autoresolved at once (PROVISIONAL, see there).
+//!    a battle an order starts is autoresolved at once (PROVISIONAL, see there). A battle already
+//!    pending when the faction's turn comes is autoresolved before step 2 ([`play_faction`]); PROVISIONAL
+//!    the same way, since a human hidden side's battle is autoresolved here too.
 //!
 //! Two ways in: [`end_turn`] for a bare `CampaignModel` (tests, tools; [`end_turn_declining_calls`]
 //! when nobody plays the humans, [`end_host_turn_declining_calls`] on a script host), and [`install`], which
@@ -24,7 +26,7 @@ use std::sync::Arc;
 use ntw_script::{FireReport, ScriptHost, ScriptState};
 use ntw_sim::campaign::{CampaignCommand, CampaignEvent, CampaignModel, CommandError, FactionId, TurnStep};
 
-use super::{AiOrder, CampaignAiData, TurnContext, apply_orders_with_events, take_turn};
+use super::{AiOrder, CampaignAiData, TurnContext, apply_orders_with_events, autoresolve_pending, take_turn};
 
 /// What one AI faction did in one turn.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,8 +66,8 @@ pub fn context_from_script(state: &ScriptState) -> TurnContext {
     ctx
 }
 
-/// Plays AI faction `faction` now: decides and applies its orders. Returns the report and every
-/// event the orders caused. Human factions are skipped (empty report), and so is every faction once the
+/// Plays AI faction `faction` now: autoresolves a battle already pending, then decides and applies its
+/// orders. Returns the report and every event the battle and the orders caused. Human factions are skipped (empty report), and so is every faction once the
 /// campaign is over; an order that ends it drops the rest quietly (see [`apply_orders_with_events`],
 /// which cites the exe).
 pub fn play_faction(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext, faction: FactionId) -> (AiTurnReport, Vec<CampaignEvent>) {
@@ -73,6 +75,18 @@ pub fn play_faction(model: &mut CampaignModel, data: &CampaignAiData, ctx: &Turn
     let mut events = Vec::new();
     // The campaign-over test also skips `take_turn` (no RNG draw, no orders), which the apply guard cannot.
     if ctx.humans.contains(&faction) || model.turn.campaign_over {
+        return (report, events);
+    }
+    // A battle already pending (an ambush sprung on one of the faction's standing orders at its turn
+    // start) is fought before the faction plans: the exe gives no CAI step while a battle is set up
+    // (the step gate `0x008EFAB0` → `0x008BE2A0` at `0x008EFAF9` refuses unless the battle sequence's
+    // stage, campaign `+0xF6C` `+0x54`, is 0 or 8 and the pending-action stack `+0xF70` is empty;
+    // CONFIRMED), so no CAI step comes before the battle. INFERRED, as in CAMPAIGN_FIDELITY.md
+    // "Ambush": that the ambush's set-up battle holds that stage until it is fought. The draw order
+    // only matters if the battle and `take_turn` share a stream, which is the PROVISIONAL point of
+    // step 2 in the module docs.
+    autoresolve_pending(model, &mut events);
+    if model.turn.campaign_over {
         return (report, events);
     }
     let mut rng = model.rng;
@@ -97,10 +111,11 @@ pub fn next_ai_turn(model: &CampaignModel) -> Option<FactionId> {
 /// no step (and says so at debug level) until it is answered, through [`answer_ally_war_call`] (or a
 /// script host's `apply` of the answer), which resumes the steps. The turn's end is queued as the
 /// script host's `end_turn` queues it (`CampaignModel::begin_end_turn`, which queues it only while
-/// the current faction is in its turn): a call that stopped the AI's steps queues nothing more, and one that waits inside the
-/// current faction's own turn has the end queued behind it, run by the answer. On a model that has
-/// not started, a call raised during the start-campaign steps stops it before the turn's end is
-/// queued: once that call is answered the human is in their turn, and the next `end_turn` ends it.
+/// the current faction is in its turn): a call that stopped the AI's steps queues nothing more, and one
+/// that waits inside the current faction's own turn has the end queued behind it, run by the answer. On
+/// a model that has not started, a call raised during the start-campaign steps stops it before the
+/// turn's end is queued: once that call is answered the human is in their turn, and the next `end_turn`
+/// ends it.
 /// [`end_turn_declining_calls`] always ends one turn.
 pub fn end_turn(model: &mut CampaignModel, data: &CampaignAiData, ctx: &TurnContext) -> (Vec<CampaignEvent>, Vec<AiTurnReport>) {
     let (out, stopped) = end_turn_with(model, &mut |m: &mut CampaignModel, f| play_faction(m, data, ctx, f));

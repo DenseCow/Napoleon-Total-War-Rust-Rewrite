@@ -1,6 +1,7 @@
 //! Research helper (read-only): value ranges of a campaign map's coastline meshes.
 //!   cargo run -p ntw_formats --example coast_probe -- [map, default nap_europe]
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 
 const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";

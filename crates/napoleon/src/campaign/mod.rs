@@ -55,7 +55,7 @@ pub fn start_from_args(args: &[String]) -> Option<CampaignStart> {
     if name == "list" {
         match ntw_formats::pack::Vfs::open_install(crate::config::game_data_dir()) {
             Ok(vfs) => {
-                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+                let files = ntw_formats::pack::GameFiles { vfs: &vfs };
                 ntw_campaign::source::original_campaigns(&files).iter().for_each(|n| println!("{n}"));
             }
             Err(e) => eprintln!("cannot open the install: {e}"),

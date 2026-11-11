@@ -169,6 +169,27 @@ db_record! {
 }
 
 db_record! {
+    /// `trait_ability_effects` (`ssi`, 0 rows in vanilla): a trait level's agent ability level bonus.
+    /// The value is the row's dword at +0x18 (read `0x00DD2288`), copied into the level record's
+    /// ability row (`0x00F0D8F0`) and added as an integer (`0x00A0ECB0`, CONFIRMED).
+    pub struct TraitAbilityEffect in "trait_ability_effects", key = level_key + ability {
+        level_key: String,
+        ability: String,
+        value: i32,
+    }
+}
+
+db_record! {
+    /// `ancillary_to_ability_effects` (`ssi`, 0 rows in vanilla): an ancillary's agent ability level
+    /// bonus, added as an integer (`0x00A0EC10`, CONFIRMED).
+    pub struct AncillaryAbilityEffect in "ancillary_to_ability_effects", key = ancillary + ability {
+        ancillary: String,
+        ability: String,
+        value: i32,
+    }
+}
+
+db_record! {
     /// `ancillary_to_effects` (`ssf`, 317 rows).
     pub struct AncillaryEffect in "ancillary_to_effects", key = ancillary + effect {
         ancillary: String,
@@ -230,6 +251,8 @@ pub struct EffectTables {
     pub ancillary: Table<AncillaryEffect>,
     pub trait_attribute: Table<TraitAttributeEffect>,
     pub ancillary_attribute: Table<AncillaryAttributeEffect>,
+    pub trait_ability: Table<TraitAbilityEffect>,
+    pub ancillary_ability: Table<AncillaryAbilityEffect>,
     pub ministerial: Table<MinisterialEffect>,
     pub ministerial_effectiveness: Table<MinisterialEffectiveness>,
     pub difficulty: Table<DifficultyHandicapEffect>,

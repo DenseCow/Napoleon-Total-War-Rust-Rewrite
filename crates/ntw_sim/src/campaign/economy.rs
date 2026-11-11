@@ -828,9 +828,9 @@ pub fn region_effect(model: &CampaignModel, region: &Region, key: &str) -> f32 {
 /// The faction whose faction-wide sum and government a region's own effect set reads
 /// (`0x00A67530`, CONFIRMED through `region_effect_set`): the region's **governing** faction, which is
 /// its owner unless another faction holds the governorship that lists it (`eur_bavaria`). The set
-/// builder takes it from the governorship link (region +0x248, at `0x00A67558`). Only the set reads it:
-/// every class pick reads the owner's government ([`region_government_classes`]).
-fn governing_faction(model: &CampaignModel, region: &Region) -> FactionId {
+/// builder takes it from the governorship link (region +0x248, at `0x00A67558`). Only the set (and the
+/// panels that show it) reads it: every class pick reads the owner's government ([`region_government_classes`]).
+pub fn governing_faction(model: &CampaignModel, region: &Region) -> FactionId {
     model.world.governing_faction(region.id).unwrap_or(region.owner)
 }
 
@@ -1577,7 +1577,9 @@ pub fn hypothetical_order_attitude(model: &CampaignModel, reg: &Region, faction:
 /// faction +0x70C → +0xB0, class record +0x18 / +0x1C; CONFIRMED by decompile). A region's classes,
 /// where the rebels take their risen army's government, are [`region_government_classes`].
 pub fn government_classes(model: &CampaignModel, faction: FactionId) -> (String, String) {
-    model.world.factions.get(&faction).map_or_else(default_classes, |f| government_type_classes(model, &f.government_key))
+    model.world.factions.get(&faction).map_or_else(default_classes, |f| {
+        government_type_classes(model, &f.government_key, model.is_rebel_faction(faction))
+    })
 }
 
 fn default_classes() -> (String, String) {
@@ -1585,29 +1587,36 @@ fn default_classes() -> (String, String) {
 }
 
 /// The (upper, lower) classes of a `government_types` key; `upper` / `lower` when it is not in the
-/// rules. A key the rules lack is bad data, reported once per key per process, except the empty key
-/// ([`reports_unknown_government`]). A known key takes no lock; an unknown one takes the reported set's
-/// on every read, the empty key none.
-fn government_type_classes(model: &CampaignModel, key: &str) -> (String, String) {
+/// rules. A key the rules lack is bad data, reported once per key per process, except the rebels' empty
+/// key (`rebels`: the rebel faction's key, or a risen rebel army's; [`reports_unknown_government`]). A
+/// known key takes no lock; an unknown one takes the reported set's on every read, the rebels' empty key
+/// none.
+fn government_type_classes(model: &CampaignModel, key: &str, rebels: bool) -> (String, String) {
     if let Some(classes) = model.rules.government_classes.get(key) {
         return classes.clone();
     }
     static REPORTED: crate::reported::ReportedKeys = crate::reported::ReportedKeys::new();
-    if reports_unknown_government(&REPORTED, key) {
-        log::warn!("government type {key:?} is not in the rules' government_types: its classes read as `upper` / `lower`");
+    if reports_unknown_government(&REPORTED, key, rebels) {
+        if key.is_empty() {
+            log::warn!("a faction other than the rebels has no government type: its classes read as `upper` / `lower`");
+        } else {
+            log::warn!("government type {key:?} is not in the rules' government_types: its classes read as `upper` / `lower`");
+        }
     }
     default_classes()
 }
 
 /// Whether a `government_types` key the rules lack is reported now: any key once (`reported` keeps
-/// them), the empty key never. An empty key is no government at all, not an unknown one: the rebels of
-/// the original's files have no `GOVERNMENT` block, so every unmodified campaign has it, and the exe has
-/// no government to read for them either (its factor pass `0x008EDF70` skips a faction without a record,
-/// `0x008CEEF0`). That ours reads the default classes there is the open difference
-/// [`public_order_factors_with`] tags. A faction other than the rebels that has no government is
-/// reported by the `.esf` importer, once, when the campaign loads (its `UnknownGovernment` load warning).
-pub(crate) fn reports_unknown_government(reported: &crate::reported::ReportedKeys, key: &str) -> bool {
-    !key.is_empty() && reported.first(key)
+/// them), except the rebels' empty key (`rebels`), never. The rebels' empty key is no government at all,
+/// not an unknown one: the rebels of the original's files have no `GOVERNMENT` block, so every unmodified
+/// campaign has it, and the exe has no government to read for them either (its factor pass `0x008EDF70`
+/// skips a faction without a record, `0x008CEEF0`). That ours reads the default classes there is the open
+/// difference [`public_order_factors_with`] tags. Any other faction's empty key (a faction without a
+/// `GOVERNMENT` key, or one a map other than an `.esf` gave none) is reported, once per process for all
+/// of them (the `.esf` importer also names each such faction when the campaign loads, its
+/// `UnknownGovernment` load warning).
+pub(crate) fn reports_unknown_government(reported: &crate::reported::ReportedKeys, key: &str, rebels: bool) -> bool {
+    !(rebels && key.is_empty()) && reported.first(key)
 }
 
 /// The (upper, lower) classes the region class tests name (`IsUpperClassOfRegionGovernment` `0x008CE320` /
@@ -1628,7 +1637,7 @@ pub fn region_government_classes(model: &CampaignModel, reg: &Region) -> Option<
         return Some(government_classes(model, reg.owner));
     }
     let army = model.world.region_risen_armies.get(&reg.id)?.first()?;
-    Some(government_type_classes(model, model.world.rebel_army_governments.get(army)?))
+    Some(government_type_classes(model, model.world.rebel_army_governments.get(army)?, true))
 }
 
 /// The classes of a region that has none (one loaded without `POPULATION_CLASS` entries: every region of
@@ -1817,7 +1826,9 @@ fn gentlemen_factors_for(model: &CampaignModel, reg: &Region, side_a: FactionId,
     let rules = &model.rules;
     let divisor = (rules.var("gentleman_happiness_divisor", 1.0) as i32).max(1);
     let (mut pos, mut neg) = ([0i32; 2], [0i32; 2]);
-    for c in model.world.characters.values().filter(|c| c.kind == super::CharacterKind::Gentleman && c.garrisoned_in == Some(reg.id) && model.world.residence_of(c.id).is_some()) {
+    // The settlement's resident gentlemen: the forces are read once, and only when a gentleman is inside.
+    let residents = model.world.settlement_residents_where(reg.id, |c| c.kind == super::CharacterKind::Gentleman);
+    for c in residents.iter().filter_map(|c| model.world.characters.get(c)) {
         let x = super::agents::rank(model, c.id);
         let bonus = super::agents::own_bonus(model, c.id, "gentleman_happiness_bonus");
         let v = (x + divisor - 1) / divisor + bonus;

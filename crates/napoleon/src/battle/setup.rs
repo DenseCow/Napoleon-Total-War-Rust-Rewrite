@@ -606,9 +606,11 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
 /// army of it is deployed in its deployment area of the map's 1v1 setup like the test armies
 /// (default deployment templates, else side by side). Experience comes from the army page;
 /// the general's unit carries the army's general. The men are the unit cards' thinned by the
-/// battle's unit size (`Battle::men_at_scale`; what is traced of it and what is not: ntw_sim
-/// `battle/unit_scale.rs`). PROVISIONAL: a 2v2 army uses its alliance's area of the same index
-/// (or the first one).
+/// battle's unit size (`Battle::men_at_scale`). INFERRED: that a single-player battle thins its
+/// men by the unit-size setting at all; the exe's StartBattle builds no game-settings object and
+/// where its men are scaled is untraced, so ours applies the hosted battle's chain (ntw_sim
+/// `battle/unit_scale.rs` has the evidence). PROVISIONAL: a 2v2 army uses its alliance's area of
+/// the same index (or the first one).
 fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
     let mut next_id = 1;
     let mut army_counts = [0usize; 2];

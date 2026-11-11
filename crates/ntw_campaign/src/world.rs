@@ -103,6 +103,8 @@ pub(crate) fn load_world(
     // Pass 2: diplomacy, characters and forces of each faction.
     // (army force id, navy force id) pairs from the transport link fields.
     let mut transport_links: Vec<(u32, u32)> = Vec::new();
+    // The armies with a `REBEL_DATA` block (a block's own faults are logged where it is read).
+    let mut rebel_blocks: BTreeSet<ForceId> = BTreeSet::new();
     for rf in &raw {
         let fid = rf.faction.id;
         let fkey = rf.faction.key.clone();
@@ -188,6 +190,9 @@ pub(crate) fn load_world(
                         id: force.id.raw().into(),
                     }),
                     Entry::Vacant(slot) => {
+                        if !is_navy && rec.child("REBEL_DATA").is_some() {
+                            rebel_blocks.insert(force.id);
+                        }
                         if !is_navy && let Some(gov) = rebel_army_government(rec, &apath) {
                             world.rebel_army_governments.insert(force.id, gov);
                         }
@@ -266,10 +271,11 @@ pub(crate) fn load_world(
             log::warn!("{rpath}: risen armies {linked_before:?} are already in an earlier risen list; dropped (the exe links an army once)");
         }
         // The exe links each listed army's REBEL_DATA (`0x008CFB60` takes army +0x98 + 0x68), so a
-        // listed army without one is malformed: its region's class tests find no government.
-        let ungoverned: Vec<ForceId> = known.iter().copied().filter(|id| !world.rebel_army_governments.contains_key(id)).collect();
-        if !ungoverned.is_empty() {
-            log::warn!("{rpath}: risen armies {ungoverned:?} have no REBEL_DATA government");
+        // listed army without one is malformed: its region's class tests find no government. (A block
+        // without its government was already logged by `rebel_army_government`.)
+        let blockless: Vec<ForceId> = known.iter().copied().filter(|id| !rebel_blocks.contains(id)).collect();
+        if !blockless.is_empty() {
+            log::warn!("{rpath}: risen armies {blockless:?} have no REBEL_DATA block, so no government");
         }
         if !known.is_empty() {
             world.region_risen_armies.insert(region.id, known);
@@ -289,6 +295,12 @@ pub(crate) fn load_world(
         // (`0x00A4CE20`, `0x00A45950`; `World::region_order`).
         world.region_order.push(region.id);
         world.regions.insert(region.id, region);
+    }
+    // An army with a REBEL_DATA block that no region's risen list names (malformed): kept, and said
+    // once per load (`LoadWarning::UnlistedRisenArmies`, which names the exe's fault there).
+    let unlisted: Vec<u32> = rebel_blocks.iter().filter(|id| !risen_linked.contains(*id)).map(|id| id.raw()).collect();
+    if !unlisted.is_empty() {
+        check.warnings.push(LoadWarning::UnlistedRisenArmies { armies: unlisted });
     }
 
     // Garrisons: keep a settlement's #12 only if it names one of the owner's armies with a
@@ -322,7 +334,8 @@ pub(crate) fn load_world(
         for c in residents {
             match world.characters.get_mut(&c) {
                 Some(ch) if !in_force.contains(&c) => ch.garrisoned_in = Some(region),
-                _ => log::warn!("region {}: settlement resident {} is not a loaded agent; dropped", region.raw(), c.raw()),
+                Some(_) => log::warn!("region {}: settlement resident {} is in a force (only a forceless character is listed); dropped", region.raw(), c.raw()),
+                None => log::warn!("region {}: settlement resident {} is no loaded character; dropped", region.raw(), c.raw()),
             }
         }
     }
@@ -491,13 +504,28 @@ fn read_faction<'a>(
         .and_then(|g| g.get_str(1))
         .unwrap_or_default()
         .to_string();
-    // Reinforcement marches in progress (entry layout `0x00AFC060`, `Reinforcement`): not loaded, said once per faction.
-    let reinforcements = rec
-        .child("ARMY_REINFORCEMENT_MANAGER")
-        .and_then(|m| m.record_array("CHARACTER_REINFORCEMENTS_ARRAY"))
-        .map_or(0, |a| a.items.len());
-    if reinforcements > 0 {
-        check.warnings.push(LoadWarning::UnloadedReinforcements { faction: key.to_string(), entries: reinforcements });
+    // Reinforcement marches in progress (entry layout `0x00AFC060`, `Reinforcement`): not loaded, said once per
+    // faction. Only an entry that would still march counts: a done one (#3, entry +0x10) fails the validity
+    // check `0x00B5C830` (at `0x00B5C84D`) and is deleted unmarched, and the rebels' turn start skips the
+    // manager (`0x008F2B47`). The unit reinforcements (`UNIT_REINFORCEMENTS_ARRAY`, written by `0x00AFDEC0`)
+    // are not loaded either. They count for the rebels too: the manager's turn step of them (`0x00B5C7A0`,
+    // the tail of `0x00B71FA0`) is skipped for the rebels as well, but the unit list's other readers are not
+    // traced, so whether a rebel's entries matter is not settled.
+    let manager = rec.child("ARMY_REINFORCEMENT_MANAGER");
+    let done = |item: &[EsfNode]| match item.first().and_then(EsfNode::as_record) {
+        Some(r) => r.get_bool(3),
+        None => item.get(3).and_then(EsfNode::as_bool),
+    };
+    let reinforcements = if is_rebel {
+        0
+    } else {
+        manager
+            .and_then(|m| m.record_array("CHARACTER_REINFORCEMENTS_ARRAY"))
+            .map_or(0, |a| a.items.iter().filter(|it| done(it) != Some(true)).count())
+    };
+    let unit_reinforcements = manager.and_then(|m| m.record_array("UNIT_REINFORCEMENTS_ARRAY")).map_or(0, |a| a.items.len());
+    if reinforcements > 0 || unit_reinforcements > 0 {
+        check.warnings.push(LoadWarning::UnloadedReinforcements { faction: key.to_string(), entries: reinforcements, units: unit_reinforcements });
     }
     if !is_rebel && check.db.faction(key).is_none() {
         check
@@ -933,13 +961,65 @@ fn read_settlement_residents(garrison_res: &EsfRecord, path: &str) -> Result<Vec
 
 /// A settlement's siege from its `SIEGEABLE_GARRISON_RESIDENCE` (CONFIRMED, reader `0x00AF4B00`,
 /// writer `0x00B7A5F0`): #2 the turns to surrender, #3 the turns besieged, #13 the `U32Array` of
-/// besieging force ids (checked against the forces in `load_world`).
+/// besieging force ids (checked against the forces in `load_world`), and the
+/// `FORTIFICATIONS_BLOCK` record array of fortification damage entries (see [`read_fortification`]).
 fn read_siege(garrison_res: &EsfRecord, path: &str) -> Result<ntw_sim::campaign::SiegeState, LoadError> {
+    // `FORTIFICATIONS_BLOCK` is read unconditionally by `0x00AF4B00` (through `0x0073C590`), so a
+    // residence without it is malformed (CONFIRMED).
+    let block = array(garrison_res, "FORTIFICATIONS_BLOCK", path)?;
+    let bpath = format!("{path}/FORTIFICATIONS_BLOCK");
+    let fortifications = block
+        .items
+        .iter()
+        .map(|item| {
+            first_record(item, "FORTIFICATION_DAMAGE_INFO")
+                .ok_or_else(|| LoadError::MissingRecord { path: format!("{bpath}/FORTIFICATION_DAMAGE_INFO") })
+                .and_then(|r| read_fortification(r, &format!("{bpath}/FORTIFICATION_DAMAGE_INFO")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(ntw_sim::campaign::SiegeState {
         besiegers: u32_array_at(garrison_res, 13, path)?.iter().map(|&f| ForceId(f)).collect(),
         surrender_turns: u32_at(garrison_res, 2, path)?,
         turns_besieged: u32_at(garrison_res, 3, path)?,
+        fortifications,
     })
+}
+
+/// One `FORTIFICATION_DAMAGE_INFO` (CONFIRMED, reader `0x00514CC0`, writer `0x00523AE0`): #0 the
+/// `HIT_POINTS_BLOCK` record array of `F32` items, #1 the `F32` damage factor, #2 the `U32` kind
+/// (0 = walls), then the `U32` hit count, which version 4 keeps at #3 and version 3 at #4 (behind a
+/// discarded `U32` at #3); versions below 3 have no hit count, so it starts at 0.
+pub(crate) fn read_fortification(r: &EsfRecord, path: &str) -> Result<ntw_sim::campaign::FortificationDamage, LoadError> {
+    let hp = r
+        .get(0)
+        .and_then(EsfNode::as_record_array)
+        .filter(|a| a.name == "HIT_POINTS_BLOCK")
+        .ok_or_else(|| LoadError::MissingRecord { path: format!("{path}/HIT_POINTS_BLOCK[]") })?;
+    let hit_points = hp
+        .items
+        .iter()
+        .map(|item| {
+            item.first().and_then(EsfNode::as_f32).ok_or_else(|| LoadError::BadField {
+                path: format!("{path}/HIT_POINTS_BLOCK"),
+                index: 0,
+                expected: "f32",
+                found: item.first().map(EsfNode::type_name),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let factor = r.get_f32(1).ok_or_else(|| LoadError::BadField {
+        path: path.to_string(),
+        index: 1,
+        expected: "f32",
+        found: r.get(1).map(EsfNode::type_name),
+    })?;
+    let kind = u32_at(r, 2, path)?;
+    let hits = match r.version {
+        v if v >= 4 => u32_at(r, 3, path)?,
+        3 => u32_at(r, 4, path)?,
+        _ => 0,
+    };
+    Ok(ntw_sim::campaign::FortificationDamage { hit_points, factor, kind, hits })
 }
 
 /// The ids of the armies risen in one `REGION` (see `World::region_risen_armies`): the `I32Array`

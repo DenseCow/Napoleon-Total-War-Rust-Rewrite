@@ -181,7 +181,7 @@ fn a_spy_network_is_established_after_three_idle_turns() {
     m.world.character_details.get_mut(&CharacterId(103)).unwrap().idle_turns = 3;
     m.turn.humans = vec![A];
     let ev = m.start_campaign();
-    assert!(ev.contains(&CampaignEvent::CharacterBuildsSpyNetwork { character: CharacterId(103) }));
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CharacterBuildsSpyNetwork { character: CharacterId(103), .. })));
     let p = m.world.characters[&CharacterId(103)].position;
     assert_eq!(m.world.network_sight[&A], vec![((p.0.to_f32(), p.1.to_f32()), m.sight_radius(CharacterId(103)))]);
     // Only a human faction's spies; the event only at exactly 3 idle turns, the disc from 3 on.
@@ -248,14 +248,14 @@ fn new_characters_fire_character_created() {
     let created: Vec<CharacterId> = events
         .iter()
         .filter_map(|e| match e {
-            CampaignEvent::CharacterCreated { character } => Some(*character),
+            CampaignEvent::CharacterCreated { character, .. } => Some(*character),
             _ => None,
         })
         .collect();
     let new: Vec<CharacterId> = m.world.characters.keys().filter(|c| !known.contains(c)).copied().collect();
     assert!(!new.is_empty());
     assert_eq!(created, new);
-    assert_eq!(CampaignEvent::CharacterCreated { character: new[0] }.script_name(), Some("CharacterCreated"));
+    assert_eq!(CampaignEvent::CharacterCreated { character: new[0], agent_type: None }.script_name(), Some("CharacterCreated"));
 }
 
 #[test]

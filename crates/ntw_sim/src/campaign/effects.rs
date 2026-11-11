@@ -63,7 +63,8 @@ pub enum BonusKind {
 /// ignoring ASCII case, and they sort that way. The exe's key holds each qualifier as a u32, not as
 /// text (EFFECTS_FIDELITY §1; its merge `0x00E04760` sums entries whose key words are equal), so one
 /// record has one entry however a row spells its key; ours gets the same by folding the case. Vanilla
-/// data spells each key one way, so this shows only with a mod's rows. A set keeps the spelling of the
+/// data spells each key one way (every junction's qualifiers and the start position's saved entries,
+/// `ntw_campaign` tests/effects.rs), so this shows only with a mod's rows. A set keeps the spelling of the
 /// first key added.
 #[derive(Debug, Clone)]
 pub struct EffectKey {
@@ -216,13 +217,18 @@ impl EffectSet {
 
     /// The int form the exe uses in integer formulas (`0x00E23E10`: rounded half to even).
     pub fn get_int(&self, bonus: &str) -> i32 {
-        f64::from(self.get(bonus)).round_ties_even() as i32
+        int_bonus(self.get(bonus))
     }
 
     /// No entries.
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
+}
+
+/// A bonus value's int form ([`EffectSet::get_int`]: `0x00E23E10`, rounded half to even).
+pub fn int_bonus(value: f32) -> i32 {
+    f64::from(value).round_ties_even() as i32
 }
 
 /// A force's effect set as a borrowed view ([`Effects::force_set`]): the faction sum with the
@@ -410,6 +416,12 @@ impl SavedBonus {
         }
     }
 
+    /// A type-1 entry's basic bonus name (its [`Self::key`] is [`EffectKey::basic`] of it); `None`
+    /// for another type or an id outside the basic names.
+    fn basic_name(&self) -> Option<&'static str> {
+        (self.kind == 1).then(|| usize::try_from(self.bonus).ok().and_then(|i| BONUS_NAMES[..BASIC_BONUS_COUNT].get(i).copied())).flatten()
+    }
+
     /// The key this entry adds to: type 1 by its engine name, type 6 (population class), 7
     /// (population class × religion, [`EffectKey::pop_class_religion`]), 10 (religion), 0xD (unit
     /// class) and 0xE (unit category) by their bonus names, the key the DB junctions compile to, so
@@ -419,7 +431,7 @@ impl SavedBonus {
     pub fn key(&self) -> EffectKey {
         let named = |names: &[&'static str]| usize::try_from(self.bonus).ok().and_then(|i| names.get(i).copied());
         let (kind, name) = match self.kind {
-            1 => (BonusKind::Basic, named(&BONUS_NAMES[..BASIC_BONUS_COUNT])),
+            1 => (BonusKind::Basic, self.basic_name()),
             6 => (BonusKind::PopClass, named(&POP_CLASS_BONUS_NAMES)),
             7 => (BonusKind::PopClassReligion, named(&POP_CLASS_RELIGION_BONUS_NAMES)),
             10 => (BonusKind::Religion, named(&RELIGION_BONUS_NAMES)),
@@ -489,6 +501,12 @@ pub struct EffectRules {
     pub trait_attribute: BTreeMap<String, Vec<(String, i32)>>,
     /// Ancillary → agent attribute bonuses (`ancillary_to_attribute_effects`).
     pub ancillary_attribute: BTreeMap<String, Vec<(String, i32)>>,
+    /// Trait level key → agent ability level bonuses (`trait_ability_effects`, the level record's
+    /// +0x68 rows; only abilities of [`super::agents::ABILITIES`]).
+    pub trait_ability: BTreeMap<String, Vec<(String, i32)>>,
+    /// Ancillary → agent ability level bonuses (`ancillary_to_ability_effects`, the ancillary
+    /// record's +0x90 rows; only abilities of [`super::agents::ABILITIES`]).
+    pub ancillary_ability: BTreeMap<String, Vec<(String, i32)>>,
     /// `ancillary_to_effects`.
     ancillary: BTreeMap<String, EffectSet>,
     /// (post, level 0..9) → effects.
@@ -676,7 +694,7 @@ impl Effects {
         }
         // Factions.
         for id in w.factions.keys() {
-            let s = faction_set(model, *id, |c| fx.character.get(&c).cloned().unwrap_or_default(), |r| fx.region_factionwide[&r].clone());
+            let s = faction_set(model, *id, EffectSet::default(), |c|fx.character.get(&c).cloned().unwrap_or_default(), |r| fx.region_factionwide[&r].clone());
             fx.faction.insert(*id, s);
         }
         fx
@@ -737,17 +755,17 @@ impl Effects {
     pub fn faction_sum(model: &CampaignModel, f: FactionId) -> EffectSet {
         let rules = &model.rules.effects;
         let w = &model.world;
-        faction_set(model, f, |c| character_set(rules, w.character_details.get(&c)), |r| {
-            let mut wide = EffectSet::default();
-            if let Some(reg) = w.regions.get(&r) {
-                for b in reg.effect_buildings() {
-                    if let Some(set) = rules.building_factionwide.get(&b.level_key) {
-                        wide.merge(set);
-                    }
-                }
-            }
-            wide
-        })
+        faction_set(model, f, EffectSet::default(), |c| character_set(rules, w.character_details.get(&c)), |r| region_wide_part(model, r, EffectSet::default()))
+    }
+
+    /// One basic bonus of a faction's sum: `faction_sum(model, f).get(bonus)`, the same value (the
+    /// sources are read in the same order), without building the sum. Only the post holders' own sets
+    /// are built, as the minister level's rank reads them.
+    pub fn faction_bonus(model: &CampaignModel, f: FactionId, bonus: &str) -> f32 {
+        let rules = &model.rules.effects;
+        let w = &model.world;
+        let one = || OneBasic { bonus, value: 0.0 };
+        faction_set(model, f, one(), |c| character_set(rules, w.character_details.get(&c)), |r| region_wide_part(model, r, one())).value
     }
 
     /// A faction's basic bonus (faction +0x6FC).
@@ -973,27 +991,89 @@ fn character_set(rules: &EffectRules, d: Option<&super::details::CharacterDetail
     s
 }
 
-/// A faction's sum (faction +0x6FC): the saved base + difficulty set, its regions' faction-wide
-/// building effects, researched technologies, the government type, and each minister's post set
-/// and own set.
-fn faction_set(
+/// Where a sum's sources go: the whole [`EffectSet`], or one bonus's value ([`OneBasic`]). Both add
+/// each source's value of a key in the same order, so a single read equals the built set's.
+trait EffectSink {
+    /// Adds every entry of `set` ([`EffectSet::merge`]).
+    fn merge(&mut self, set: &EffectSet);
+    /// Adds a part summed apart first (a region's faction-wide set), as a merge of its built set.
+    fn merge_part(&mut self, part: Self);
+    /// Adds saved entries in order ([`saved_set`] into an empty set).
+    fn add_saved(&mut self, entries: &[SavedBonus]);
+}
+
+impl EffectSink for EffectSet {
+    fn merge(&mut self, set: &EffectSet) {
+        EffectSet::merge(self, set);
+    }
+
+    fn merge_part(&mut self, part: Self) {
+        EffectSet::merge(self, &part);
+    }
+
+    fn add_saved(&mut self, entries: &[SavedBonus]) {
+        for e in entries {
+            self.add(e.key(), e.value);
+        }
+    }
+}
+
+/// One basic bonus's running value ([`Effects::faction_bonus`]).
+struct OneBasic<'a> {
+    bonus: &'a str,
+    value: f32,
+}
+
+impl EffectSink for OneBasic<'_> {
+    fn merge(&mut self, set: &EffectSet) {
+        self.value += set.get(self.bonus);
+    }
+
+    fn merge_part(&mut self, part: Self) {
+        self.value += part.value;
+    }
+
+    fn add_saved(&mut self, entries: &[SavedBonus]) {
+        for e in entries.iter().filter(|e| e.basic_name() == Some(self.bonus)) {
+            self.value += e.value;
+        }
+    }
+}
+
+/// Region `r`'s faction-wide building effects (health ≥ 100) added to `part`.
+fn region_wide_part<S: EffectSink>(model: &CampaignModel, r: RegionId, mut part: S) -> S {
+    if let Some(reg) = model.world.regions.get(&r) {
+        for b in reg.effect_buildings() {
+            if let Some(set) = model.rules.effects.building_factionwide.get(&b.level_key) {
+                part.merge(set);
+            }
+        }
+    }
+    part
+}
+
+/// A faction's sum (faction +0x6FC) added to the empty `s`: the saved base + difficulty set, its
+/// regions' faction-wide building effects, researched technologies, the government type, and each
+/// minister's post set and own set.
+fn faction_set<S: EffectSink>(
     model: &CampaignModel,
     id: FactionId,
+    mut s: S,
     character: impl Fn(super::ids::CharacterId) -> EffectSet,
-    region_wide: impl Fn(RegionId) -> EffectSet,
-) -> EffectSet {
+    region_wide: impl Fn(RegionId) -> S,
+) -> S {
     let rules = &model.rules.effects;
     let w = &model.world;
-    let Some(f) = w.factions.get(&id) else { return EffectSet::default() };
+    let Some(f) = w.factions.get(&id) else { return s };
     let details = w.faction_details.get(&id);
     // Faction +0x8D4: the base (+0x8C4, agent caps and what scripts and events gave) plus the
     // difficulty handicap, built at campaign start ([`apply_start_handicaps`]) and saved (#55).
-    let mut s = details.map_or_else(EffectSet::default, |d| {
-        saved_set(if d.bonus_with_difficulty.is_empty() { &d.bonus_base } else { &d.bonus_with_difficulty })
-    });
+    if let Some(d) = details {
+        s.add_saved(if d.bonus_with_difficulty.is_empty() { &d.bonus_base } else { &d.bonus_with_difficulty });
+    }
     for (rid, r) in &w.regions {
         if r.owner == id {
-            s.merge(&region_wide(*rid));
+            s.merge_part(region_wide(*rid));
         }
     }
     if let Some(d) = details {

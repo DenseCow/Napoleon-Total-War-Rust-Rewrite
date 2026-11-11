@@ -35,8 +35,9 @@
 //! battle description's unit build behind `0x0050AA00`); the setting is the only unit size the
 //! front end shows, so ours applies it there too. UNKNOWN: what sets the per-slot index byte modes
 //! 2 and 4 read, whether an artillery unit's gun count follows the unit size (ours keeps the
-//! card's guns), and what the int preference `gfx_unit_scale` (`0x00404230`, default 2) does: the
-//! exe only registers it and writes it to the preferences file.
+//! card's guns), and what the int preference `gfx_unit_scale` (`0x00404230`, default 2) does: it
+//! is registered and written to the preferences file, and no reader of it was found (by-object
+//! xrefs and a pattern search for reads by its id).
 
 /// The original's four step sizes, in index order (`0x01392770`, CONFIRMED): the default of
 /// [`crate::limits::GameLimits::unit_scales`], which a mod may change or extend. The names (small /

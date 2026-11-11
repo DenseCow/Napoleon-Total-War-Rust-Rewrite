@@ -213,7 +213,7 @@ fn eur_napoleon_looting_reaches_the_looter_trait_trigger() {
     let source = ScriptSource::from_install(&dir).expect("open packs");
     let mut host = ScriptHost::new(loaded.model, "france", source).unwrap();
     host.load_campaign("eur_napoleon").expect("scripts load");
-    let ctx = host.context_for(&CampaignEvent::CharacterLootedSettlement { character: general });
+    let ctx = host.context_for(&CampaignEvent::CharacterLootedSettlement { character: general, agent_type: Some(CharacterKind::General) });
     for _ in 0..40 {
         let r = host.fire("CharacterLootedSettlement", ctx.clone());
         assert!(r.errors.is_empty(), "{:?}", r.errors);
@@ -240,7 +240,7 @@ fn eur_napoleon_historical_events_come_from_the_scripts() {
     }
     let db = ntw_data::GameDatabase::from_install(&dir).expect("DB");
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let mut loaded = ntw_campaign::source::open(files, ntw_campaign::source::Start::New("eur_napoleon", None), &db).expect("open eur_napoleon").loaded;
     assert!(loaded.set_human("france"));
     let france = loaded.model.faction_by_key("france").expect("france").id;

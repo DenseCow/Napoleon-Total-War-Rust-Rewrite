@@ -8,6 +8,12 @@
 #
 # The channel meanings below are INFERRED and the numbers PROVISIONAL until the original's
 # shader is read (BACKLOG §2, "The original's materials read in full"); each is marked.
+#
+# A .variant_weighted_mesh carries named material parameters of its own, float (light_scale,
+# bumpfactor, ...) and vec4 (colourmapfactor, specfactor) (analysis/units/CAVALRY.md
+# ".variant_weighted_mesh layout", weighted_mesh.rs). This description binds none of them (it has
+# no [constants] table): what each one does in the original's shader is not traced, and
+# [constants] takes float constants only.
 
 [applies]
 source = "weighted_mesh"

@@ -89,9 +89,21 @@ pub struct CharacterDetails {
     /// `CHARACTER` #22 bool (+0x4E0, CONFIRMED offset from the loader `0x00991520`): hidden from other
     /// factions unless they have exposed him (`0x008CE880`). Set by `0x009D3000` from the stealth test
     /// `0x009D1010` (an army commander in the open whose units can all hide, or with
-    /// `campaign_map_stealth`, no foreign character in his force; CHARACTERS_FIDELITY.md §10).
-    /// PROVISIONAL: the model keeps the loaded value (the stealth test is not ported).
+    /// `campaign_map_stealth`, no foreign character in his force; CHARACTERS_FIDELITY.md §10), ported as
+    /// [`CampaignModel::update_hidden`](super::CampaignModel::update_hidden); cleared by the battle setup
+    /// of an ambush he springs (`0x008E18D0`, [`super::ambush`]).
     pub hidden: bool,
+    /// `CHARACTER` #18 u32 (+0x4D0, CONFIRMED offset from the loader `0x00991520` at `0x00991D33`): the
+    /// sieges laid to the settlement whose garrison he commands (LaySiege `0x008AF6A0` adds 1 at
+    /// `0x008AF709`; [`super::CampaignModel::start_siege`]). Read by the script's `DefensiveSiegesFought`
+    /// (`0x0089EC50`); every character maker sets 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub defensive_sieges: u32,
+    /// `CHARACTER` #20 u32 (+0x4D8, CONFIRMED offset from the loader at `0x00991D4F`): the sieges his
+    /// army laid (LaySiege adds 1 at `0x008AF6FC`). Read by the script's `OffensiveSiegesFought`
+    /// (`0x008A21F0`); every character maker sets 0.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub offensive_sieges: u32,
     /// `CHARACTER` #28 u32 (+0x504): turns at sea (`0x00A28D90`, CONFIRMED offsets from the loader `0x00991520`).
     pub turns_at_sea: u32,
     /// `CHARACTER` #29 u32 (+0x508): turns in the lands of a faction at war with his (`0x00A28DD0`).

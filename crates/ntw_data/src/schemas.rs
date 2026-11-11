@@ -272,7 +272,8 @@ db_record! {
         unknown_20a: bool,
         /// #76 @0x20B: UNKNOWN flag.
         unknown_20b: bool,
-        /// #77 @0x20C: UNKNOWN flag (line infantry).
+        /// #77 @0x20C: can assault walls from the march (line infantry). CONFIRMED: copied to
+        /// `UNIT_RECORD` +0x1A0 (`0x00E8F358`), read by `ForceHasSiegeUnits` `0x008CE1B0`.
         unknown_20c: bool,
         /// #78 @0x20D: UNKNOWN flag.
         unknown_20d: bool,

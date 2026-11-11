@@ -148,7 +148,8 @@ fn region(id: i32, key: &str, owner: i32, forts: Vec<Vec<EsfNode>>) -> Vec<EsfNo
     garrison.extend((1..10).map(|_| EsfNode::U32(0)));
     garrison.extend([EsfNode::I32(5 << 20), EsfNode::I32(7 << 20)]);
     // #12 the garrisoned army (none), #13 the besieging forces (none), #14 the residents (none).
-    garrison.extend([EsfNode::U32(0), EsfNode::U32Array(vec![]), EsfNode::U32Array(vec![])]);
+    // `FORTIFICATIONS_BLOCK`, the fortification damage (none; the loader requires the block).
+    garrison.extend([EsfNode::U32(0), EsfNode::U32Array(vec![]), EsfNode::U32Array(vec![]), arr("FORTIFICATIONS_BLOCK", vec![])]);
     let mut children = vec![
         s(key),
         rec(
@@ -557,16 +558,86 @@ fn bad_field_type_is_an_error() {
     );
 }
 
+/// The rebels' turn start skips the reinforcement manager (`0x008F2B47`): their entries would never
+/// march, so not loading them loses nothing and no warning is given.
+#[test]
+fn rebel_reinforcement_entries_give_no_warning() {
+    let mut world = tiny_world();
+    let EsfNode::Record(w) = &mut world else { unreachable!("tiny_world() gives a WORLD record") };
+    let rebels = w.children.iter_mut().find_map(|c| match c {
+        EsfNode::Record(r) if r.name == "REBEL_FACTION" => Some(r),
+        _ => None,
+    });
+    let Some(EsfNode::Record(f)) = rebels.and_then(|r| r.children.first_mut()) else { unreachable!("tiny_world() has a rebel FACTION") };
+    f.children.push(rec(
+        "ARMY_REINFORCEMENT_MANAGER",
+        0,
+        vec![arr("CHARACTER_REINFORCEMENTS_ARRAY", vec![vec![EsfNode::I32(1), EsfNode::I32(2), EsfNode::I32(77), EsfNode::Bool(false)]])],
+    ));
+    let loaded = read(&tiny(STARTPOS_ROOT, world), &GameDatabase::test_fixture()).unwrap();
+    assert!(!loaded.warnings.iter().any(|x| matches!(x, LoadWarning::UnloadedReinforcements { .. })), "{:?}", loaded.warnings);
+}
+
+/// The reinforcement warning names only the non-zero parts.
+#[test]
+fn the_reinforcement_warning_prints_only_what_is_there() {
+    let say = |entries, units| LoadWarning::UnloadedReinforcements { faction: "f".into(), entries, units }.to_string();
+    assert_eq!(say(0, 2), "faction \"f\": 2 unit reinforcements (UNIT_REINFORCEMENTS_ARRAY) not loaded");
+    assert_eq!(say(1, 0), "faction \"f\": 1 reinforcement marches (CHARACTER_REINFORCEMENTS_ARRAY) not loaded; those armies stay where they are");
+    assert_eq!(
+        say(1, 2),
+        "faction \"f\": 1 reinforcement marches (CHARACTER_REINFORCEMENTS_ARRAY) and 2 unit reinforcements (UNIT_REINFORCEMENTS_ARRAY) not loaded; those armies stay where they are"
+    );
+}
+
+/// An army with a `REBEL_DATA` block that no region's risen list names is kept and said once per load,
+/// with its id; a world without one gives no such warning.
+#[test]
+fn an_unlisted_risen_army_is_warned_once() {
+    let db = GameDatabase::test_fixture();
+    let unlisted = |w: &[LoadWarning]| w.iter().filter(|x| matches!(x, LoadWarning::UnlistedRisenArmies { .. })).cloned().collect::<Vec<_>>();
+    let plain = read(&tiny(STARTPOS_ROOT, tiny_world()), &db).unwrap();
+    assert!(unlisted(&plain.warnings).is_empty(), "{:?}", plain.warnings);
+
+    // test_a's army 500 gets a REBEL_DATA block; tiny_world's one region lists no risen army.
+    let mut world = tiny_world();
+    let EsfNode::Record(w) = &mut world else { unreachable!("tiny_world() gives a WORLD record") };
+    let factions = w.children.iter_mut().find_map(|c| match c {
+        EsfNode::RecordArray(a) if a.name == "FACTION_ARRAY" => Some(a),
+        _ => None,
+    });
+    let Some(EsfNode::Record(a)) = factions.and_then(|a| a.items[0].first_mut()) else { unreachable!("tiny_world() has test_a") };
+    let armies = a.children.iter_mut().find_map(|c| match c {
+        EsfNode::RecordArray(x) if x.name == "ARMY_ARRAY" => Some(x),
+        _ => None,
+    });
+    let Some(EsfNode::Record(army)) = armies.and_then(|x| x.items[0].first_mut()) else { unreachable!("test_a has army 500") };
+    army.children.push(rec("REBEL_DATA", 0, vec![]));
+    let loaded = read(&tiny(STARTPOS_ROOT, world), &db).unwrap();
+    assert_eq!(unlisted(&loaded.warnings), vec![LoadWarning::UnlistedRisenArmies { armies: vec![500] }]);
+    assert!(loaded.model.world.forces.contains_key(&ForceId(500)), "the army is kept");
+}
+
 #[test]
 fn oddities_become_warnings() {
     let db = GameDatabase::test_fixture();
-    // test_b has one reinforcement march in progress (entry: source, target, settlement, done).
+    // test_b has one reinforcement march in progress and one done (entry: source, target, settlement,
+    // done; a done entry is deleted unmarched, 0x00B5C830), in both item shapes, and one unit reinforcement.
     let mut test_b = faction(2000, "test_b", "GOVERNMENT::REPUBLIC", 1000, "frenemies", vec![], vec![]);
     let EsfNode::Record(b) = &mut test_b[0] else { unreachable!("faction() gives a FACTION record") };
     b.children.push(rec(
         "ARMY_REINFORCEMENT_MANAGER",
         0,
-        vec![arr("CHARACTER_REINFORCEMENTS_ARRAY", vec![vec![rec("CHARACTER_REINFORCEMENT", 0, vec![EsfNode::I32(1), EsfNode::I32(2), EsfNode::I32(77), EsfNode::Bool(false)])]])],
+        vec![
+            arr(
+                "CHARACTER_REINFORCEMENTS_ARRAY",
+                vec![
+                    vec![rec("CHARACTER_REINFORCEMENT", 0, vec![EsfNode::I32(1), EsfNode::I32(2), EsfNode::I32(77), EsfNode::Bool(false)])],
+                    vec![EsfNode::I32(3), EsfNode::I32(4), EsfNode::I32(77), EsfNode::Bool(true)],
+                ],
+            ),
+            arr("UNIT_REINFORCEMENTS_ARRAY", vec![vec![EsfNode::I32(5)]]),
+        ],
     ));
     let world = rec(
         "WORLD",
@@ -624,7 +695,7 @@ fn oddities_become_warnings() {
     )));
     assert!(has(&|x| matches!(
         x,
-        LoadWarning::UnloadedReinforcements { faction, entries: 1 } if faction == "test_b"
+        LoadWarning::UnloadedReinforcements { faction, entries: 1, units: 1 } if faction == "test_b"
     )));
     // Every warning prints a message.
     assert!(w.iter().all(|x| !x.to_string().is_empty()));

@@ -572,16 +572,20 @@ fn an_unknown_government_key_reads_the_default_classes() {
     }
 }
 
-/// rebelgov: the empty government key is no government (the rebels of the original's files have none),
-/// so it is never reported, however often it is read; a key the rules lack is reported once.
+/// rebelgov: the rebels' empty government key is no government (the rebels of the original's files have
+/// none), so it is never reported, however often it is read; a key the rules lack is reported once, and so
+/// is another faction's empty key (a faction without a `GOVERNMENT` key, or a map that gave it none).
 #[test]
-fn the_empty_government_key_is_never_reported() {
+fn the_rebels_empty_government_key_is_never_reported() {
     let reported = crate::reported::ReportedKeys::new();
-    assert!(!economy::reports_unknown_government(&reported, ""));
-    assert!(!economy::reports_unknown_government(&reported, ""));
-    assert!(economy::reports_unknown_government(&reported, "gov_made_up"));
-    assert!(!economy::reports_unknown_government(&reported, "gov_made_up"), "once per key");
-    assert!(economy::reports_unknown_government(&reported, "gov_other"));
+    assert!(!economy::reports_unknown_government(&reported, "", true));
+    assert!(!economy::reports_unknown_government(&reported, "", true));
+    assert!(economy::reports_unknown_government(&reported, "gov_made_up", false));
+    assert!(!economy::reports_unknown_government(&reported, "gov_made_up", false), "once per key");
+    assert!(economy::reports_unknown_government(&reported, "gov_other", true), "a rebel army's unknown key");
+    assert!(economy::reports_unknown_government(&reported, "", false), "another faction's empty key");
+    assert!(!economy::reports_unknown_government(&reported, "", false), "once");
+    assert!(!economy::reports_unknown_government(&reported, "", true));
     // The empty key reads the default classes like any key the rules lack (the test model's factions
     // have none).
     let m = test_model();
@@ -620,6 +624,7 @@ fn event_order_is_stable() {
     let start = m.start_campaign();
     let r = RegionId;
     let ch = CharacterId;
+    let (general, colonel, minister) = (Some(CharacterKind::General), Some(CharacterKind::Colonel), Some(CharacterKind::Minister));
     // Turn 1: round start (turn order B, A, C), B plays as AI, A starts and waits.
     // The faction turn start (0x008F2620, CONFIRMED order): characters, regions (slots, then RegionTurnStart),
     // then FactionTurnStart; the turn end (0x008BD0F0): characters, regions, units, FactionTurnEnd.
@@ -628,17 +633,17 @@ fn event_order_is_stable() {
         FactionRoundStart { faction: A },
         FactionRoundStart { faction: C },
         HistoricalEvents,
-        CharacterTurnStart { character: ch(101) },
+        CharacterTurnStart { character: ch(101), agent_type: colonel },
         SlotTurnStart { region: r(11), slot: 0 },
         RegionTurnStart { region: r(11) },
         FactionTurnStart { faction: B },
-        CharacterTurnEnd { character: ch(101) },
+        CharacterTurnEnd { character: ch(101), agent_type: colonel },
         RegionTurnEnd { region: r(11) },
         UnitTurnEnd { force: ForceId(1001), unit: UnitId(2) },
         UnitTurnEnd { force: ForceId(1001), unit: UnitId(3) },
         FactionTurnEnd { faction: B },
-        CharacterTurnStart { character: ch(100) },
-        CharacterTurnStart { character: ch(102) },
+        CharacterTurnStart { character: ch(100), agent_type: general },
+        CharacterTurnStart { character: ch(102), agent_type: minister },
         SlotTurnStart { region: r(10), slot: 0 },
         SlotTurnStart { region: r(10), slot: 1 },
         RegionTurnStart { region: r(10) },

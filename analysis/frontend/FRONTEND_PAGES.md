@@ -100,8 +100,13 @@ else text; `UISelectionManager` calls each item's Lua `Select(bool)`; `string.le
     extra zero after the point of a number below 1). The read fails only when `sscanf` matched nothing: the float specifier `0x01278132`
     fails only on "no digits", and on an overflow the result writer `0x012772CA` stores infinity with the number's sign. So `1e39`, `3.5e38` and
     `1e999` all store +infinity, a negative one -infinity, and the setting counts as set. Ours: `number_value` gives the same infinity (the
-    overflow test is a float parse of the same text). Test: `a_number_beyond_a_floats_range_is_infinite`. Not traced (UNKNOWN): what the int
-    read `0x010DFF00` gives for a number beyond an int's range; ours reads every numeric setting as the float read does.
+    overflow test is a float parse of the same text). Test: `a_number_beyond_a_floats_range_is_infinite`.
+  - An int beyond its range (traced 2026-11-11, CONFIRMED): the int read `0x010DFF00` gathers the digit field with `0x010E4460` (a sign, then
+    decimal digits, leading zeros dropped, at most 30 kept and the rest read and lost) and converts it with `0x010F5F50`, a `sscanf` "%i"
+    (`0x0044AAC0` → UCRT `0x0127D720`); it fails only when no digit was read or `sscanf` converted nothing. The UCRT's `%i` (`0x0127C18E`, base 0,
+    signed) parses a 64-bit number (`0x01277818`), saturating past i64's range (`0x012753BF`: i64::MAX, i64::MIN when negative), and stores its
+    low 32 bits (`0x0127D5C1`). So `2147483648` stores -2147483648, `4294967296` stores 0, a number past i64's range -1 (0 when negative), and
+    the setting counts as set. Difference: ours reads every numeric setting as the float read does and keeps the number.
   - Bool (`0x00454480`; write `0x0044AB80`, read `0x0044ABA0` → `0x010D3950` → `0x010E0180`): in the stream's names mode the text must be `false`
     or `true` (name table `0x01402BB4`, matcher `0x010E1770`), in the other mode an unsigned 0 / 1; no match raises the stream's fail state and
     stores nothing. INFERRED names mode (the exe's own file spells the words; where the mode is set was not traced).

@@ -5,7 +5,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
-use ntw_sim::campaign::{CampaignEvent, CampaignModel, FactionId, TurnStep};
+use ntw_sim::campaign::{CampaignEvent, CampaignModel, CharacterKind, FactionId, TurnStep};
 
 use crate::event_classes::{self, EventGate};
 use crate::game::{self, Shared};
@@ -63,7 +63,8 @@ pub struct FireReport {
     /// How many handler functions were called (none when the event's gate kept it from Lua,
     /// [`EventGate`]).
     pub handlers: usize,
-    /// Error messages from handlers that failed, and from list entries that are not functions. The
+    /// Error messages, each starting with the event's name ("`<event>: <error>`"): from handlers
+    /// that failed, from list entries that are not functions, and from reading the list. The
     /// other handlers still ran (CONFIRMED: the dispatcher calls each entry through `0x01057D80`, a
     /// protected call whose error handler logs the error with its traceback, `0x0106BD10`, and goes
     /// on to the next entry).
@@ -198,8 +199,11 @@ impl ScriptHost {
     /// the one called. An entry that is not a function is logged and passed over (CONFIRMED,
     /// `0x01057D80`: it logs the type mismatch, `0x01095090`, and calls nothing; see
     /// [`FireReport::errors`]).
+    ///
+    /// The gate's agent-type check reads the context's character from the model; a model event
+    /// fired by [`Self::fire_all`] carries the type it had when posted instead.
     pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
-        fire_in(&self.lua, &self.state, &self.gate, name, ctx)
+        fire_in(&self.lua, &self.state, &self.gate, name, ctx, None)
     }
 
     /// Ends the turn in the model and forwards every resulting script event to Lua, in the order
@@ -309,7 +313,7 @@ impl ScriptHost {
         for ev in events {
             if let Some(name) = ev.script_name() {
                 let ctx = self.context_for(&ev);
-                let report = self.fire(name, ctx);
+                let report = fire_in(&self.lua, &self.state, &self.gate, name, ctx, ev.agent_type());
                 out.push((ev, report));
             } else {
                 out.push((ev, FireReport::default()));
@@ -339,26 +343,26 @@ impl ScriptHost {
             | CampaignEvent::RegionStrikes { region }
             | CampaignEvent::RegionIssuesDemands { region }
             | CampaignEvent::RegionRebels { region } => c.region = w.regions.get(region).map(|r| r.key.clone()),
-            CampaignEvent::CharacterTurnStart { character }
-            | CampaignEvent::CharacterTurnEnd { character }
-            | CampaignEvent::CharacterCreated { character }
-            | CampaignEvent::CharacterPromoted { character }
-            | CampaignEvent::SufferSpyingAttempt { character }
-            | CampaignEvent::SpyingAttemptSuccess { character }
-            | CampaignEvent::CharacterFactionSpyAttemptSuccessful { character }
-            | CampaignEvent::CharacterFactionSuffersSuccessfulSpyAttempt { character }
-            | CampaignEvent::EspionageAgentApprehended { character }
-            | CampaignEvent::SufferAssassinationAttempt { character }
-            | CampaignEvent::AssassinationAttemptSuccess { character }
-            | CampaignEvent::CharacterCriticallyFailsAssassination { character }
-            | CampaignEvent::SabotageAttemptSuccess { character }
-            | CampaignEvent::ArmySabotageAttemptSuccess { character }
-            | CampaignEvent::HarassmentAttemptSuccess { character }
-            | CampaignEvent::DuelFought { character }
-            | CampaignEvent::CharacterBuildsSpyNetwork { character }
-            | CampaignEvent::MovementPointsExhausted { character }
-            | CampaignEvent::CharacterCompletedBattle { character }
-            | CampaignEvent::CharacterLootedSettlement { character }
+            CampaignEvent::CharacterTurnStart { character, .. }
+            | CampaignEvent::CharacterTurnEnd { character, .. }
+            | CampaignEvent::CharacterCreated { character, .. }
+            | CampaignEvent::CharacterPromoted { character, .. }
+            | CampaignEvent::SufferSpyingAttempt { character, .. }
+            | CampaignEvent::SpyingAttemptSuccess { character, .. }
+            | CampaignEvent::CharacterFactionSpyAttemptSuccessful { character, .. }
+            | CampaignEvent::CharacterFactionSuffersSuccessfulSpyAttempt { character, .. }
+            | CampaignEvent::EspionageAgentApprehended { character, .. }
+            | CampaignEvent::SufferAssassinationAttempt { character, .. }
+            | CampaignEvent::AssassinationAttemptSuccess { character, .. }
+            | CampaignEvent::CharacterCriticallyFailsAssassination { character, .. }
+            | CampaignEvent::SabotageAttemptSuccess { character, .. }
+            | CampaignEvent::ArmySabotageAttemptSuccess { character, .. }
+            | CampaignEvent::HarassmentAttemptSuccess { character, .. }
+            | CampaignEvent::DuelFought { character, .. }
+            | CampaignEvent::CharacterBuildsSpyNetwork { character, .. }
+            | CampaignEvent::MovementPointsExhausted { character, .. }
+            | CampaignEvent::CharacterCompletedBattle { character, .. }
+            | CampaignEvent::CharacterLootedSettlement { character, .. }
             | CampaignEvent::CharacterEmbarksNavy { character, .. }
             | CampaignEvent::CharacterDisembarksNavy { character, .. } => c.character = Some(character.raw()),
             CampaignEvent::CharacterEntersGarrison { character, region } => {
@@ -545,7 +549,7 @@ pub struct ScriptHandle {
 impl ScriptHandle {
     /// [`ScriptHost::fire`].
     pub fn fire(&self, name: &str, ctx: ScriptContext) -> FireReport {
-        fire_in(&self.lua, &self.state, &self.gate, name, ctx)
+        fire_in(&self.lua, &self.state, &self.gate, name, ctx, None)
     }
 
     /// [`ScriptHost::save_values`].
@@ -576,10 +580,11 @@ fn events_table(lua: &Lua) -> Result<Option<Table>, ScriptError> {
 }
 
 /// [`ScriptHost::fire`] on a Lua state, its script state and its gate: the one place an event is
-/// handed to Lua.
-fn fire_in(lua: &Lua, state: &Shared, gate: &EventGate, name: &str, ctx: ScriptContext) -> FireReport {
+/// handed to Lua. `agent_type` is the context character's type when the event was posted
+/// ([`CampaignEvent::agent_type`]), `None` to read it from the model.
+fn fire_in(lua: &Lua, state: &Shared, gate: &EventGate, name: &str, ctx: ScriptContext, agent_type: Option<CharacterKind>) -> FireReport {
     let mut report = FireReport::default();
-    let Some(ctx) = gate.admit(&state.borrow(), name, ctx) else { return report };
+    let Some(ctx) = gate.admit(&state.borrow(), name, ctx, agent_type) else { return report };
     let list = match events_table(lua) {
         Ok(Some(events)) => match events.get::<Value>(name) {
             Ok(Value::Table(list)) => list,
@@ -587,14 +592,14 @@ fn fire_in(lua: &Lua, state: &Shared, gate: &EventGate, name: &str, ctx: ScriptC
         },
         Ok(None) => return report,
         Err(e) => {
-            report.errors.push(e.to_string());
+            report.errors.push(format!("{name}: {e}"));
             return report;
         }
     };
     let ud = match lua.create_userdata(ctx) {
         Ok(ud) => ud,
         Err(e) => {
-            report.errors.push(e.to_string());
+            report.errors.push(format!("{name}: {e}"));
             return report;
         }
     };
@@ -623,7 +628,7 @@ fn fire_in(lua: &Lua, state: &Shared, gate: &EventGate, name: &str, ctx: ScriptC
 /// Fires `SavingGame` and returns the values the scripts saved with `save_value`, in order.
 fn save_values_in(lua: &Lua, state: &Shared, gate: &EventGate) -> (Vec<ScriptValue>, FireReport) {
     state.borrow_mut().saved_values.clear();
-    let report = fire_in(lua, state, gate, "SavingGame", ScriptContext::default());
+    let report = fire_in(lua, state, gate, "SavingGame", ScriptContext::default(), None);
     (std::mem::take(&mut state.borrow_mut().saved_values), report)
 }
 

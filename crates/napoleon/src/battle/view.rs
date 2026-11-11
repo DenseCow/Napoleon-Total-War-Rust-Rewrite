@@ -31,6 +31,10 @@ use crate::soldiers::{FigureKit, KitAssets, SoldierLibrary, animation_keys};
 use ntw_formats::unit_animation::{self, DeathCause, Gait, Rung, SelectionRng, alternative, family_pick};
 
 use super::actions::{self, Mode};
+use super::camera::{BattleCamera, CameraFunc, CameraSettings, ZoomUnit};
+
+/// The battle camera's entity as [`move_camera`] drives it.
+type CamQuery<'a> = (&'a mut BattleCamera, &'a mut Transform, &'a mut Projection, &'a Camera, &'a GlobalTransform);
 
 /// Different men per unit (PROVISIONAL: the game varies parts per man; we build this many
 /// kits per unit and share them round-robin; the men of a kit share its meshes and are drawn
@@ -1082,15 +1086,6 @@ pub struct SkinState {
     build: u32,
 }
 
-/// Orbit-style battle camera: looks at `focus` from `distance`, `yaw` around the vertical.
-#[derive(Component)]
-pub struct BattleCamera {
-    focus: Vec3,
-    distance: f32,
-    yaw: f32,
-    pitch: f32,
-}
-
 /// Model battlefield metres -> Bevy world position on the ground (the battle map's terrain
 /// height, see `crate::terrain`; y = 0 when no map is loaded).
 pub fn world_of(p: Vec2) -> Vec3 {
@@ -1104,7 +1099,12 @@ pub fn spawn_camera(
     mut materials: ResMut<Assets<StandardMaterial>>,
     sim: Option<Res<BattleSim>>,
 ) {
-    let mut cam = BattleCamera { focus: Vec3::new(30.0, 0.0, 90.0), distance: 170.0, yaw: 0.0, pitch: 0.4 };
+    let user = crate::config::user_dir();
+    let prefs = ntw_script::ui::frontend::load_preferences(user.as_deref(), crate::config::original_user_dir().as_deref());
+    let settings = CameraSettings::from_prefs(&prefs);
+    // The start view as an orbit: (focus, distance, yaw, pitch).
+    let mut orbit = (Vec3::new(30.0, 0.0, 90.0), 170.0, 0.0, 0.4);
+    let mut harness = false;
     // Start behind the player's army (side 0), looking the way it faces.
     if let Some(sim) = sim.as_ref() {
         let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == 0).collect();
@@ -1113,8 +1113,8 @@ pub fn spawn_camera(
             let centre = mine.iter().fold(Vec2::ZERO, |a, u| a + Vec2::new(u.position.0, u.position.1)) / n;
             let facing = Vec2::new(first.facing.cos(), first.facing.sin());
             let focus = centre + facing * 60.0;
-            cam.focus = Vec3::new(focus.x, 0.0, -focus.y);
-            cam.yaw = (-first.facing.cos()).atan2(first.facing.sin());
+            orbit.0 = Vec3::new(focus.x, 0.0, -focus.y);
+            orbit.2 = (-first.facing.cos()).atan2(first.facing.sin());
             // Test harness: `NAPOLEON_BATTLE_ZOOM=<metres>[,<k>]` looks at the player's k-th
             // unit (default the first) from close by.
             let zoom = std::env::var("NAPOLEON_BATTLE_ZOOM").unwrap_or_default();
@@ -1122,27 +1122,27 @@ pub fn spawn_camera(
             if let Some(Some(d)) = it.next() {
                 let k = it.next().flatten().unwrap_or(0.0) as usize;
                 let u = mine.get(k).copied().unwrap_or(*first);
-                cam.focus = Vec3::new(u.position.0, 0.0, -u.position.1);
-                (cam.distance, cam.pitch) = (d, 0.2);
+                orbit.0 = Vec3::new(u.position.0, 0.0, -u.position.1);
+                (orbit.1, orbit.3, harness) = (d, 0.2, true);
             }
         }
-    }
-    // A battle file's own start view: camera_start/target_position are (x, height, map y)
-    // (INFERRED). Heights are taken as given (the camera floor keeps it above the ground).
-    if let Some((s, t)) = sim.as_ref().and_then(|s| s.camera_start).filter(|_| std::env::var_os("NAPOLEON_BATTLE_ZOOM").is_none()) {
-        let (start, target) = (Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]));
-        let off = start - target;
-        let d = off.length().max(1.0);
-        cam = BattleCamera { focus: target, distance: d, yaw: off.x.atan2(off.z), pitch: (off.y / d).clamp(-1.0, 1.0).asin().max(0.05) };
     }
     // Test harness: `NAPOLEON_BATTLE_CAMERA=x,z,distance,yaw,pitch` overrides the start view.
     if let Ok(s) = std::env::var("NAPOLEON_BATTLE_CAMERA") {
         let v: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
         if let [x, z, d, yaw, pitch] = v[..] {
-            cam = BattleCamera { focus: Vec3::new(x, 0.0, z), distance: d, yaw, pitch };
+            (orbit, harness) = ((Vec3::new(x, 0.0, z), d, yaw, pitch), true);
         }
     }
-    commands.spawn((Camera3d::default(), Transform::default(), cam));
+    let (eye, focus) = orbit_view(orbit);
+    let cam = match sim.as_ref().and_then(|s| s.camera_start) {
+        _ if harness => BattleCamera::fixed_view(eye, focus),
+        // A battle file's own start view: camera_start/target_position are (x, height, map y)
+        // (INFERRED).
+        Some((s, t)) => BattleCamera::new(settings, Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]), &camera_ground),
+        None => BattleCamera::new(settings, eye, focus, &camera_ground),
+    };
+    commands.spawn((Camera3d::default(), Transform::from_translation(cam.eye).looking_at(cam.target, Vec3::Y), cam));
     // Test harness: `NAPOLEON_FPS_SHADOWS=0` draws no sun shadows, so two `NAPOLEON_FPS_LOG` runs
     // give the shadow passes' cost (Bevy 0.19 records no time for them).
     let shadow_maps_enabled = !matches!(std::env::var("NAPOLEON_FPS_SHADOWS").as_deref(), Ok("0"));
@@ -1186,65 +1186,19 @@ pub fn camera_harness_run() -> bool {
     })
 }
 
-/// A battle camera func of `text/default_keys.xml` (component `camera`) that our camera acts on:
-/// the steps and turns of the camera's shortcut handler (`0x005EAF00`, CONFIRMED func names and
-/// the input action each one posts to the battle scripts: codes 0..10 of the name table
-/// `0x014518E0`). Each is a repeating binding: pressed every frame its key is held.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CameraFunc {
-    StepFwd,
-    /// The forward step doubled (CONFIRMED `0x005EAF00`).
-    StepFwdFast,
-    StepBck,
-    StepL,
-    StepR,
-    RotL,
-    RotR,
-    CamUp,
-    CamDown,
-    RotU,
-    RotD,
+/// The ground the battle camera keeps above (Bevy (x, z)): the land, or the sea where the ground is
+/// the sea bed (`crate::terrain::surface_height`).
+fn camera_ground(p: Vec2) -> f32 {
+    crate::terrain::surface_height(Vec2::new(p.x, -p.y))
 }
 
-impl CameraFunc {
-    /// The func of a binding's name; `None` for the camera funcs our camera has nothing for yet
-    /// ([`CameraKeys::press`] logs those).
-    pub fn from_binding(func: &str) -> Option<Self> {
-        Some(match func {
-            "step_fwd" => Self::StepFwd,
-            "step_fwd_fast" => Self::StepFwdFast,
-            "step_bck" => Self::StepBck,
-            "step_l" => Self::StepL,
-            "step_r" => Self::StepR,
-            "rot_l" => Self::RotL,
-            "rot_r" => Self::RotR,
-            "cam_up" => Self::CamUp,
-            "cam_down" => Self::CamDown,
-            "rot_u" => Self::RotU,
-            "rot_d" => Self::RotD,
-            _ => return None,
-        })
-    }
-
-    /// The input action a battle script's input handler hears for this func
-    /// (`ntw_script::battle_script::INPUT_EVENT_NAMES`; CONFIRMED: the camera handler broadcasts
-    /// the code after each step, `0x004B0CF0`, so a held key posts it every frame, and the Battle
-    /// Script Interface's listener `0x00657230` names codes 0..10 from table `0x014518E0` as here).
-    pub fn input_name(self) -> &'static str {
-        match self {
-            Self::StepFwd => "move forward",
-            Self::StepFwdFast => "move forward fast",
-            Self::StepBck => "move backward",
-            Self::StepL => "move left",
-            Self::StepR => "move right",
-            Self::RotR => "rotate right",
-            Self::RotL => "rotate left",
-            Self::CamUp => "move up",
-            Self::CamDown => "move down",
-            Self::RotU => "rotate up",
-            Self::RotD => "rotate down",
-        }
-    }
+/// The eye and target of an orbit view (focus, distance, yaw, pitch): the focus on the ground and
+/// the eye at least 2 m above it (the harness views and the default start view).
+fn orbit_view((focus, distance, yaw, pitch): (Vec3, f32, f32, f32)) -> (Vec3, Vec3) {
+    let focus = Vec3::new(focus.x, camera_ground(focus.xz()), focus.z);
+    let mut eye = focus + Quat::from_euler(EulerRot::YXZ, yaw, -pitch, 0.0) * Vec3::new(0.0, 0.0, distance);
+    eye.y = eye.y.max(camera_ground(eye.xz()) + 2.0);
+    (eye, focus)
 }
 
 /// The frame's camera key presses, from the battle HUD's shortcut poll (`hud::keys`, the battle
@@ -1258,11 +1212,8 @@ pub struct CameraKeys {
 }
 
 impl CameraKeys {
-    /// One press of the camera binding `func` this frame. The original's other camera funcs
-    /// (`accel`, `decel`, `increase_camera_rot`, `decrease_camera_rot`, `toggle_move_fast`,
-    /// `toggle_tracking`, `intelli_zoom`, `context_camera`, `camera_bookmark_save0..3`,
-    /// `camera_bookmark_view0..3`; traced in BATTLE_FIDELITY.md §59.2) are not done yet: logged
-    /// once each.
+    /// One press of the camera binding `func` this frame. The context camera's func
+    /// (`context_camera`, BATTLE_FIDELITY.md §59.5) is not done yet: logged once.
     pub fn press(&mut self, func: &str, time: f32) {
         if let Some(f) = CameraFunc::from_binding(func) {
             self.presses.push((f, time));
@@ -1273,92 +1224,101 @@ impl CameraKeys {
     }
 }
 
-/// Applies one camera key press to the orbit camera. PROVISIONAL speeds and motion: the original's
-/// camera is a free camera whose step is (2 when exactly one of its move-fast byte and byte `+0x21`
-/// is set, else 1, `0x005B7AE0`) × its move scale and whose turn is
-/// its rotation scale × 0.5, handed to the camera object's own step functions (`0x005EAF00`; those
-/// functions and the scales' start values are not traced). Ours pans the focus by 0.8 × the
-/// distance per second, turns 1 rad/s, tilts 0.5 rad/s and changes the distance by its own length
-/// per second.
-fn camera_key_step(cam: &mut BattleCamera, func: CameraFunc, time: f32) {
-    let fwd = Vec3::new(-cam.yaw.sin(), 0.0, -cam.yaw.cos());
-    let right = Vec3::new(cam.yaw.cos(), 0.0, -cam.yaw.sin());
-    let step = cam.distance * 0.8 * time;
-    match func {
-        CameraFunc::StepFwd => cam.focus += fwd * step,
-        CameraFunc::StepFwdFast => cam.focus += fwd * (step + step),
-        CameraFunc::StepBck => cam.focus -= fwd * step,
-        CameraFunc::StepR => cam.focus += right * step,
-        CameraFunc::StepL => cam.focus -= right * step,
-        CameraFunc::RotL => cam.yaw += time,
-        CameraFunc::RotR => cam.yaw -= time,
-        // Up / down: farther from / closer to the focus along the view.
-        CameraFunc::CamUp => cam.distance = (cam.distance * (1.0 + time)).min(MAX_CAMERA_DISTANCE),
-        CameraFunc::CamDown => cam.distance = (cam.distance * (1.0 - time)).max(MIN_CAMERA_DISTANCE),
-        // Turn up / down: the view tilts towards the horizon / the ground.
-        CameraFunc::RotU => cam.pitch = (cam.pitch - 0.5 * time).max(MIN_CAMERA_PITCH),
-        CameraFunc::RotD => cam.pitch = (cam.pitch + 0.5 * time).min(MAX_CAMERA_PITCH),
-    }
-}
-
-/// The orbit camera's limits (PROVISIONAL, ours): its distance from the focus in metres and its
-/// angle above the ground in radians.
-const MIN_CAMERA_DISTANCE: f32 = 4.0;
-const MAX_CAMERA_DISTANCE: f32 = 1_500.0;
-const MIN_CAMERA_PITCH: f32 = 0.15;
-const MAX_CAMERA_PITCH: f32 = 1.2;
-
 /// A camera position requested by a battle script (`camera:move_to`): (camera position, look-at
 /// target) in engine coordinates (x, height, map y). Applied at once (PROVISIONAL: the script's
 /// move time is not used).
 #[derive(Resource, Default)]
 pub struct ScriptCamera(pub Option<([f32; 3], [f32; 3])>);
 
-/// Applies a pending [`ScriptCamera`] to the battle camera (same conversion as a battle file's
-/// start view).
+/// Applies a pending [`ScriptCamera`] to the battle camera: placed at once at the position, looking
+/// at the target (same conversion as a battle file's start view).
 pub fn apply_script_camera(mut pending: ResMut<ScriptCamera>, mut cams: Query<&mut BattleCamera>) {
     let Some((s, t)) = pending.0.take() else { return };
-    let (start, target) = (Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]));
-    let off = start - target;
-    let d = off.length().max(1.0);
     for mut cam in &mut cams {
-        *cam = BattleCamera { focus: target, distance: d, yaw: off.x.atan2(off.z), pitch: (off.y / d).clamp(-1.0, 1.0).asin().max(0.05) };
+        cam.place(Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]), &camera_ground);
     }
 }
 
-/// Moves the battle camera: the frame's camera key presses ([`CameraKeys`]: the keys the keys file
-/// binds, in vanilla W/S/A/D or the number pad to step, Q/E to turn, X/Z up and down, V/C to
-/// tilt), each also told to the battle scripts as its input action, and the mouse wheel's zoom
-/// (PROVISIONAL, ours). Harness runs get no key presses and ignore the wheel
-/// ([`camera_harness_run`]).
+/// Moves the battle camera ([`BattleCamera`]): the frame's camera key presses ([`CameraKeys`]: the
+/// keys the keys file binds, in vanilla W/S/A/D or the number pad to step, Q/E to turn, X/Z up and
+/// down, V/C to tilt), the steps and turns each also told to the battle scripts as its input
+/// action, and our stand-in for the mouse wheel ([`BattleCamera::wheel`]); then the frame's end
+/// ([`BattleCamera::end_frame`]), which keeps the real frame time (capped at
+/// [`crate::shortcut_keys::MAX_FRAME_TIME`]) in the camera manager's ring and takes its steady
+/// mean, held in [1/120, 1], as the next frame's rate. The rest of the original's mouse handler
+/// `0x005EE600` (its wheel, edge scrolling and mouse drag, BATTLE_FIDELITY.md §59.4) is not done
+/// yet.
+/// The camera modes (BATTLE_FIDELITY.md §59.5): an `intelli_zoom` press aims along the ray under
+/// the cursor through the view on screen and is given every unit's squad box to zoom onto
+/// ([`BattleCamera::set_zoom_aim`], centre on the ground and radius); a tracking camera follows its unit's drawn position and
+/// facing (the unit's view, placed by [`sync_views`] earlier in the frame), and gives way to a free
+/// camera once the unit is gone ([`BattleCamera::track_frame`]; INFERRED: gone is a unit with no
+/// men or off the field, the exe's entity check, its vfunc `+0x14`, is not traced).
+/// The renderer shows [`BattleCamera::view`], its field of view scaled by the camera's zoom.
+/// Every func the camera handler `0x005EAF00` serves is allowed: its permission test `0x005DB870`
+/// reads a mask the camera manager starts at all bits (`0x00590445`) and that only a message
+/// handler changes (`0x005E6580`, whose senders are not traced). Harness runs get no key presses
+/// and ignore the wheel ([`camera_harness_run`]).
+#[allow(clippy::too_many_arguments)] // a Bevy system: one parameter per query and resource
 pub fn move_camera(
     mut keys: ResMut<CameraKeys>,
     scroll: Res<AccumulatedMouseScroll>,
-    mut cams: Query<(&mut BattleCamera, &mut Transform)>,
-    sim: Option<ResMut<BattleSim>>,
+    time: Res<Time<Real>>,
+    mut cams: Query<CamQuery>,
+    views: Query<(Entity, &UnitView, &Transform), Without<BattleCamera>>,
+    windows: Query<&Window, With<bevy::window::PrimaryWindow>>,
+    mut sim: Option<ResMut<BattleSim>>,
+    mut tracked_view: Local<Option<Entity>>,
 ) {
-    let fixed = camera_harness_run();
-    if let Some(mut sim) = sim
+    if let Some(sim) = sim.as_mut()
         && !keys.presses.is_empty()
     {
-        sim.script_events.extend(keys.presses.iter().map(|(f, _)| super::ScriptEvent::Input(f.input_name())));
+        sim.script_events.extend(keys.presses.iter().filter_map(|(f, _)| f.input_name()).map(super::ScriptEvent::Input));
     }
-    for (mut cam, mut tf) in &mut cams {
-        for &(func, time) in &keys.presses {
-            camera_key_step(&mut cam, func, time);
+    let frame_time = time.delta_secs().min(crate::shortcut_keys::MAX_FRAME_TIME);
+    let zooms = keys.presses.iter().any(|&(f, _)| f == CameraFunc::IntelliZoom);
+    let cursor = windows.single().ok().and_then(Window::cursor_position);
+    for (mut cam, mut tf, mut projection, camera, global) in &mut cams {
+        if zooms {
+            let ray = cursor.and_then(|c| camera.viewport_to_world(global, c).ok()).map(|ray| *ray.direction);
+            let units = sim.as_ref().map_or(&[][..], |s| &s.battle.units[..]);
+            let units = units
+                .iter()
+                .map(|u| {
+                    let b = u.squad_box();
+                    ZoomUnit { centre: world_of(Vec2::new(b.centre.0, b.centre.1)), radius: b.radius }
+                })
+                .collect();
+            cam.set_zoom_aim(ray, units);
         }
-        if scroll.delta.y != 0.0 && !fixed {
-            cam.distance = (cam.distance * (1.0 - scroll.delta.y * 0.1)).clamp(MIN_CAMERA_DISTANCE, MAX_CAMERA_DISTANCE);
-            cam.pitch = (0.15 + cam.distance / 600.0).clamp(MIN_CAMERA_PITCH, MAX_CAMERA_PITCH);
+        for &(func, t) in &keys.presses {
+            cam.key(func, t, &camera_ground);
         }
-        // Follow the terrain: the focus sits on the ground, or on the sea where the ground is the
-        // sea bed; the camera never goes below either.
-        cam.focus.y = crate::terrain::surface_height(Vec2::new(cam.focus.x, -cam.focus.z));
-        let rot = Quat::from_euler(EulerRot::YXZ, cam.yaw, -cam.pitch, 0.0);
-        tf.translation = cam.focus + rot * Vec3::new(0.0, 0.0, cam.distance);
-        let floor = crate::terrain::surface_height(Vec2::new(tf.translation.x, -tf.translation.z)) + 2.0;
-        tf.translation.y = tf.translation.y.max(floor);
-        tf.look_at(cam.focus, Vec3::Y);
+        if scroll.delta.y != 0.0 && !camera_harness_run() {
+            cam.wheel(scroll.delta.y, &camera_ground);
+        }
+        if let Some(id) = cam.tracked_unit() {
+            let units = sim.as_ref().map_or(&[][..], |s| &s.battle.units[..]);
+            // The tracked unit's view, kept from the last frame: searched for only when the target
+            // changes or its view is replaced (a restart).
+            let kept = tracked_view.and_then(|e| views.get(e).ok()).filter(|(_, v, _)| v.id == id);
+            let view = kept.or_else(|| views.iter().find(|(_, v, _)| v.id == id));
+            *tracked_view = view.map(|(e, ..)| e);
+            let frame = view
+                .filter(|(_, v, _)| v.unit(units).is_some_and(|u| u.men > 0 && !u.off_field()))
+                .map(|(_, _, t)| (t.translation, t.rotation));
+            cam.track_frame(frame);
+        }
+        cam.end_frame(frame_time, &camera_ground);
+        let (eye, target, _) = cam.view();
+        *tf = Transform::from_translation(eye).looking_at(target, Vec3::Y);
+        // Written only when it changes, so the projection is not marked changed every frame.
+        let fov = PerspectiveProjection::default().fov * cam.zoom_ratio();
+        if matches!(projection.as_ref(), Projection::Perspective(p) if p.fov != fov)
+            && let Projection::Perspective(p) = projection.as_mut()
+        {
+            p.fov = fov;
+        }
     }
     keys.presses.clear();
 }

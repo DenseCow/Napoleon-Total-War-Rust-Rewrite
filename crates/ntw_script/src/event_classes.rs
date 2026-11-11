@@ -36,7 +36,7 @@ use std::rc::Rc;
 
 use ntw_formats::db::DbValue;
 use ntw_formats::db_folder::tables::{TRIGGER_EVENTS, TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES};
-use ntw_sim::campaign::CharacterId;
+use ntw_sim::campaign::{CharacterId, CharacterKind};
 
 use crate::source::ScriptSource;
 use crate::state::{ScriptContext, ScriptState};
@@ -245,12 +245,17 @@ impl TriggerEvents {
 ///
 /// For the 32 classes whose slot is `0x008F9EE0` (and `CharacterTurnStart`, see [`CLASSES`]) the event
 /// reaches Lua only when, in the exe's order (CONFIRMED):
-/// 1. its character (+0x1C) is not null;
+/// 1. its character (+0x1C) is not null (ours: the context names a character; one the model no
+///    longer has passes, since the exe posts while he is there and ours fires after the step that
+///    may have removed him, e.g. a duellist or an assassination target killed);
 /// 2. `trigger_events` has a record of the event's name (the exe logs the name as not a valid key
 ///    otherwise; ours logs it once per name);
 /// 3. the character's agent type (character +0x1AC, the `agents` record; its key) is not in that
 ///    record's exclusion list (`0x00EC5360`; keys compared exactly, `0x004F0F40` →
-///    `CompareUniStrings`).
+///    `CompareUniStrings`). Ours reads the type the event captured when it was posted
+///    ([`ntw_sim::campaign::CampaignEvent::agent_type`]), else the model's; with neither (a
+///    hand-fired event naming a character the model lacks) the step is skipped, logged once per
+///    event name.
 ///
 /// Every other class's slot is `0x00447880`, which always says yes.
 ///
@@ -263,23 +268,27 @@ pub struct EventGate {
     tables: OnceCell<Option<TriggerEvents>>,
     /// The names step 2 refused and logged.
     refused: RefCell<HashSet<&'static str>>,
+    /// The names step 3 was skipped for (no agent type known), logged once each.
+    unchecked: RefCell<HashSet<&'static str>>,
 }
 
 impl EventGate {
     /// The gate reading `source`'s database.
     pub fn new(source: Rc<ScriptSource>) -> Self {
-        EventGate { source, tables: OnceCell::new(), refused: RefCell::new(HashSet::new()) }
+        EventGate { source, tables: OnceCell::new(), refused: RefCell::new(HashSet::new()), unchecked: RefCell::new(HashSet::new()) }
     }
 
     /// What Lua is handed for event `name` built with `ctx`: the context its class's accessors
     /// answer ([`EventClass::offer`]), or `None` when the class's gate keeps the event from Lua.
-    pub fn admit(&self, state: &ScriptState, name: &str, ctx: ScriptContext) -> Option<ScriptContext> {
+    /// `agent_type` is the context character's type when the event was posted, `None` to read it
+    /// from the model.
+    pub fn admit(&self, state: &ScriptState, name: &str, ctx: ScriptContext, agent_type: Option<CharacterKind>) -> Option<ScriptContext> {
         let Some(class) = class_of(name) else { return Some(ctx) };
         let ctx = class.offer(ctx);
         if !class.gated {
             return Some(ctx);
         }
-        let character = CharacterId(ctx.character?);
+        let id = CharacterId(ctx.character?);
         let Some(tables) = self.tables.get_or_init(|| TriggerEvents::read(&self.source)) else { return Some(ctx) };
         if !tables.names.contains(name) {
             if self.refused.borrow_mut().insert(class.name) {
@@ -288,10 +297,16 @@ impl EventGate {
             return None;
         }
         if let Some(agents) = tables.excluded.get(name) {
-            // A character the model no longer has cannot be asked its type: the event passes. That
-            // only happens while events are fired after their command (the exe posts at once).
-            let kind = state.model.world.characters.get(&character).map(|c| c.kind.esf_name());
-            if kind.is_some_and(|kind| agents.iter().any(|a| a == kind)) {
+            let Some(kind) = agent_type.or_else(|| state.model.world.agent_type(id)) else {
+                if self.unchecked.borrow_mut().insert(class.name) {
+                    eprintln!(
+                        "WARN ntw_script: script event {name} names character {}, whose agent type is not known; its agent-type exclusions are not checked (0x008F9EE0)",
+                        id.0
+                    );
+                }
+                return Some(ctx);
+            };
+            if agents.iter().any(|a| a == kind.esf_name()) {
                 return None;
             }
         }

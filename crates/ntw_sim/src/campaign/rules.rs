@@ -55,6 +55,12 @@ pub struct UnitRules {
     /// the unit can hide on the campaign map (light cavalry, skirmishers, guerrillas; the stealth
     /// test `0x009D1010` lets a force whose units all have it hide anywhere).
     pub campaign_stealth: bool,
+    /// `unit_stats_land` #77 (`UNIT_RECORD` +0x1A0, CONFIRMED: the sub-builder `0x00E8F1D0`, called from
+    /// `0x00E8CFF0` at `0x00E8D214`, copies builder +0x20C to its block +0x68 at `0x00E8F358`): the unit
+    /// can assault walls from the march. A force with one, or with artillery, may assault a walled
+    /// settlement at once (`ForceHasSiegeUnits` `0x008CE1B0`, [`super::CampaignModel::has_siege_units`]);
+    /// vanilla gives it to line infantry.
+    pub siege_capable: bool,
     /// `units` #15 (`UNIT_RECORD` +0x68): the most units of this type the faction may hold and have queued
     /// together, 0 = no limit (CONFIRMED: `0x008F68B0`, see [`super::CampaignModel::recruitable_entry_flags`]).
     pub unit_cap: i32,
@@ -628,11 +634,11 @@ impl CampaignRules {
         }
         r.units.insert(
             "test_unit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, siege_capable: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
         );
         r.units.insert(
             "test_recruit".into(),
-            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
+            UnitRules { cost: 500, upkeep: 10, turns: 2, is_naval: false, men: 100, autoresolve: Some(TEST_AUTORESOLVE), category: "infantry".into(), unit_class: "infantry_line".into(), campaign_cost: 400, flag_21: false, militia: false, campaign_stealth: false, siege_capable: false, unit_cap: 0, travel_speed: 30, unit_resource: None, top_gallants: false },
         );
         r.buildings.insert(
             "test_building_level".into(),

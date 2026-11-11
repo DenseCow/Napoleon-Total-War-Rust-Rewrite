@@ -10,7 +10,7 @@
 //! that the display can react (e.g. redraw a diplomacy screen). Scripts never see them.
 
 use super::ids::{CharacterId, FactionId, ForceId, RegionId, UnitId};
-use super::world::{SlotRef, Stance};
+use super::world::{CharacterKind, SlotRef, Stance};
 use crate::fixed::Fixed20;
 
 /// Something that happened in the campaign model.
@@ -62,6 +62,8 @@ pub enum CampaignEvent {
     CharacterTurnStart {
         /// The character.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `UnitTurnEnd` (CONFIRMED name).
     UnitTurnEnd {
@@ -81,76 +83,102 @@ pub enum CampaignEvent {
     CharacterPromoted {
         /// The character.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `SufferSpyingAttempt` (CONFIRMED: `0x0094C500` builds it for the watched
     /// force's commander before the roll).
     SufferSpyingAttempt {
         /// The watched force's commander.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `SpyingAttemptSuccess` (CONFIRMED: `0x0094C500` / `0x0094CCB0`, outcomes 0 and 1,
     /// context the spy).
     SpyingAttemptSuccess {
         /// The spy.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterFactionSpyAttemptSuccessful` (CONFIRMED: after a successful spying,
     /// for the spy's faction leader when it has one).
     CharacterFactionSpyAttemptSuccessful {
         /// The spy's faction leader.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterFactionSuffersSuccessfulSpyAttempt` (CONFIRMED: the same, for the
     /// victim's faction leader).
     CharacterFactionSuffersSuccessfulSpyAttempt {
         /// The victim's faction leader.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `EspionageAgentApprehended` (CONFIRMED: `0x0094C500` outcomes 2 and 3, context the
     /// watched force's commander; the settlement order has no such event).
     EspionageAgentApprehended {
         /// The commander who caught the spy.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `SufferAssassinationAttempt` (CONFIRMED: `0x0094ACB0` builds it for the target
     /// before the roll).
     SufferAssassinationAttempt {
         /// The target.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `AssassinationAttemptSuccess` (CONFIRMED: `0x0094ACB0` outcomes 0 and 1, the agent).
     AssassinationAttemptSuccess {
         /// The assassin.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterCriticallyFailsAssassination` (CONFIRMED: outcome 3, the agent, who dies).
     CharacterCriticallyFailsAssassination {
         /// The assassin.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `SabotageAttemptSuccess` (CONFIRMED: building sabotage `0x0094DEF0` at
     /// `0x0094E51D`, outcomes 0 and 1, the agent).
     SabotageAttemptSuccess {
         /// The saboteur.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `ArmySabotageAttemptSuccess` (CONFIRMED: `0x0094DA30`, outcomes 0 and 1, an agent
     /// that is not a guerilla).
     ArmySabotageAttemptSuccess {
         /// The saboteur.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `HarassmentAttemptSuccess` (CONFIRMED: `0x0094DA30`, outcomes 0 and 1, a
     /// guerilla, type 16).
     HarassmentAttemptSuccess {
         /// The guerilla.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `DuelFought` (CONFIRMED: `0x00934C60` fires it once for each duellist after the
     /// duel ends, the challenger first).
     DuelFought {
         /// One duellist.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterBuildsSpyNetwork` (CONFIRMED: `0x008F9A00`, at a human faction's turn
     /// start, for a character with `subterfuge` > 0 whose idle turns (`CHARACTER` #15) are exactly 3;
@@ -158,6 +186,8 @@ pub enum CampaignEvent {
     CharacterBuildsSpyNetwork {
         /// The spy.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterCreated` (CONFIRMED name; 74 handlers in `export_triggers.lua`, the
     /// starting traits): a character came into being in play (a candidate, a colonel or captain of
@@ -166,11 +196,15 @@ pub enum CampaignEvent {
     CharacterCreated {
         /// The new character.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `CharacterTurnEnd` (CONFIRMED name).
     CharacterTurnEnd {
         /// The character.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `FactionTurnEnd` (CONFIRMED name).
     FactionTurnEnd {
@@ -182,6 +216,8 @@ pub enum CampaignEvent {
     MovementPointsExhausted {
         /// The character.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `GovernorshipTaxRateChanged` (CONFIRMED name). The faction's levels change, and its
     /// governorships' (one per faction in every shipped campaign).
@@ -296,6 +332,8 @@ pub enum CampaignEvent {
     CharacterCompletedBattle {
         /// The commander.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `SettlementOccupied` (CONFIRMED name; eur scripting.lua registers it).
     SettlementOccupied {
@@ -317,6 +355,8 @@ pub enum CampaignEvent {
     CharacterLootedSettlement {
         /// The looting commander.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
     },
     /// Script event `FactionBecomesLiberationProtectorate` (CONFIRMED name, string `0x01350274`, event
     /// vtable `0x0137D064`): the liberation choice `0x00B4F090` posts it first (`0x00B4F0FE` in the
@@ -334,6 +374,8 @@ pub enum CampaignEvent {
     CharacterEmbarksNavy {
         /// The army's commander.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
         /// The navy boarded.
         navy: ForceId,
     },
@@ -341,6 +383,8 @@ pub enum CampaignEvent {
     CharacterDisembarksNavy {
         /// The army's commander.
         character: CharacterId,
+        /// His agent type when the event was posted ([`CampaignEvent::agent_type`]).
+        agent_type: Option<CharacterKind>,
         /// The navy left.
         navy: ForceId,
     },
@@ -565,7 +609,7 @@ pub enum CampaignMessage {
     /// the detail empty, and it carries his position after the move (message +0x1C), which the message
     /// screen's filler (`0x00A08A80`) shows as its map position. Posted only by a region expulsion
     /// (`0x008D9DC0` at `0x008DA091`) to the army's faction (character +0x2A0), right after it moves
-    /// a land army that may not stay, with no human test ([`super::CampaignModel::move_armies_out_of_regions`]).
+    /// a land army that may not stay, with no human test ([`super::CampaignModel::expel_from_region`]).
     YourArmyRetreatsRegion {
         /// The army's commander (the title).
         character: CharacterId,
@@ -727,5 +771,38 @@ impl CampaignEvent {
             | CampaignEvent::ConstructionItemDropped { .. }
             | CampaignEvent::Message { .. } => return None,
         })
+    }
+
+    /// The agent type of the event's character as it was when the event was posted, for the script
+    /// gate's agent-type step (the gate `0x008F9EE0` reads character +0x1AC at posting, while he is
+    /// there; ours fires the event after its step, by when he may have died: a duel's loser, a failed
+    /// assassin). `None` for an event that carries no character, or whose character the model did not
+    /// have when it was posted.
+    pub fn agent_type(&self) -> Option<CharacterKind> {
+        match self {
+            CampaignEvent::CharacterTurnStart { agent_type, .. }
+            | CampaignEvent::CharacterTurnEnd { agent_type, .. }
+            | CampaignEvent::CharacterCreated { agent_type, .. }
+            | CampaignEvent::CharacterPromoted { agent_type, .. }
+            | CampaignEvent::SufferSpyingAttempt { agent_type, .. }
+            | CampaignEvent::SpyingAttemptSuccess { agent_type, .. }
+            | CampaignEvent::CharacterFactionSpyAttemptSuccessful { agent_type, .. }
+            | CampaignEvent::CharacterFactionSuffersSuccessfulSpyAttempt { agent_type, .. }
+            | CampaignEvent::EspionageAgentApprehended { agent_type, .. }
+            | CampaignEvent::SufferAssassinationAttempt { agent_type, .. }
+            | CampaignEvent::AssassinationAttemptSuccess { agent_type, .. }
+            | CampaignEvent::CharacterCriticallyFailsAssassination { agent_type, .. }
+            | CampaignEvent::SabotageAttemptSuccess { agent_type, .. }
+            | CampaignEvent::ArmySabotageAttemptSuccess { agent_type, .. }
+            | CampaignEvent::HarassmentAttemptSuccess { agent_type, .. }
+            | CampaignEvent::DuelFought { agent_type, .. }
+            | CampaignEvent::CharacterBuildsSpyNetwork { agent_type, .. }
+            | CampaignEvent::MovementPointsExhausted { agent_type, .. }
+            | CampaignEvent::CharacterCompletedBattle { agent_type, .. }
+            | CampaignEvent::CharacterLootedSettlement { agent_type, .. }
+            | CampaignEvent::CharacterEmbarksNavy { agent_type, .. }
+            | CampaignEvent::CharacterDisembarksNavy { agent_type, .. } => *agent_type,
+            _ => None,
+        }
     }
 }

@@ -316,9 +316,10 @@ fn the_deal_expels_a_recipient_without_a_capital() {
     assert_eq!(handover.world.characters[&CharacterId(101)].garrisoned_in, Some(RegionId(11)), "no capital: not in the owner change's pass");
     m.apply(CampaignCommand::BeginNegotiation { proposer: A, recipient: B }).unwrap();
     m.apply(CampaignCommand::ProposeRegions { clear: false, demanded: vec![RegionId(11)], offered: vec![] }).unwrap();
-    m.apply(CampaignCommand::AcceptDeal).unwrap();
+    let events = m.apply(CampaignCommand::AcceptDeal).unwrap();
     assert_eq!(m.world.regions[&RegionId(11)].owner, A);
     assert_eq!(at(&m, 101), pos(150, 0));
+    assert_eq!(retreat_notices(&events), vec![(B, CharacterId(101), pos(150, 0))], "the region list's move notice");
     assert_eq!(m.world.characters[&CharacterId(101)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(11)].garrison, None);
 }
@@ -483,6 +484,49 @@ fn peace_gives_back_both_sides_allies_access() {
     assert!(m.world.relationships[&(C, A)].allied_in_war_against.is_empty());
 }
 
+/// Peace with allies on both sides at once (`0x00B0D0C0`, run by ours on both sides' allies): A's ally
+/// C and B's ally D (MADE-UP, region 14 at x 600) had suspended their access against the other side.
+/// Whoever proposes, both items are cleared; given back none, A's army leaves C's region and B's
+/// leaves D's; given back saved access, both stay.
+#[test]
+fn peace_with_allies_on_both_sides_gives_back_each_sides_access() {
+    const D: FactionId = FactionId(4);
+    let base = |saved: i32| {
+        let mut m = spread_model();
+        m.world.factions.insert(D, faction(D, "test_faction_d", 0, GovernmentType::AbsoluteMonarchy));
+        m.world.turn_order.push(D);
+        let mut r14 = region(14, D, 1000, 0);
+        r14.settlement.position = pos(600, 0);
+        m.world.regions.insert(r14.id, r14);
+        set_details(&mut m, D, Some(14), false);
+        add_army(&mut m, 104, A, pos(405, 0));
+        add_army(&mut m, 105, B, pos(605, 0));
+        m.world.declare_war(A, B).unwrap();
+        m.form_alliance(A, C).unwrap();
+        m.form_alliance(B, D).unwrap();
+        suspend_access(&mut m, C, A, B, saved);
+        suspend_access(&mut m, D, B, A, saved);
+        m
+    };
+    for (proposer, target) in [(A, B), (B, A)] {
+        let mut m = base(0);
+        m.make_peace_rules(proposer, target, false).unwrap();
+        for (giver, side) in [(C, A), (D, B)] {
+            let r = &m.world.relationships[&(giver, side)];
+            assert!(r.allied_in_war_against.is_empty(), "{giver:?} towards {side:?}, {proposer:?} proposing");
+            assert_eq!(r.military_access_turns, 0, "{giver:?} towards {side:?}, {proposer:?} proposing");
+        }
+        assert_eq!(at(&m, 104), pos(200, 0), "A's army out of C's region 13 to A's nearest, 12");
+        assert_eq!(at(&m, 105), pos(100, 0), "B's army out of D's region 14 to B's 11");
+
+        let mut m = base(3);
+        m.make_peace_rules(proposer, target, false).unwrap();
+        assert_eq!(m.world.relationships[&(C, A)].military_access_turns, 3);
+        assert_eq!(m.world.relationships[&(D, B)].military_access_turns, 3);
+        assert_eq!((at(&m, 104), at(&m, 105)), (pos(405, 0), pos(605, 0)), "access given back: both stay");
+    }
+}
+
 /// Peace's step order (`0x00B262C0`): the `0x00B0D0C0` loop's expulsion runs before the character walk
 /// (`0x00A25570`), so a raider it moves out has lost his raids (the placement ends them, `0x0096C930` → `0x00A285E0` → `0x009DA140`, with its price update)
 /// and his walk step finds none to end: the peace adds only its own update. Given back access, he stays,
@@ -589,7 +633,7 @@ fn an_access_loss_walks_the_givers_region_list_in_its_order() {
 }
 
 /// The expulsion's move notices in `events`: (recipient, commander, position).
-fn retreat_notices(events: &[CampaignEvent]) -> Vec<(FactionId, CharacterId, (Fixed20, Fixed20))> {
+pub(super) fn retreat_notices(events: &[CampaignEvent]) -> Vec<(FactionId, CharacterId, (Fixed20, Fixed20))> {
     events
         .iter()
         .filter_map(|e| match e {
@@ -640,8 +684,10 @@ fn no_move_notice_when_the_army_may_stay_or_is_not_placed() {
 }
 
 /// Every expulsion caller passes its notices on: the cancelled access (`0x00B67BD0`, before the command's
-/// `alliance_broken`), the end of a protectorate tie (before its stance change) and the
-/// `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` command.
+/// `alliance_broken`), the end of a protectorate tie (before its stance change), the
+/// `CCQ_MOVE_ARMIES_OUT_OF_REGIONS` command, timed access running out and a peace. The deal's passes
+/// are checked in their own tests (`the_deal_expels_a_recipient_without_a_capital` and
+/// `peace_deal_tests`).
 #[test]
 fn the_expulsion_callers_return_the_move_notices() {
     let mut m = spread_model();
@@ -668,6 +714,24 @@ fn the_expulsion_callers_return_the_move_notices() {
     add_army(&mut m, 103, C, pos(205, 0));
     let events = m.apply(CampaignCommand::MoveArmiesOutOfRegions { a: A, b: C }).unwrap();
     assert_eq!(retreat_notices(&events), vec![(C, CharacterId(103), pos(400, 0))]);
+
+    // Timed access running out at the giver's round end (`0x00B29170`).
+    let mut m = spread_model();
+    add_army(&mut m, 103, C, pos(205, 0));
+    m.relationship_mut(A, C).military_access_turns = 1;
+    let mut events = Vec::new();
+    m.diplomacy_round_end(A, &mut events);
+    assert_eq!(retreat_notices(&events), vec![(C, CharacterId(103), pos(400, 0))]);
+
+    // Peace (`0x00B262C0` → the `0x00B0D0C0` loop): A gets back no access from its ally C, so A's army
+    // leaves C's region 13 for A's region 12.
+    let mut m = spread_model();
+    add_army(&mut m, 104, A, pos(405, 0));
+    m.world.declare_war(A, B).unwrap();
+    m.form_alliance(A, C).unwrap();
+    suspend_access(&mut m, C, A, B, 0);
+    let events = m.make_peace_rules(A, B, true).unwrap();
+    assert_eq!(retreat_notices(&events), vec![(A, CharacterId(104), pos(200, 0))]);
 }
 
 /// [`test_model`] on a polygon grid of 2-unit cells, 80 x 20 map units, by column: x < 20 is region

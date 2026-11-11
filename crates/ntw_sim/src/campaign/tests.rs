@@ -11,6 +11,7 @@ use crate::rng::CaRng;
 
 mod agents_tests;
 mod ally_war_call_tests;
+mod ambush_tests;
 mod black_shroud_tests;
 mod buildings_tests;
 mod can_save_tests;
@@ -37,6 +38,7 @@ mod recruitment_tests;
 mod region_groups_tests;
 mod research_tests;
 mod residence_tests;
+mod siege_tests;
 mod slots_exit_tests;
 mod trade_order_tests;
 mod transfer;

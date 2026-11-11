@@ -4,7 +4,7 @@
 //! an ASCII top-down occupancy of each mesh and its first vertices, so a flat ground overlay (a
 //! campaign arrow, a border strip) can be recognised without a renderer.
 //!   cargo run -p ntw_formats --example loose_rigid_probe -- campaign_maps/nap_europe/display/arrows/arrows.rigid_model
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_formats::rigid_model::RigidModel;
 

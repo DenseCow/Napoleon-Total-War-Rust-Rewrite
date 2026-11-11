@@ -974,7 +974,7 @@ pub(super) fn install(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Result<(
     let i = inner.clone();
     p.set("scale_step", lua.create_function(move |_, key: String| Ok(i.limits.unit_scale_setting(i.prefs.borrow().get_f64(&key).map(|v| v as f32))))?)?;
     let i = inner.clone();
-    p.set("step_scale", lua.create_function(move |_, index: f64| Ok(f64::from(i.limits.unit_scale(i32::try_from(i.limits.unit_scale_step(index as i64)).unwrap_or(i32::MAX)))))?)?;
+    p.set("step_scale", lua.create_function(move |_, index: f64| Ok(f64::from(i.limits.step_scale(i.limits.unit_scale_step(index as i64)))))?)?;
     let i = inner.clone();
     p.set("set", lua.create_function(move |_, (key, value): (String, Value)| {
         let mut prefs = i.prefs.borrow_mut();

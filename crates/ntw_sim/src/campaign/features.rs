@@ -5,8 +5,9 @@
 //! this table instead of the key, so a custom or mod campaign can switch any of them on or off in its
 //! own data. The original's importer fills it from the campaign key exactly as the exe switches
 //! (`ntw_campaign::features::original`); [`CampaignFeatures::default`] is a campaign the exe has no
-//! switch for (e.g. `eur_napoleon`), less the one faction-key rule the exe applies in every campaign
-//! ([`CampaignFeatures::victory_rival`]), which names a Napoleon faction and so is data, not a default.
+//! switch for (e.g. `eur_napoleon`), less the faction-key rules the exe applies in every campaign
+//! ([`CampaignFeatures::victory_rival`], [`CampaignFeatures::enemy_rank_bonuses`]), which name Napoleon
+//! factions and so are data, not defaults.
 
 /// One campaign's rule switches. See the module docs; every field's default is the exe's behaviour
 /// outside the switched campaigns.
@@ -99,6 +100,47 @@ pub struct CampaignFeatures {
     /// allied (`0x008CE390`) and both conditions records are of type 5 (set to 5 for that key by
     /// `ntw_campaign::features::original`). `None`: the other human always loses.
     pub shared_victory_kind: Option<u32>,
+    /// The rank bonuses a general earns against the other side of his pending battle
+    /// ([`super::agents::rank_original`]), tested in order, each on its own. CONFIRMED (`GetCharacterRank`
+    /// `0x00A198D0` at `0x00A19C80`..`0x00A19D5F`, in every campaign): the enemy side's faction record
+    /// (none for the rebels) gives `hates_ottomans` when its key is `ottomans`, `hates_europeans` when its
+    /// culture is `european`, `hates_french` when its key is `spa_france` and `hates_british` when its key
+    /// is `spa_britain` (the last an ORIGINAL BUG fixed: the exe compares the culture with `spa_britain`
+    /// at `0x00A19D35`, which no culture is, see `ntw_campaign::features`). `ntw_campaign::features::original`
+    /// sets them for every key; empty (a custom campaign's default): no enemy bonus.
+    pub enemy_rank_bonuses: Vec<EnemyRankBonus>,
+}
+
+/// A rank bonus against an enemy ([`CampaignFeatures::enemy_rank_bonuses`]): the general's own
+/// [`Self::bonus`] when the other side's faction matches [`Self::enemy`].
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct EnemyRankBonus {
+    /// The effect bonus added (an own bonus of the general's traits and ancillaries).
+    pub bonus: String,
+    /// The enemy it applies against.
+    pub enemy: EnemyKey,
+}
+
+/// Which enemy faction an [`EnemyRankBonus`] applies against, compared case-sensitively.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum EnemyKey {
+    /// The enemy faction's key (`CheckUniStringEqualsAnsi` `0x004F0F50` on the faction record).
+    Faction(String),
+    /// The culture of the enemy faction's subculture (faction record +0x10 → subculture +0x10, compared
+    /// by `0x004F0EA0`; [`super::characters::CharacterRules::culture`]).
+    Culture(String),
+}
+
+impl EnemyKey {
+    /// The enemy faction `faction_key` (of culture `culture`) matches.
+    pub fn matches(&self, faction_key: &str, culture: &str) -> bool {
+        match self {
+            EnemyKey::Faction(k) => k == faction_key,
+            EnemyKey::Culture(k) => k == culture,
+        }
+    }
 }
 
 /// The victory test's rival rule ([`CampaignFeatures::victory_rival`]): a conditions record of type
@@ -134,6 +176,7 @@ impl Default for CampaignFeatures {
             ai_peace_refusal_attitude: None,
             victory_rival: None,
             shared_victory_kind: None,
+            enemy_rank_bonuses: Vec::new(),
         }
     }
 }

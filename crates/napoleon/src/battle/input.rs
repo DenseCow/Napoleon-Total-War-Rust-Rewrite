@@ -67,15 +67,25 @@ fn apply_speed(speed: BattleSpeed, time: &mut Time<Virtual>) {
 const DOUBLE_CLICK_S: f64 = 0.5;
 const DOUBLE_CLICK_PX: f32 = 4.0;
 
-/// A right-click at `now` (seconds) and `pos` (window pixels) is the second of a double click
-/// after the order click `prev` (its time and position).
-fn is_double_click(prev: Option<(f64, Vec2)>, now: f64, pos: Vec2) -> bool {
-    prev.is_some_and(|(t, p)| now - t <= DOUBLE_CLICK_S && p.distance(pos) <= DOUBLE_CLICK_PX)
+/// The last right-click that gave an order: when (real time, seconds), where (window pixels) and
+/// to which selected unit.
+#[derive(Clone, Copy)]
+pub struct OrderClick {
+    at: f64,
+    pos: Vec2,
+    unit: u32,
+}
+
+/// A right-click at `now` (seconds) and `pos` (window pixels), with `unit` selected, is the second
+/// of a double click after the order click `prev`. A selection changed in between (a left click,
+/// a unit card or a selection key) breaks it: the second click must order the unit the first one
+/// did (PROVISIONAL, as the window above).
+fn is_double_click(prev: Option<OrderClick>, now: f64, pos: Vec2, unit: u32) -> bool {
+    prev.is_some_and(|c| c.unit == unit && now - c.at <= DOUBLE_CLICK_S && c.pos.distance(pos) <= DOUBLE_CLICK_PX)
 }
 
 /// Mouse: select with the left button, order a move with the right button, run with a double
-/// right-click. `last` is the last right-click that gave an order (real time, cursor position),
-/// cleared by a left click.
+/// right-click. `last` is the last right-click that gave an order, cleared by a left click.
 pub fn mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     window: Single<&Window, With<PrimaryWindow>>,
@@ -83,7 +93,7 @@ pub fn mouse(
     mut sim: ResMut<BattleSim>,
     pointer: Option<Res<super::hud::HudPointer>>,
     time: Res<Time<Real>>,
-    mut last: Local<Option<(f64, Vec2)>>,
+    mut last: Local<Option<OrderClick>>,
 ) {
     let left = buttons.just_pressed(MouseButton::Left);
     let right = buttons.just_pressed(MouseButton::Right);
@@ -124,11 +134,11 @@ pub fn mouse(
         // unit's current move runs, if it can run; it gives no new move and raises no speed event
         // to the scripts. The same rule as the HUD's Run (`Battle::order_move_speed`).
         let now = time.elapsed_secs_f64();
-        if is_double_click(last.take(), now, cursor) {
+        if is_double_click(last.take(), now, cursor, id) {
             sim.battle.order_move_speed(id, MoveSpeed::Run);
             return;
         }
-        *last = Some((now, cursor));
+        *last = Some(OrderClick { at: now, pos: cursor, unit: id });
         // Right click on an enemy: fire order (refused by the model if the unit can't shoot,
         // in which case it is treated as a move to that spot).
         let enemy = unit_near(&sim, point_m, |s, u| s.battle.unit_index(id).is_some_and(|i| s.battle.units[i].side != u.side));
@@ -167,11 +177,19 @@ mod tests {
     /// one or a first one is not.
     #[test]
     fn a_double_click_is_two_clicks_close_in_time_and_place() {
-        let first = Some((10.0, Vec2::new(100.0, 100.0)));
-        assert!(is_double_click(first, 10.3, Vec2::new(102.0, 101.0)));
-        assert!(is_double_click(first, 10.5, Vec2::new(100.0, 104.0)));
-        assert!(!is_double_click(first, 10.6, Vec2::new(100.0, 100.0)), "too late");
-        assert!(!is_double_click(first, 10.1, Vec2::new(105.0, 100.0)), "too far");
-        assert!(!is_double_click(None, 10.1, Vec2::new(100.0, 100.0)), "no first click");
+        let first = Some(OrderClick { at: 10.0, pos: Vec2::new(100.0, 100.0), unit: 3 });
+        assert!(is_double_click(first, 10.3, Vec2::new(102.0, 101.0), 3));
+        assert!(is_double_click(first, 10.5, Vec2::new(100.0, 104.0), 3));
+        assert!(!is_double_click(first, 10.6, Vec2::new(100.0, 100.0), 3), "too late");
+        assert!(!is_double_click(first, 10.1, Vec2::new(105.0, 100.0), 3), "too far");
+        assert!(!is_double_click(None, 10.1, Vec2::new(100.0, 100.0), 3), "no first click");
+    }
+
+    /// A selection changed between the two right-clicks (a unit card or a selection key, which
+    /// do not pass through the left-click reset) breaks the double click.
+    #[test]
+    fn a_selection_change_breaks_the_double_click() {
+        let first = Some(OrderClick { at: 10.0, pos: Vec2::new(100.0, 100.0), unit: 3 });
+        assert!(!is_double_click(first, 10.2, Vec2::new(100.0, 100.0), 4));
     }
 }

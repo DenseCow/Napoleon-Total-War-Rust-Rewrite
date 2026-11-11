@@ -369,8 +369,12 @@ At the faction's turn end (`0x008BD0F0` → `0x009DA210` per character, before `
   idle turns + 1; +0x4FC (#25) = 0.
 
 Field numbers CONFIRMED from the loader `0x00991520` (read order #14 bool +0x4C5, #15 u32 +0x4C8, #16 bool +0x4CC,
-#17 f32 +0x2EC, #18..#21 u32, #22 bool +0x4E0, #23 bool +0x4E8, #24 u32 +0x4EC, #25 bool +0x4FC, #26 u32, #27 bool
-+0x510, #28..#30 u32 +0x504 / +0x508 / +0x50C, ..., #34 bool +0x52C). The round-1 note had home and enemy lands the other
+#17 f32 +0x2EC, #18 u32 +0x4D0 (defensive sieges, 0x00991D33), #19 u32, #20 u32 +0x4D8 (offensive sieges,
+0x00991D4F), #21 u32, #22 bool +0x4E0, #23 bool +0x4E8, #24 u32 +0x4EC, #25 bool +0x4FC, #26 u32, #27 bool
++0x510, #28..#30 u32 +0x504 / +0x508 / +0x50C, ..., #34 bool +0x52C). #18 / #20 are raised by `LaySiege` 0x008AF6A0
+(the garrison's commander and the besieger's; CAMPAIGN_FIDELITY.md "Siege start, assault and fall") and read by the
+script functions `DefensiveSiegesFought` 0x0089EC50 / `OffensiveSiegesFought` 0x008A21F0 (model:
+`CharacterDetails::defensive_sieges` / `offensive_sieges`, loaded and written back). The round-1 note had home and enemy lands the other
 way round. Model: `CharacterDetails::turns_at_home` / `turns_in_enemy_lands` / `turns_at_sea` / `no_action` /
 `idle_turns`, loaded, updated by `turn_end_counters` in the faction end step; the script conditions
 `CharacterTurnsAtHome` / `AtSea` / `InEnemyLands` / `NoActionThisTurn` read them. PROVISIONAL: "in a port" is a naval
@@ -446,9 +450,14 @@ character within 1 unit of a port slot. Test: `campaign::tests::turn_end_counter
   k − 1); a unit at 10 % strength or more loses int_range(0, min(left, men / 2)). Outcome 0 also blames (sabotage
   triple); outcomes 2 and 3 are detected; 3 the agent dies.
 - **Building sabotage** (`0x0094DEF0`, CONFIRMED): chance `0x00922C90`: S = rank + `subterfuge_sabotage` (0..9), C =
-  the owner's best spy in the region: rank + `subterfuge_counterspying` (0..9), k from the chain record +0x18 =
-  `building_chains` #2 parsed (`0x004F3720`; empty = 0, so most chains have k = 3; sArmy 1 and tFactory 2 have k = 1;
-  other numbers 0.5); S / (round((level + 1) × k) + S + C) × 100, 5..95. Roll with ability 4 and subterfuge s.
+  the owner's best spy in the region: rank + `subterfuge_counterspying` (0..9), k from the chain record +0x18 (read
+  at `0x00922CE0` through the level's chain +0xC): 0 → 3, 1 or 2 → 1, else 0.5. Chain +0x18 is the chain's category,
+  not `building_chains` #2: the chain builder `0x00E55C30` stores #2 (row +0x18) at chain +0x14 (`0x00E55C63`) and
+  the category at +0x18 (`0x00E55D2E`) from its string (`0x00E55CA4`..`0x00E55D27`): military 0, government 1,
+  money 2, agriculture 3, happiness 4, research 5, other or empty 6. So k = 3 for a military chain, 1 for a
+  government or money chain, 0.5 otherwise. Ours still takes k from #2 (ntw_sim `agents.rs`
+  `building_sabotage_chance` through `rules.chain_class`), which this does not fix (a BACKLOG bug line).
+  S / (round((level + 1) × k) + S + C) × 100, 5..95. Roll with ability 4 and subterfuge s.
   Outcome 0: the building's health × (1 − min(4 s + 63, 99.9) %), truncated (`0x00B452A0`), and blame; outcome 1:
   × (1 − min(4 s + 38, 99.9) %) and a call `0x0047FD40` (UNKNOWN); outcomes 2 and 3 detected, 3 the agent dies. A
   building below 100 health gives no effects.
@@ -1238,7 +1247,7 @@ The cards and panels' `PipPath` / `PrimaryAttributePath` used to be built as
   for zeal / command_land, battle type and side, enemy faction / culture, army and fleet make-up,
   minister post; each an effect-bonus id read from the character's own effects) are not
   modelled. So their `PrimaryLevel` stays PROVISIONAL until those bonuses are in (2026-10-20, §16:
-  all modelled but the pending-battle ones). A character id
+  all modelled but the pending-battle ones; those too since 2026-11-10, §18). A character id
   with no record shows empty `Primary*` fields (PROVISIONAL; the exe always has the record).
 - **The per-attribute part:** the builder then loops over all 14 attributes. Each entry gets a
   value from `0x009CB560`, `PipPath` (first the raw row path, then overwritten by the skinned
@@ -1490,7 +1499,7 @@ level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = 
   details +0x34 inside the list's owner). Every ancillary's `ancillary_to_attribute_effects` likewise on
   gaining / losing it (`CharacterDetails::ApplyAncillaryAttributeEffects` `0x00A0EC10`). No floor, no cap;
   an attribute the type lacks is −1 and the effect adds to that. Ability effects go to the +0xDC slots the
-  same way (not modelled; BACKLOG). Evidence beyond the trace: `ntw_campaign` test
+  same way (§19, modelled). Evidence beyond the trace: `ntw_campaign` test
   `stored_attributes_are_the_start_levels_plus_the_effects` on the `eur_napoleon` start position: 530 of 531
   characters' stored levels equal their type's starting rows plus their traits' and ancillaries' effects;
   the one exception (rake 749615820: his `C_Rake_Counter_Spy` level 2 gives `subterfuge` +2, but the start
@@ -1512,9 +1521,8 @@ level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = 
   0x70, ⌈n/3⌉ artillery (1) → `command_land_artillery` 0x6F; command_sea: ⌈2n/3⌉ frigates (7) →
   `command_naval_frigates` 0x72, ships of the line (6) → 0x73; management: the minister's post
   (`management_army` / `_navy` / `_finance` / `_justice` 0x5D..0x60). Clamp −1..9 from data
-  (`CharacterRules::rank_limits`, original constants `0x00A19FA1`..`0x00A19FB4`). PROVISIONAL: the
-  pending-battle bonuses (battle stance `land_command_*` / `sea_command_*` by battle type and side
-  `0x008CE700`, and `hates_*` against the enemy faction / culture), as the model has no pending battle.
+  (`CharacterRules::rank_limits`, original constants `0x00A19FA1`..`0x00A19FB4`). command_land and
+  command_sea also take the pending-battle bonuses (§18, CONFIRMED, `agents::pending_battle_bonus`).
   The missionary rank of the religion pass now calls the same seam (`religion::missionary_rank` gone).
 - **Experience from battles** is not a separate counter: a general's stars grow only through traits and
   ancillaries (their attribute effects above) that the battle triggers give; the triggers are the trait
@@ -1535,10 +1543,8 @@ level plus situation bonuses, clamped to −1..9. The UI shows `PrimaryLevel` = 
 - **Readers outside the campaign model:** the battle's morale reads the rank from the unit's battle
   card, which the campaign fills with `GetCharacterRank` of the unit's character at battle setup
   (`0x008AF200` land / `0x008AEF40` naval, CONFIRMED; ported as `CampaignModel::battle_general_card`
-  through `agents::rank`, BATTLE_FIDELITY.md §11, 2026-10-20 worker starmorale). Still BACKLOG lines:
-  the autoresolve (`autoresolve_commander_star_rating_impact`), the character
-  details `PrimaryLevel` (now from our rank), and the other exe callers of `0x00A198D0` (31 xrefs, not
-  audited one by one).
+  through `agents::rank`, BATTLE_FIDELITY.md §11, 2026-10-20 worker starmorale). The other exe callers
+  of `0x00A198D0` are audited one by one in §18.
 - **Ghidra (saved):** `CharacterDetails::ApplyTraitLevelAttributeEffects` `0x00A0ECB0` (completeness
   93.9), `CharacterDetails::ApplyAncillaryAttributeEffects` `0x00A0EC10` (95.0),
   `SubtractAntitraitPointsFromHeldTrait` `0x008D21B0` (85.9), `RemoveHeldTraitByRecord` `0x008E9830`
@@ -1602,7 +1608,10 @@ CONFIRMED by static trace in Ghidra and by the tests named below.
   (`details::starting_attribute_bonuses` over `ATTRIBUTE_SITUATION_KEYS`, called by
   `CharacterRules::new_character_details`), as the maker clears +0x13C; the save writes #14 from the
   model (`save::write_attribute_bonuses`, as `0x009A0580` writes +0x13C; polish69 2026-11-10), not the
-  source record's or the cloned template's value. Tests: `the_situation_slot_gives_no_rank`
+  source record's or the cloned template's value: the array is rebuilt as the model's entries in order, each a
+  UTF-16 key (type 14, `0x009A0AE8`) and a u32 (type 8, `0x009A0B35`), so a source entry the model lacks is
+  dropped and a repeated key is written each time (polish75 2026-11-11; the writer has no loop and reads
+  nothing from the source record). Tests: `the_situation_slot_gives_no_rank`
   (rank_tests.rs), a `dummy` value and a situation key in the slot leave the rank unchanged;
   `a_new_character_starts_at_minus_one_then_his_types_rows` (the new slot);
   `attribute_bonuses_are_written_from_the_model` (save.rs);
@@ -1611,8 +1620,7 @@ CONFIRMED by static trace in Ghidra and by the tests named below.
   `the_originals_saves_carry_one_dummy_zero` (the evidence saves the original wrote, `orig_fr_t1`,
   `orig_fr_may1811`, `orig_gb_apr1811`, `auto_orig_spa_0245`: every character holds
   `[("dummy", 0)]`). The rank's real situation bonuses
-  are GetCharacterRank's own effect bonuses (§16); the pending-battle ones stay under the separate
-  BACKLOG line "Pending battles (cmdstars review)".
+  are GetCharacterRank's own effect bonuses (§16) and its pending-battle bonuses (§18).
 - **Not an ORIGINAL BUG.** The one-entry `dummy` list shows the exe means to have no situations, and
   the vanilla effect tables are empty. A mod's situation effect rows load and do nothing, as in the
   original; giving them an effect would need Empire semantics the exe does not hold.
@@ -1625,3 +1633,117 @@ CONFIRMED by static trace in Ghidra and by the tests named below.
   `g_apszAttributeSituationKeys` (typed `char*[1]`), `g_szFmtInvalidAgentAttributeSituationKey`, `g_szAgentAttributeSituationsTableName`; structs `TraitAttributeSituationEffectRecord`
   (0x20), `TraitAttributeSituationEffectDbRow` (0x1C), `AgentAttributeSituationTable` (0x5C; +0x0C count, +0x10 records, +0x14 key hash). The remaining deductions are the untyped database and situation record pointers (no struct for them yet). EOL
   comments on the #14 slot at `0x00992F5D`, `0x00993E6D`, `0x009A0AB6`, `0x009A0B2E`.
+
+## 18. The rank's callers and its pending-battle bonuses (2026-11-10, worker charrank)
+
+**The callers of `GetCharacterRank` `0x00A198D0` (31 xrefs, CONFIRMED by decompile of each caller).**
+Every reader of ours goes through the `character.rank` seam (`agents::rank`).
+- Matched: the battle cards `0x008AEF40` (naval) / `0x008AF200` (land) (`battle_general_card`, the
+  autoresolve's star ratings too); the AI's spotting `0x008B4B70` (`visibility.rs`); the gentlemen order
+  `0x008C55D0` (`economy.rs`); the minister level `0x008D9D70` (`effects.rs`, the faction set's call);
+  the agent action chances `0x009225D0`, `0x00922850`, `0x00922A70`, `0x00922BA0`, `0x00922C90`
+  (`agents.rs`); the guerrilla sabotage `0x0094DA30` → `0x008EB660`; the army card `0x009ABE00`
+  (ntw_script `army.rs`); the details `PrimaryLevel` `0x009AD250` (ntw_script `characters.rs`); the pool
+  hire cost `0x00A1BB20` (`pool.rs`); the religion pass `0x00A63FE0` (`religion.rs`).
+- Not modelled by design: `0x008F2620`, the Steam achievement for a `command_land` rank ≥ 8 (`turn.rs`).
+- Gaps (BACKLOG lines): (a) who deploys first, `0x008B9F50`, compares the two side commanders' ranks;
+  called by `0x008C4E50` at `0x008C51D9` and by the pre-battle panel `0x009A2420` (its
+  `attacker_deploys_first` / `defender_deploys_first`); its caller `0x008C9350` is not decoded yet.
+  (b) A region's spy-network level `0x008F1CE0` feeds a force's intel accuracy `0x008F1DD0` (base 4, or
+  campaign variable 101 + 4, plus the subterfuge of an agent in sight, plus the network, capped at 16,
+  then /16), read by `0x008F77A0` → `0x008C0F50` for human factions. (c) The hover marker level
+  `0x00944550` / `0x009456B0` = rank + 1.
+- Ours has one reader the exe lacks: `pool.rs` `promotion_cost` (PROVISIONAL already).
+
+**The pending-battle bonuses (`0x00A198D0` at `0x00A19B32`..`0x00A19D5F`, CONFIRMED by disassembly).**
+Only for a `command_land` or `command_sea` main attribute, while the battle sequence's state
+(`0x004B4A50`) is 1..3: the pre-battle panel and the autoresolve (`0x008AE5A0` at `0x008F7969` in
+state 1). Both of our autoresolves read the ranks before the pending battle is taken (land: cloned at
+`battles.rs` `autoresolve`, taken in `settle_pending_battle`; naval: `naval_autoresolve_units`
+before `pending_battle = None`), so ours is the model's `pending_battle`.
+- He must command a force on a side: the attacking side +0x68 (`0x008CE700` → `0x008CE7B0` /
+  `0x008CE850`: the side's force or a reinforcement whose commander, force +0x74, is he) or the
+  defending side +0x6C (`0x008CE780`). Anyone else gets nothing.
+- Stance bonus by battle type (sequence +0x60) and side. 0 / 2 / 9 / 10: attacker `land_command_attack`
+  (his own plus his faction's, faction +0x6FC through character +0x2A0), defender
+  `land_command_defence`. 11 / 12: `sea_command_attack` / `sea_command_defence`. 1: attacker
+  `land_command_ambush`, defender nothing. 3 / 6: `land_command_siege_attack` /
+  `land_command_siege_defence`. 4, 5, 7, 8, 13: nothing.
+- Against the other side's faction (none for the rebels, faction record +0x514 null), in this order:
+  key `ottomans` → `hates_ottomans`; culture `european` → `hates_europeans`; key `spa_france` →
+  `hates_french`; culture `spa_britain` → `hates_british`. The exe reads that faction from the other
+  side record's +8 (`0x00A19C80`..`0x00A19C9E`); ours takes it from `battle_sides` (the attacker's force,
+  or the first defender's), so the enemy faction inherits `battle_sides`' PROVISIONAL (that the
+  defenders' record holds the first defender, `0x008B7D60` not traced). The order and the tests are
+  CONFIRMED.
+- **ORIGINAL BUG (fixed):** the last test (`0x00A19D35`..`0x00A19D40`) compares the enemy's *culture*
+  with `spa_britain`, a faction key. Vanilla cultures: egy_european, egy_middle_east, european, indian,
+  middle_east, PIR_european, PIR_natives, PIR_pirates, tribal; so `hates_british` is never given. Ours
+  compares the key, as the `spa_france` test beside it does. No vanilla trait level or ancillary carries
+  `hates_british`, so vanilla play is unchanged; a mod's would now work. The carriers of the others:
+  `hates_french` (Spain_C_General_Guerrilla_Leader_4..6, Spain_C_Agent_Guerrillero_Dead_Family_1..3),
+  `hates_ottomans` (C_General_Austrian_Hates_Ottomans_1..3 and ancillaries), `hates_europeans` (Islam
+  ancillaries); the faction term of `land_command_attack` comes from the techs
+  `military5_french_cipher_decryption` and `military5_great_paris_cipher` (`Command_Land_Attack_Spain`).
+- **The battle type** (`CampaignModel::battle_type`, CONFIRMED): a settlement assault (`0x008E1A90` →
+  `0x008B5930`) is 6 when walled, else 9. Two navies (`SelectCampaignBattleType` `0x008B55A0`, called
+  by the character attack `0x0095B370` at `0x0095B697` with ambush 0, flag 0 and test-target-first 0):
+  12 when the attacker is docked (navy +0xE0), else 13 when the target blockades a port (+0xE8), else
+  11. Anything else 0. Ours does not make ambush, bridge, fort, sally, relief or town battles yet
+  (BACKLOG, the sieges area), and a side is one force (no reinforcement list).
+- **Data.** The enemy rules are `CampaignFeatures::enemy_rank_bonuses` (`ntw_campaign::features`), so a
+  mod's game can name its own; the stance keys are the exe's fixed effect bonuses.
+- **Tests (rank_tests.rs):** `the_pending_battle_gives_the_stance_bonus_by_type_and_side`,
+  `the_land_attacker_adds_his_factions_attack_bonus`, `the_enemy_faction_gives_the_hates_bonuses`;
+  ntw_campaign `the_enemy_rank_bonuses_follow_the_exe`.
+
+## 19. Ability effects and the agent record (2026-11-10, worker charrank)
+
+- **The ability slots** (CONFIRMED, static trace): character details +0xDC holds 12 slots of {level i32,
+  attribute record pointer}, one per ability of the fixed list (`ntw_sim::campaign::agents::ABILITIES`).
+  The maker `0x00992E60` resets each (`0x0061BA50`: level −1, no attribute), then copies the agent record's
+  ability rows (+0xF4, 12 × 0xC = {ability record, level}): the level, and the ability record's attribute
+  (+0xC). The getter `0x009C7610` returns the level when it is negative or the slot has no attribute, else
+  the level plus that attribute's stored level floored at 0 (ours `agents::ability`).
+- **The effects** (CONFIRMED): the second loop of `0x00A0ECB0` (a trait level's `trait_ability_effects`,
+  level record +0x68) and of `0x00A0EC10` (an ancillary's `ancillary_to_ability_effects`, ancillary
+  record +0x90 / +0x94) adds each row's value to its slot's level, on gain and (negated) on loss, as the
+  attribute loop beside it does: integer, no floor, no cap. An ability the character lacks is the reset
+  slot (−1) and the effect adds to that. Ours: `characters::shift_abilities` (pushes `(key, −1 + v, "")`
+  for a missing one), run by `shift_trait_effects` / `shift_ancillary_effects`; the tables are
+  `EffectRules::trait_ability` / `ancillary_ability`, filled from the merged database
+  (`ntw_campaign::rules::effect_rules_from_db`). Vanilla has no row in either table, so vanilla play is
+  unchanged; a mod's rows now apply.
+- **The row binders.** The trait level's ability rows are bound by `0x00F21510`: it looks the ability
+  key up in `abilities`; a miss logs the invalid-key line and then reads the null record's +0x14.
+  **ORIGINAL BUG (fixed):** a `trait_ability_effects` row naming an ability that is not in `abilities`
+  crashes the load. Ours logs the invalid key once and drops the row (`ability_effect_applies`); a key in
+  `abilities` but outside the 12 slots is also dropped with a warning (the exe skips index 12 and
+  above, `0x00F9C230` returning 12 for "none of the twelve"). The ancillary rows' binder is not traced;
+  ours drops the same rows there (UNKNOWN whether the exe crashes too).
+- **Table getters:** `agent_to_agent_abilities` `0x00E0EA80` (database +0x56C, loader `0x00F93650`),
+  `agent_to_agent_attributes` `0x00E0EB40` (database +0x568; its only callers are the agents getter
+  `0x00E0ED90` and the load-all `0x00E20760`), `ancillary_to_ability_effects` `0x00E0F2D0`,
+  `trait_ability_effects` `0x00E2FD80`.
+- **The agent record** (0x1AC bytes, one per `agents` row, built by `0x00F9CB80` from the row loop
+  `0x00F95410`, loader `0x00F8CB40` ← `0x00F92CF0` ← `0x00E0ED90`). Traced parts: attribute rows at +0x4C,
+  14 × 0xC = {attribute record, level (`agent_to_agent_attributes` #2), flag byte (#3)}, so attribute i's
+  flag is at +0x54 + 0xC·i; ability rows at +0xF4 (above). A row of either junction table whose key is
+  missing from `agent_attributes` / `abilities` logs the invalid key and drops the **whole agent record**
+  (the builder returns null), CONFIRMED static; ours keeps the agent (gap, BACKLOG).
+- **The `agent_to_agent_attributes` flag (#3).** Stored by `0x00F9CB80` as above. The maker copies only
+  the record and the level of each row (its loop at `0x00993001`..`0x00993023`, unrolled two rows at a
+  time, reads +0x4C / +0x50 and +0x58 / +0x5C), and so does the promotion `0x00A1A300`: the flag has no
+  effect on any starting level (CONFIRMED; it matches the data, where flag-0 rows still give their level).
+  No reader was found: an index search over the exe for byte reads at `[base + index·4 + 0x54]` and for
+  byte compares with 0 at `[reg + 0x54]` / `[reg + 0x60]` (the unrolled pair) in 0x00880000–0x00B00000
+  found only other structures (stack slots, the battle report `0x009FC720`). Its use, if any, stays
+  UNKNOWN (a display flag is plausible: it is 0 on every level-0 row and on the General's
+  `morale_land` / `movement_points_land`, but unproven). Ours loads it and reads it nowhere.
+- **Gaps** (BACKLOG): starting abilities are not modelled: `CharacterRules::new_character_details` leaves
+  the ability list empty and `agent_to_agent_abilities` (39 rows) is not loaded, so a character made in
+  play has every ability at −1 in the model (the agent UI falls back to the type's actions,
+  `ntw_script/src/ui/campaign/agents.rs`); a mod's ability effect on such a character starts the list.
+  The promotion's ability copy (`0x00A1A300`) is not modelled either.
+- **Test (rank_tests.rs):** `trait_and_ancillary_ability_effects_move_the_ability_level`; ntw_data
+  `two_file_keys` covers both new tables.

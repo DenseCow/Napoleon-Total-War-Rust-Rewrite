@@ -824,11 +824,14 @@ impl CampaignModel {
     /// capital (`0x00A8B5A0`: faction `+0x72C`) and a settlement under siege (settlement virtual
     /// `+0x98`, the slot the script function `IsUnderSiege` `0x008A1FF0` reads). CONFIRMED rule.
     /// In the list's order ([`super::world::World::faction_regions_in_list_order`];
-    /// CONFIRMED, CAMPAIGN_FIDELITY.md "Faction region list order"). PROVISIONAL: sieges are not in
-    /// the model, so no region is left out for one. Allocates: cold paths only.
+    /// CONFIRMED, CAMPAIGN_FIDELITY.md "Faction region list order"); the siege is
+    /// [`super::Region::siege`]. Allocates: cold paths only.
     pub fn tradeable_regions(&self, faction: FactionId) -> impl Iterator<Item = super::ids::RegionId> + '_ {
         let capital = self.world.capital(faction);
-        self.world.faction_regions_in_list_order(faction).into_iter().filter(move |id| Some(*id) != capital)
+        self.world
+            .faction_regions_in_list_order(faction)
+            .into_iter()
+            .filter(move |id| Some(*id) != capital && !self.world.regions.get(id).is_some_and(|r| r.siege.under_siege()))
     }
 
     /// The technologies `side` can hand `other` in a deal (`0x008F4F10`, from `0x00C5C170`, the

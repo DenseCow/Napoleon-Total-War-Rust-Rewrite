@@ -38,8 +38,7 @@
 //! id order with [`super::World::region_neighbours`]. The factions are walked in the CAI world's
 //! order ([`super::World::ai_factions`]; a map without it uses faction id order).
 //!
-//! Evidence tags: CONFIRMED unless marked. PROVISIONAL: the transferable test's siege test is never
-//! true (no sieges in the model, [`transferable_at`]); the effects the model has no system for
+//! Evidence tags: CONFIRMED unless marked. PROVISIONAL: the effects the model has no system for
 //! (the autoresolver modifiers, unit experience, the teleport desire) and
 //! the desires whose gathers are not traced ([`director_desires`]), so the RNG's sequence matches
 //! the original's only until one of those draws. PROVISIONAL: of the exe's many readers of the
@@ -741,16 +740,18 @@ fn seen_at(model: &CampaignModel, p: (f32, f32)) -> bool {
 /// `0x00C402D0` to the game region's settlement +0xFC virtual +0x98, the `IsUnderSiege` slot of
 /// `0x008A1FF0`); the owner is neither a major power nor human; no human has a mobile in it; no
 /// linked area is a human's or holds a human's mobile; and no human sees it
-/// ([`CampaignModel::sees_fully`] of its settlement and its other slots).
-///
-/// PROVISIONAL: the siege test is never true, as the campaign model has no sieges yet (no
-/// besieging army, no siege state on a settlement); it needs them modelled and read here (BACKLOG
-/// "Sieges on the campaign map").
+/// ([`CampaignModel::sees_fully`] of its settlement and its other slots). The siege test reads
+/// [`super::Region::siege`] ([`super::siege::SiegeState::under_siege`]).
 fn transferable_at(model: &CampaignModel, areas: &[Area], i: usize) -> bool {
     let area = &areas[i];
     let Some(reg) = area.region else { return false };
     let owner = reg.owner;
-    if !model.world.factions.contains_key(&owner) || model.is_major(owner) || model.is_human(owner) || human_in(model, area) {
+    if !model.world.factions.contains_key(&owner)
+        || reg.siege.under_siege()
+        || model.is_major(owner)
+        || model.is_human(owner)
+        || human_in(model, area)
+    {
         return false;
     }
     for link in area.links.iter().filter_map(|&j| areas.get(j)) {
@@ -901,11 +902,7 @@ fn served(model: &CampaignModel, f: FactionId) -> bool {
 /// mobile list (#3) is walked in force-id order (PROVISIONAL: the exe's list order is not read
 /// from the file).
 fn mobile_position(model: &CampaignModel, force: &super::MilitaryForce) -> Option<(f32, f32)> {
-    let to_f32 = |p: (crate::fixed::Fixed20, crate::fixed::Fixed20)| (p.0.to_f32(), p.1.to_f32());
-    if let Some(c) = force.commander.and_then(|c| model.world.characters.get(&c)) {
-        return Some(to_f32(c.position));
-    }
-    model.world.regions.values().find(|r| r.garrison == Some(force.id)).map(|r| to_f32(r.settlement.position))
+    model.force_position(force.id).map(|p| (p.0.to_f32(), p.1.to_f32()))
 }
 
 /// Whether any human sees the mobile ([`seen_at`] of [`mobile_position`]).
@@ -1718,6 +1715,10 @@ mod tests {
         assert!(transferable(&m, RegionId(12)));
         // Not a major power's (B) or a human's (A) region.
         assert!(!transferable(&m, RegionId(11)) && !transferable(&m, RegionId(10)));
+        // A settlement under siege (`IsUnderSiege`, the region's siege state).
+        let mut x = m.clone();
+        x.world.regions.get_mut(&RegionId(12)).unwrap().siege.besiegers.push(ForceId(1001));
+        assert!(!transferable(&x, RegionId(12)), "under siege");
         // A human character in the region, or in a neighbouring one.
         for inside in [12, 11] {
             let mut x = m.clone();

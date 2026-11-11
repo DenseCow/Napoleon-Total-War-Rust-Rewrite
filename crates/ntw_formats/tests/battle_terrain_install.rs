@@ -353,3 +353,110 @@ fn every_scaled_tree_byte_lands_on_its_own_scale_band() {
     let row: Vec<String> = (1..256).filter(|&v| hist[v] > 0).map(|v| format!("{v}:{}", hist[v])).collect();
     println!("non-zero bytes: {}", row.join(" "));
 }
+
+/// The grass (`ntw_formats::grass`): every preset's `grass_type` names a shipped atlas whose
+/// pictures all have a kind and a size; every level-0 area is square (so the original's
+/// `z / width` grass-map row, an ORIGINAL BUG we fix to `z / height`, changes no shipped map); and
+/// the grass map is laid out like the ground-type map once the TGA is read top-down (the
+/// orientation [`ntw_formats::grass::GrassMap`] documents). The layout check is the colour-map one:
+/// of the four flips, the right one makes each ground type's grass densities the most uniform.
+/// The file read is the one the original's loader finds (`find_grass_map`): six presets have a
+/// `grassmap.jpg` with its `_alpha.jpg` (read first); every `grassmap.tga` read is 32-bit with 8
+/// alpha bits and no column flip, the format whose bytes the exe copies as stored.
+#[test]
+#[ignore]
+fn every_grass_map_and_atlas_reads() {
+    use ntw_formats::grass::{GrassAtlas, KINDS, atlas_path, find_grass_map};
+    use ntw_formats::texture_atlas::TaiAtlas;
+    let vfs = vfs();
+    let mut atlases = BTreeMap::new();
+    let (mut jpg, mut no_map) = (Vec::new(), Vec::new());
+    let (mut checked, mut best_counts) = (0, [0usize; 4]);
+    for name in battle_terrain::list_presets(&vfs) {
+        let map = BattleMap::load(&vfs, &name).unwrap();
+        if let Some(g) = map.ground() {
+            assert_eq!(g.settings.world_width, g.settings.world_height, "{name}: an oblong level 0");
+        }
+        let grass_type = map.textures.as_ref().map(|t| t.grass_type.clone()).unwrap_or_default();
+        if !grass_type.is_empty() && !atlases.contains_key(&grass_type) {
+            let path = atlas_path(&grass_type);
+            let tai = TaiAtlas::read(&String::from_utf8(vfs.read(&path).unwrap_or_else(|e| panic!("{name}: {path}: {e}"))).unwrap()).unwrap();
+            let atlas = GrassAtlas::from_tai(&tai);
+            let per_kind: Vec<usize> = atlas.kinds.iter().map(Vec::len).collect();
+            println!("{grass_type:24} {} pictures, per kind {per_kind:?}, pages {:?}", atlas.entries.len(), tai.pages);
+            assert!(!atlas.is_empty(), "{path}");
+            for e in &atlas.entries {
+                assert!(e.size.iter().all(|s| (0.05..3.0).contains(s)), "{path}: {} reads as {:?}", e.name, e.size);
+                assert!(vfs.contains(&format!(r"battleterrain\grass\{}", e.page.to_ascii_lowercase())), "{path}: page {}", e.page);
+            }
+            atlases.insert(grass_type.clone(), atlas);
+        }
+        // The file the original's loader finds (0x008D1340's extension order).
+        let found = find_grass_map(&map.folder, |p| vfs.contains(p));
+        match &found {
+            Some(f) if f.path.ends_with(".jpg") => {
+                assert!(f.alpha.is_some(), "{name}: {} has no _alpha.jpg", f.path);
+                jpg.push(name.clone());
+            }
+            Some(_) => {}
+            None if !grass_type.is_empty() => no_map.push(name.clone()),
+            None => {}
+        }
+        let tga_path = format!("{}grassmap.tga", map.folder);
+        let (Some(gt), true) = (map.ground_types.as_ref(), vfs.contains(&tga_path)) else { continue };
+        if found.as_ref().is_some_and(|f| f.path.ends_with(".jpg")) {
+            // The .jpg is read first; its .tga (if any) is never used.
+            continue;
+        }
+        let bytes = vfs.read(&tga_path).unwrap();
+        // 32 bits a pixel, 8 of alpha, uncompressed or RLE true colour, columns left to right: the
+        // format 0x004CDCA0 maps to 5 (B, G, R, A copied as stored), no column flip (0x004E2680).
+        assert_eq!((bytes[16], bytes[17] & 0x0F, bytes[17] & 0x10), (32, 8, 0), "{name}: {tga_path} header");
+        assert!(matches!(bytes[2], 2 | 10), "{name}: {tga_path} image type {}", bytes[2]);
+        let tga = Tga::parse(&bytes).unwrap();
+        let mut scores = Vec::new();
+        for flip in 0..4u8 {
+            let mut sum = [[0f64; KINDS]; 256];
+            let mut sq = [0f64; 256];
+            let mut n = [0f64; 256];
+            for r in 0..gt.height {
+                for c in 0..gt.width {
+                    let t = gt.cells[(r * gt.width + c) as usize] as usize;
+                    let mut u = (c as f32 + 0.5) / gt.width as f32;
+                    let mut v = (r as f32 + 0.5) / gt.height as f32;
+                    if flip & 1 != 0 { u = 1.0 - u; }
+                    if flip & 2 != 0 { v = 1.0 - v; }
+                    let (x, y) = ((u * tga.width as f32) as usize, (v * tga.height as f32) as usize);
+                    let p = &tga.rgba[(y * tga.width as usize + x) * 4..][..KINDS];
+                    for k in 0..KINDS {
+                        sum[t][k] += p[k] as f64;
+                        sq[t] += (p[k] as f64).powi(2);
+                    }
+                    n[t] += 1.0;
+                }
+            }
+            let total: f64 = n.iter().sum();
+            let mut var = 0.0;
+            for t in 0..256 {
+                if n[t] > 0.0 {
+                    let m2: f64 = sum[t].iter().map(|s| (s / n[t]).powi(2)).sum();
+                    var += (sq[t] / n[t] - m2) * n[t] / total;
+                }
+            }
+            scores.push(var);
+        }
+        let best = scores.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).unwrap().0;
+        println!("{name:32} grass map {}x{}: within-type variance [none, flip u, flip v, both] = {scores:.0?} -> {best}", tga.width, tga.height);
+        best_counts[best] += 1;
+        checked += 1;
+    }
+    println!("best flip over {checked} maps: {best_counts:?}");
+    println!("grass maps read from .jpg + _alpha.jpg: {jpg:?}; a grass type but no grass map: {no_map:?}");
+    let six = ["caribbean", "empty_flat", "hb_naval", "hb_nile", "indian_great_fortress", "ottoman_great_fortress"];
+    for p in six {
+        assert!(jpg.iter().any(|n| n.ends_with(p)), "{p}: its grass map is not the .jpg ({jpg:?})");
+    }
+    assert_eq!(jpg.len(), six.len(), "{jpg:?}");
+    assert!(checked > 30);
+    assert!(best_counts[0] * 2 > checked, "the grass map is not laid out like the ground-type map");
+}

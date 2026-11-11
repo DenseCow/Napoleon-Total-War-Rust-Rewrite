@@ -51,16 +51,19 @@
 //! [constants]               # the mesh's own named constants -> the field each one replaces
 //! specpower = "roughness.power"   # <input>.value/.scale/.bias/.power, normal.scale, param.<name>
 //!
-//! [params]                  # extra named numbers for the mod's shader
+//! [params]                  # extra named numbers for the mod's shader (names as for slots)
 //! wetness = 0.5
 //! ```
+//!
+//! `[constants]` binds a mesh's float constants only: a 4-float constant (a `.rigid_model`'s
+//! `rimcolor` or `specfactor`) has no field it could replace.
 //!
 //! An unknown table or key, a wrong type and a value out of range are errors that name the line:
 //! a misspelt key must not silently do nothing.
 
 use std::collections::BTreeMap;
 
-use crate::campaign_map::GameFiles;
+use crate::pack::GameFiles;
 use crate::pack::normalize_path;
 use crate::toml_subset::{self, Entry, Table, Value};
 
@@ -70,6 +73,8 @@ pub const MATERIAL_FOLDER: &str = "materials";
 pub const MATERIAL_EXTENSION: &str = ".toml";
 /// The key of the description a mesh gets when no other applies to it.
 pub const DEFAULT_MATERIAL: &str = "default";
+/// The key of the battle grass's description: its alpha test and the numbers of its shader.
+pub const GRASS_MATERIAL: &str = "vanilla/grass";
 
 /// Our own descriptions, compiled in: (key, file text). `vanilla/*` is the default translation
 /// of the original's materials. Its channel meanings and hand-picked numbers stay tagged until the
@@ -77,6 +82,7 @@ pub const DEFAULT_MATERIAL: &str = "default";
 /// value carries its tag in a comment in the file.
 pub const BUILT_IN: &[(&str, &str)] = &[
     (DEFAULT_MATERIAL, include_str!("materials/default.toml")),
+    (GRASS_MATERIAL, include_str!("materials/vanilla/grass.toml")),
     ("vanilla/mount", include_str!("materials/vanilla/mount.toml")),
     ("vanilla/rigid_model", include_str!("materials/vanilla/rigid_model.toml")),
     ("vanilla/unit_part", include_str!("materials/vanilla/unit_part.toml")),
@@ -469,9 +475,11 @@ impl<'a> Fields<'a> {
 
     fn colour(&mut self, key: &str, range: (f32, f32)) -> Result<Option<[f32; 3]>, String> {
         let Some(e) = self.take(key) else { return Ok(None) };
+        const WANT: &str = "a list of 3 numbers [red, green, blue]";
         match &e.value {
             Value::List(items) if items.len() == 3 => Ok(Some([number(e, &items[0], range)?, number(e, &items[1], range)?, number(e, &items[2], range)?])),
-            _ => Err(wrong(e, "a list of 3 numbers [red, green, blue]")),
+            Value::List(items) => Err(format!("line {}: {} must be {WANT}, not a list of {}", e.line, e.key, items.len())),
+            _ => Err(wrong(e, WANT)),
         }
     }
 
@@ -685,6 +693,10 @@ pub fn parse_material(key: &str, file_text: &str) -> Result<MaterialDescription,
             }
             "params" => {
                 for e in &table.entries {
+                    // `param.<name>` binds only such a name, and the mod's shader uses it as one.
+                    if !is_name(&e.key) {
+                        return Err(format!("line {}: parameter name {:?} must be letters, digits or '_'", e.line, e.key));
+                    }
                     m.params.push((e.key.clone(), number(e, &e.value, ANY)?));
                 }
                 continue;
@@ -718,13 +730,18 @@ pub fn parse_material(key: &str, file_text: &str) -> Result<MaterialDescription,
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MaterialLibrary {
     by_key: BTreeMap<String, MaterialDescription>,
+    /// Each `[applies]` (source, path prefix) -> the key of the description that gets those
+    /// meshes; of two that name the same, the one [`MaterialLibrary::read`] chose.
+    applies: BTreeMap<(String, String), String>,
 }
 
 impl MaterialLibrary {
     /// Reads every description: [`BUILT_IN`], then each `materials/**.toml` of the game's files
     /// (the winning copy of each path, so a mod's file replaces a lower one's and ours). A file
     /// that cannot be read or is malformed is logged once and skipped; where it would have
-    /// replaced a built-in description, the built-in stays in use. Loading never stops on one.
+    /// replaced a built-in description, the built-in stays in use. A lower layer's copy of the
+    /// same path is not read in its place: the game's files give only the winning copy of a
+    /// path, so a mod's bad file hides a lower mod's good one. Loading never stops on one.
     pub fn load(files: &GameFiles<'_>) -> Self {
         let (library, problems) = Self::read(files);
         for problem in &problems {
@@ -735,8 +752,15 @@ impl MaterialLibrary {
 
     /// [`MaterialLibrary::load`] without the logging: the library and one line per problem (a bad
     /// file with its path and line, two descriptions that apply to the same meshes).
+    ///
+    /// Of two descriptions whose `[applies]` names the same source and path, the meshes get the
+    /// one from the higher layer of the game's files ([`Vfs::beats`](crate::pack::Vfs::beats); a
+    /// game file over one of ours; on equal priority the layer mounted first, as for one path);
+    /// of two from the same layer, or two of ours, the first by key.
     pub fn read(files: &GameFiles<'_>) -> (Self, Vec<String>) {
         let mut by_key = BTreeMap::new();
+        // The layer each description read from the game's files comes from; ours have none.
+        let mut layer_of: BTreeMap<String, usize> = BTreeMap::new();
         let mut problems = Vec::new();
         for (key, text) in BUILT_IN {
             match parse_material(key, text) {
@@ -756,43 +780,68 @@ impl MaterialLibrary {
                 .and_then(|text| parse_material(&key, &text));
             match parsed {
                 Ok(m) => {
+                    if let Some(layer) = files.vfs.origin_index(path) {
+                        layer_of.insert(key.clone(), layer);
+                    }
                     by_key.insert(key, m);
                 }
                 Err(e) if by_key.contains_key(&key) => problems.push(format!("{path}: {e}; the built-in {key} stays in use")),
                 Err(e) => problems.push(format!("{path}: {e}; skipped")),
             }
         }
-        let mut claimed: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+        // True when a description from layer `new` takes the meshes from one of layer `old`. It is
+        // pairwise, as the file index's rule: `Vfs::beats` orders the pack-graph packs by the graph
+        // and the rest by rank, so three layers can form a cycle (two graph packs and a pack ranked
+        // between them); the description used then depends on the keys' order.
+        let takes = |new: Option<usize>, old: Option<usize>| match (new, old) {
+            (Some(new), Some(old)) => new != old && (files.vfs.beats(new, old) || (!files.vfs.beats(old, new) && new < old)),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        let mut applies: BTreeMap<(String, String), String> = BTreeMap::new();
+        let mut displaced: Vec<((String, String), String)> = Vec::new();
         for m in by_key.values() {
-            let Some(applies) = &m.applies else { continue };
-            if let Some(first) = claimed.get(&(applies.source.as_str(), applies.path.as_str())) {
-                problems.push(format!("{}: applies to the same meshes ({} under {:?}) as {first}, which is used", m.key, applies.source, applies.path));
-            } else {
-                claimed.insert((applies.source.as_str(), applies.path.as_str()), m.key.as_str());
-            }
+            let Some(a) = &m.applies else { continue };
+            let claim = (a.source.clone(), a.path.clone());
+            let Some(held) = applies.get(&claim) else {
+                applies.insert(claim, m.key.clone());
+                continue;
+            };
+            let (used, unused) = if takes(layer_of.get(&m.key).copied(), layer_of.get(held).copied()) { (m.key.clone(), held.clone()) } else { (held.clone(), m.key.clone()) };
+            displaced.push((claim.clone(), unused));
+            applies.insert(claim, used);
         }
-        (Self { by_key }, problems)
+        // Worded once every description is compared: a later one may displace the one an earlier
+        // comparison kept.
+        for (claim, unused) in &displaced {
+            let (source, path) = claim;
+            problems.push(format!("{unused}: applies to the same meshes ({source} under {path:?}) as {}, which is used", applies[claim]));
+        }
+        (Self { by_key, applies }, problems)
     }
 
-    /// The description of that key.
+    /// The description of that key (case-insensitive, `/` or `\`).
     pub fn get(&self, key: &str) -> Option<&MaterialDescription> {
-        self.by_key.get(key)
+        if key.bytes().any(|b| b.is_ascii_uppercase() || b == b'\\') {
+            self.by_key.get(&key.to_ascii_lowercase().replace('\\', "/"))
+        } else {
+            self.by_key.get(key)
+        }
     }
 
     /// The description a mesh of kind `source` at game-file path `path` gets by default: the one
     /// whose `[applies]` names the source with the longest path prefix of `path` (of two with the
-    /// same prefix, the first by key). `None` when no description applies: the caller then uses
-    /// [`DEFAULT_MATERIAL`].
+    /// same source and prefix, the one [`read`](Self::read) chose). `None` when no description
+    /// applies: the caller then uses [`DEFAULT_MATERIAL`].
     pub fn for_source(&self, source: &str, path: &str) -> Option<&MaterialDescription> {
         let path = normalize_path(path);
-        let mut best: Option<(&MaterialDescription, usize)> = None;
-        for m in self.by_key.values() {
-            let Some(applies) = m.applies.as_ref().filter(|a| a.source == source && path.starts_with(&a.path)) else { continue };
-            if best.is_none_or(|(_, len)| applies.path.len() > len) {
-                best = Some((m, applies.path.len()));
+        let mut best: Option<(&str, usize)> = None;
+        for ((claimed_source, prefix), key) in &self.applies {
+            if claimed_source == source && path.starts_with(prefix.as_str()) && best.is_none_or(|(_, len)| prefix.len() > len) {
+                best = Some((key, prefix.len()));
             }
         }
-        best.map(|(m, _)| m)
+        best.and_then(|(key, _)| self.by_key.get(key))
     }
 
     /// Every description, by key.
@@ -980,11 +1029,14 @@ wetness = 0.5
             ("[constants]\nwet = \"param.wetness\"\n", "line 2"),
             ("[constants]\ns = \"roughness.scale\"\n[roughness]\nvalue = 0.5\n", "line 2"),
             ("[params]\nwetness = \"high\"\n", "line 2"),
+            ("[params]\nwet-ness = 0.5\n", "line 2"),
             ("[roughness]\nvalue = 0.5\n[roughness]\nvalue = 0.6\n", "line 3"),
         ] {
             let e = parse_material("bad", text).expect_err(text);
             assert!(e.starts_with(&format!("{line}:")), "{text:?}: {e}");
         }
+        let e = parse_material("bad", "[base_colour]\nvalue = [1, 1]\n").expect_err("two numbers");
+        assert!(e.ends_with("not a list of 2"), "a list of the wrong length says its length: {e}");
     }
 
     /// The conversions: a specular exponent becomes the roughness of the same highlight width, a
@@ -1045,7 +1097,7 @@ wetness = 0.5
         assert_eq!(library.len(), BUILT_IN.len() + 1);
         assert_eq!(library.get("vanilla/rigid_model").map(|m| m.roughness.value), Some(0.7), "the mod's file replaces the lower layer's and ours");
         assert_eq!(library.get("my_mod/wet_stone").map(|m| m.roughness.value), Some(0.1), "the mod's own description is added");
-        assert_eq!(library.get("vanilla/unit_part"), parse_material("vanilla/unit_part", BUILT_IN[3].1).ok().as_ref(), "ours stays where no file replaces it");
+        assert_eq!(library.get("vanilla/unit_part"), parse_material("vanilla/unit_part", BUILT_IN[4].1).ok().as_ref(), "ours stays where no file replaces it");
         assert_eq!(library.for_source("rigid_model", "RigidModels/Buildings/barn.rigid_model").map(|m| m.key.as_str()), Some("my_mod/wet_stone"));
         assert_eq!(library.for_source("rigid_model", "rigidmodels/ships/brig.rigid_model").map(|m| m.key.as_str()), Some("vanilla/rigid_model"));
     }
@@ -1071,7 +1123,42 @@ wetness = 0.5
         assert!(matches!(about("zz_clash")[..], [p] if p.contains("vanilla/rigid_model")), "{problems:#?}");
         assert!(library.get("broken").is_none() && library.get("not_text").is_none());
         assert_eq!(library.get("good").map(|m| m.roughness.value), Some(0.3));
-        assert_eq!(library.get("vanilla/unit_part"), parse_material("vanilla/unit_part", BUILT_IN[3].1).ok().as_ref());
-        assert_eq!(library.for_source("rigid_model", "x").map(|m| m.key.as_str()), Some("vanilla/rigid_model"), "of two that apply alike, the first by key");
+        assert_eq!(library.get("vanilla/unit_part"), parse_material("vanilla/unit_part", BUILT_IN[4].1).ok().as_ref());
+        assert_eq!(library.for_source("rigid_model", "x").map(|m| m.key.as_str()), Some("zz_clash"), "of two that apply alike, a game file's over ours");
+    }
+
+    /// Of two descriptions that apply to the same meshes, the higher layer's is used whatever
+    /// the keys' order; in one layer, the first by key. Each unused one is reported against the
+    /// one finally used, not one a later description displaced.
+    #[test]
+    fn of_two_alike_the_higher_layer_wins() {
+        let dir = temp_dir("material_alike");
+        let (data, mods) = (dir.join("data"), dir.join("mods"));
+        let applies = |path: &str, value: f32| format!("[applies]\nsource = \"gltf\"\npath = \"{path}\"\n[roughness]\nvalue = {value}\n");
+        write(&data, "aa_low.toml", applies("models/", 0.1));
+        write(&data, "bb_low.toml", applies("models/", 0.2));
+        write(&mods, "zz_high.toml", applies("models/", 0.9));
+        write(&mods, "mm_one.toml", applies("models/ships/", 0.3));
+        write(&mods, "nn_two.toml", applies("models/ships/", 0.4));
+        let mut vfs = Vfs::new();
+        vfs.mount_dir(&data, LayerKind::Loose).unwrap();
+        vfs.mount_dir(&mods, LayerKind::ModsFolder).unwrap();
+        let (library, problems) = MaterialLibrary::read(&GameFiles { vfs: &vfs });
+        let used = |path: &str| library.for_source("gltf", path).map(|m| m.key.as_str());
+        assert_eq!(used("models/tank.gltf"), Some("zz_high"), "the mods folder over the loose files");
+        assert_eq!(used("models/ships/brig.gltf"), Some("mm_one"), "one layer: the first by key");
+        assert_eq!(problems.len(), 3, "{problems:#?}");
+        assert!(problems.iter().any(|p| p.starts_with("aa_low:") && p.contains("as zz_high, which is used")), "{problems:#?}");
+        assert!(problems.iter().any(|p| p.starts_with("bb_low:") && p.contains("as zz_high, which is used")), "aa_low kept it first: {problems:#?}");
+        assert!(problems.iter().any(|p| p.starts_with("nn_two:") && p.contains("as mm_one, which is used")), "{problems:#?}");
+    }
+
+    /// A key is found whatever its case and separators, as the game's paths are.
+    #[test]
+    fn a_key_is_found_in_any_case() {
+        let library = MaterialLibrary::read(&GameFiles { vfs: &Vfs::new() }).0;
+        assert_eq!(library.get("Vanilla/Rigid_Model").map(|m| m.key.as_str()), Some("vanilla/rigid_model"));
+        assert_eq!(library.get("vanilla\\rigid_model").map(|m| m.key.as_str()), Some("vanilla/rigid_model"));
+        assert!(library.get("vanilla/nothing").is_none());
     }
 }

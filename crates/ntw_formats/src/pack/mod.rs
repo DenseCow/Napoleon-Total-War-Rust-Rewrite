@@ -32,11 +32,13 @@
 //! (`mod "x.pack";` lines) plus our easy `mods\` folder. See `analysis/mods/MOD_LOADING.md`.
 
 mod file;
+mod game_files;
 mod mods;
 mod precedence;
 mod vfs;
 
 pub use file::{PackEntry, PackFile, PackHeader, PackType};
+pub use game_files::{FileSpan, GameFiles};
 pub use precedence::{PackGraph, PairResult};
 pub use mods::{
     LOAD_ORDER_NAME, ModOptions, ModReport, ScriptCommand, TextEncoding, USER_SCRIPT_NAME, UserScript,

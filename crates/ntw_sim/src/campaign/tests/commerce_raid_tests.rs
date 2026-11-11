@@ -387,7 +387,7 @@ fn a_ship_promoted_at_sea_takes_the_raids_of_the_fleet_commander() {
     allow_promotion(&mut m);
     assert!(m.raid_trade_route(CharacterId(108), at(55.0, 50.0)));
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1003), unit: 1 }).unwrap();
-    let CampaignEvent::CharacterPromoted { character: new } = ev[0] else { panic!("promoted") };
+    let CampaignEvent::CharacterPromoted { character: new, .. } = ev[0] else { panic!("promoted") };
     // 0x008E2260: the captain's raids end (0x008E2650) and the new admiral raids at his position (0x008E2670).
     assert_eq!(m.world.forces[&ForceId(1003)].commander, Some(new));
     assert!(!m.is_raiding(CharacterId(108)));

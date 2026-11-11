@@ -926,7 +926,7 @@ fn header_territory_map_follows_the_owners() {
     }
     let db = GameDatabase::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
-    let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+    let files = ntw_formats::pack::GameFiles { vfs: &vfs };
     let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let pics: Vec<TheatrePictures> = l.info.header.maps.iter().filter_map(|m| TheatrePictures::load(&files, &db, &l.info.map_key, &m.theatre)).collect();
@@ -1041,6 +1041,43 @@ fn duel_counters_are_written() {
     let back = ntw_campaign::read_esf(&back_esf, &db).unwrap();
     let bd = &back.model.world.character_details[&id];
     assert_eq!((bd.duels_lost, bd.duels_won), (2, 5));
+    assert_eq!(counters(&back_esf).iter().zip(counters(&esf).iter()).filter(|(a, b)| a != b).count(), 1);
+}
+
+/// Siege counters written from the model (`CHARACTER` #18 defensive sieges +0x4D0, #20 offensive sieges
+/// +0x4D8, read at `0x00991D33` / `0x00991D4F`; raised by LaySiege `0x008AF6A0`): changed values read back, an unchanged
+/// model leaves every character's counters as stored.
+#[test]
+fn siege_counters_are_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    let counters = |e: &EsfFile| {
+        let mut v = Vec::new();
+        e.root.walk(&mut |r: &EsfRecord| {
+            if r.name == "CHARACTER" {
+                v.push((r.get_i32(2), r.get_u32(18), r.get_u32(20)));
+            }
+        });
+        v
+    };
+    let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
+    assert_eq!(counters(&same), counters(&esf));
+    let mut m = l.model.clone();
+    let id = *m.world.character_details.keys().find(|c| m.world.characters.contains_key(c)).unwrap();
+    let d = m.world.character_details.get_mut(&id).unwrap();
+    d.defensive_sieges = 3;
+    d.offensive_sieges = 7;
+    let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
+    let back_esf = EsfFile::from_bytes(&out.to_bytes().unwrap()).unwrap();
+    assert!(ntw_campaign::save_check::check(&back_esf).violations.is_empty());
+    let back = ntw_campaign::read_esf(&back_esf, &db).unwrap();
+    let bd = &back.model.world.character_details[&id];
+    assert_eq!((bd.defensive_sieges, bd.offensive_sieges), (3, 7));
     assert_eq!(counters(&back_esf).iter().zip(counters(&esf).iter()).filter(|(a, b)| a != b).count(), 1);
 }
 
@@ -1220,7 +1257,7 @@ fn siege_state_is_written() {
     let owner = m.world.regions[&region].owner;
     let besiegers: Vec<_> = m.world.forces.values().filter(|f| f.faction != owner && !f.is_navy).map(|f| f.id).take(2).collect();
     assert_eq!(besiegers.len(), 2);
-    let siege = ntw_sim::campaign::SiegeState { besiegers, surrender_turns: 4, turns_besieged: 3 };
+    let siege = ntw_sim::campaign::SiegeState { besiegers, surrender_turns: 4, turns_besieged: 3, ..Default::default() };
     m.world.regions.get_mut(&region).unwrap().siege = siege.clone();
     let out = save::write_save(&esf, &m, "france", 1, None).unwrap();
     let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
@@ -1228,4 +1265,58 @@ fn siege_state_is_written() {
         assert_eq!(r.siege, m.world.regions[id].siege, "{}", r.key);
     }
     assert_eq!(back.model.world.regions[&region].siege, siege);
+}
+
+/// Each settlement's fortification damage (`SIEGEABLE_GARRISON_RESIDENCE/FORTIFICATIONS_BLOCK`, items
+/// `FORTIFICATION_DAMAGE_INFO` v4; CONFIRMED, reader `0x00514CC0` / writer `0x00523AE0`) on the Egypt
+/// start: an unchanged model writes every block as stored; a damaged walls entry is written as a v4
+/// record {`HIT_POINTS_BLOCK`, factor, kind, hits} and reads back, the other blocks untouched.
+#[test]
+fn fortification_damage_is_written() {
+    let dir = data_dir();
+    if !dir.is_dir() {
+        return;
+    }
+    let db = GameDatabase::from_install(&dir).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\egy_napoleon\startpos.esf")).unwrap()).unwrap();
+    let blocks = |f: &EsfFile| -> std::collections::BTreeMap<i32, ntw_formats::esf::EsfRecordArray> {
+        let regions = f.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").unwrap();
+        regions
+            .records()
+            .filter_map(|r| {
+                let g = r.child("SETTLEMENT")?.child("SIEGEABLE_GARRISON_RESIDENCE")?;
+                Some((r.get_i32(4)?, g.record_array("FORTIFICATIONS_BLOCK")?.clone()))
+            })
+            .collect()
+    };
+    let l = ntw_campaign::read_esf(&esf, &db).unwrap();
+    let human = l.info.header.faction_key.clone();
+    let stored = blocks(&esf);
+    assert!(stored.values().any(|b| !b.items.is_empty()), "the Egypt start holds damage entries");
+    let out = save::write_save(&esf, &l.model, &human, 1, None).unwrap();
+    assert_eq!(blocks(&out), stored, "an unchanged model writes the blocks as stored");
+
+    let mut m = l.model.clone();
+    let (&region, r) = m.world.regions.iter_mut().find(|(_, r)| r.siege.walls_damage().is_some()).unwrap();
+    let walls = r.siege.walls_damage_mut().unwrap();
+    walls.hits = 2;
+    walls.factor = 0.8;
+    let out = save::write_save(&esf, &m, &human, 1, None).unwrap();
+    let written = blocks(&out);
+    let key = region.raw() as i32;
+    for (id, b) in &stored {
+        if *id != key {
+            assert_eq!(&written[id], b, "region {id} untouched");
+        }
+    }
+    let infos: Vec<&EsfRecord> = written[&key].records().collect();
+    assert_eq!(infos.len(), m.world.regions[&region].siege.fortifications.len());
+    let walls = infos.iter().find(|i| i.children.get(2) == Some(&EsfNode::U32(0))).unwrap();
+    assert_eq!((walls.name.as_str(), walls.version), ("FORTIFICATION_DAMAGE_INFO", 4));
+    assert_eq!(walls.children[0].as_record_array().map(|a| a.name.as_str()), Some("HIT_POINTS_BLOCK"));
+    assert_eq!(walls.children[1..], [EsfNode::F32(0.8), EsfNode::U32(0), EsfNode::U32(2)]);
+    let back = ntw_campaign::read(&out.to_bytes().unwrap(), &db).unwrap();
+    for (id, r) in &back.model.world.regions {
+        assert_eq!(r.siege.fortifications, m.world.regions[id].siege.fortifications, "{}", r.key);
+    }
 }

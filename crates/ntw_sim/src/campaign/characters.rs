@@ -237,9 +237,23 @@ fn shift_attributes(attributes: &mut Vec<(String, i32)>, effects: Option<&Vec<(S
     }
 }
 
+/// Adds `sign` × one source's ability effects to a character's ability levels (CONFIRMED): the
+/// second loop of the same two functions (`0x00A0ECB0` over the level's `trait_ability_effects`,
+/// `0x00A0EC10` over the ancillary's `ancillary_to_ability_effects`) adds each row's value to the
+/// level of its ability slot (character details +0xDC, 12 slots of {level, attribute}), with no
+/// floor or cap. An ability he lacks is a slot as the maker resets it (`0x0061BA50`: level −1, no
+/// attribute), and the effect adds to that. The level is what [`super::agents::ability`] reads.
+fn shift_abilities(abilities: &mut Vec<(String, i32, String)>, effects: Option<&Vec<(String, i32)>>, sign: i32) {
+    for (ability, v) in effects.into_iter().flatten() {
+        match abilities.iter_mut().find(|(k, _, _)| k == ability) {
+            Some((_, level, _)) => *level += sign * v,
+            None => abilities.push((ability.clone(), -1 + sign * v, String::new())),
+        }
+    }
+}
+
 /// Moves trait `key`'s attribute effects from its held level `before` to `after` (0: no level
-/// record, or not held), as a level change runs the old level's loss slot then the new level's gain
-/// slot (`0x008D21B0`, `0x008C2D30`, CONFIRMED).
+/// record, or not held) in `attributes` alone: [`shift_trait_effects`] without the abilities.
 fn shift_trait_attributes(fx: &EffectRules, attributes: &mut Vec<(String, i32)>, key: &str, before: i32, after: i32) {
     let old = fx.held_level_key(key, before);
     let new = fx.held_level_key(key, after);
@@ -250,6 +264,27 @@ fn shift_trait_attributes(fx: &EffectRules, attributes: &mut Vec<(String, i32)>,
     shift_attributes(attributes, new.and_then(|k| fx.trait_attribute.get(k)), 1);
 }
 
+/// Moves trait `key`'s attribute and ability effects from its held level `before` to `after` (0: no
+/// level record, or not held), as a level change runs the old level's loss slot then the new
+/// level's gain slot (`0x008D21B0`, `0x008C2D30`, CONFIRMED; both slots call `0x00A0ECB0`).
+fn shift_trait_effects(fx: &EffectRules, d: &mut CharacterDetails, key: &str, before: i32, after: i32) {
+    let old = fx.held_level_key(key, before);
+    let new = fx.held_level_key(key, after);
+    if old == new {
+        return;
+    }
+    shift_attributes(&mut d.attributes, old.and_then(|k| fx.trait_attribute.get(k)), -1);
+    shift_abilities(&mut d.abilities, old.and_then(|k| fx.trait_ability.get(k)), -1);
+    shift_attributes(&mut d.attributes, new.and_then(|k| fx.trait_attribute.get(k)), 1);
+    shift_abilities(&mut d.abilities, new.and_then(|k| fx.trait_ability.get(k)), 1);
+}
+
+/// Adds (`sign` 1, gained) or takes off (−1, lost) ancillary `key`'s attribute and ability effects
+/// (`0x00A0EC10`, CONFIRMED).
+fn shift_ancillary_effects(fx: &EffectRules, d: &mut CharacterDetails, key: &str, sign: i32) {
+    shift_attributes(&mut d.attributes, fx.ancillary_attribute.get(key), sign);
+    shift_abilities(&mut d.abilities, fx.ancillary_ability.get(key), sign);
+}
 
 /// A character's attribute levels once he becomes agent type `agent` (a promotion, `0x00A1A300`,
 /// CONFIRMED): every attribute back to −1, then the new type's levels
@@ -337,10 +372,10 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
             // slot (`0x008D21B0`), so the attribute effects of the level it last had stay on the
             // character for good. Ours takes them off with the trait.
             d.traits.remove(i);
-            shift_trait_attributes(fx, &mut d.attributes, &held, before, 0);
+            shift_trait_effects(fx, d, &held, before, 0);
         } else {
             let after = d.traits[i].level;
-            shift_trait_attributes(fx, &mut d.attributes, &held, before, after);
+            shift_trait_effects(fx, d, &held, before, after);
             i += 1;
         }
         if overflow == 0 {
@@ -361,7 +396,7 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
         t.points += p;
         cr.update_trait_level(t, true);
         let to_level = t.level;
-        shift_trait_attributes(fx, &mut d.attributes, key, from_level, to_level);
+        shift_trait_effects(fx, d, key, from_level, to_level);
         return TraitOutcome::Raised { from_level, to_level };
     }
     // 3. New: make room if the list is full.
@@ -378,7 +413,7 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
         {
             let gone = d.traits.remove(i);
             // Eviction runs the level's loss slot, then erases (`0x008E9830`).
-            shift_trait_attributes(fx, &mut d.attributes, &gone.key, gone.level, 0);
+            shift_trait_effects(fx, d, &gone.key, gone.level, 0);
             evicted = Some(gone.key);
         }
     }
@@ -392,7 +427,7 @@ fn add_trait_points_inner(model: &mut CampaignModel, c: CharacterId, key: &str, 
     let level = t.level;
     d.traits.push(t);
     // A new trait with a level runs that level's gain slot (`0x008E3F00`).
-    shift_trait_attributes(fx, &mut d.attributes, key, 0, level);
+    shift_trait_effects(fx, d, key, 0, level);
     TraitOutcome::Added { level, evicted }
 }
 
@@ -454,7 +489,7 @@ pub fn remove_trait(model: &mut CampaignModel, c: CharacterId, key: &str) -> boo
         return false;
     }
     d.traits.remove(i);
-    shift_trait_attributes(&rules.effects, &mut d.attributes, key, level, 0);
+    shift_trait_effects(&rules.effects, d, key, level, 0);
     model.update_sight_radius(c);
     true
 }
@@ -529,14 +564,14 @@ pub fn add_ancillary(model: &mut CampaignModel, c: CharacterId, key: &str) -> Re
     if d.ancillaries.iter().any(|a| rule.excluded.iter().any(|x| x == a)) {
         return Err(AncillaryRefusal::Excluded);
     }
-    // The evicted one's attribute effects come off, the new one's go on (`0x009C80C0`).
+    // The evicted one's attribute and ability effects come off, the new one's go on (`0x009C80C0`).
     let fx = &rules.effects;
     let evicted = evict.map(|i| d.ancillaries.remove(i));
     if let Some(gone) = &evicted {
-        shift_attributes(&mut d.attributes, fx.ancillary_attribute.get(gone), -1);
+        shift_ancillary_effects(fx, d, gone, -1);
     }
     d.ancillaries.push(key.to_string());
-    shift_attributes(&mut d.attributes, fx.ancillary_attribute.get(key), 1);
+    shift_ancillary_effects(fx, d, key, 1);
     model.update_sight_radius(c);
     Ok(evicted)
 }
@@ -548,7 +583,7 @@ pub fn remove_ancillary(model: &mut CampaignModel, c: CharacterId, key: &str) ->
     let Some(d) = model.world.character_details.get_mut(&c) else { return false };
     let Some(i) = d.ancillaries.iter().position(|a| a == key) else { return false };
     d.ancillaries.remove(i);
-    shift_attributes(&mut d.attributes, rules.effects.ancillary_attribute.get(key), -1);
+    shift_ancillary_effects(&rules.effects, d, key, -1);
     model.update_sight_radius(c);
     true
 }
@@ -570,15 +605,10 @@ pub fn is_pool_candidate(model: &CampaignModel, c: CharacterId) -> bool {
 /// (`set_non_scripted_traits_disabled`).
 pub fn excluded_from_scripted_gains(model: &CampaignModel, c: CharacterId) -> bool {
     let w = &model.world;
-    let Some(ch) = w.characters.get(&c) else { return true };
-    let Some(d) = w.character_details.get(&c) else { return true };
-    if is_pool_candidate(model, c) {
+    if !w.characters.contains_key(&c) || !w.character_details.contains_key(&c) || is_pool_candidate(model, c) {
         return true;
     }
-    d.post != 0
-        && w.faction_details.get(&ch.faction).is_some_and(|f| {
-            f.posts.iter().any(|p| p.id as u32 == d.post && p.governorship.is_some())
-        })
+    model.recorded_post(c).is_some_and(|p| p.governorship.is_some())
 }
 
 /// `effect.trait(key, scope, points, chance)` (binding `0x008F5070`, CONFIRMED): draws r in 0..=100 on
@@ -705,8 +735,8 @@ pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
                 dead.push(c);
             }
             if let Some(d) = model.world.character_details.get_mut(&c) {
-                // Each expired one's attribute effects come off as it goes (`0x009D2E50` →
-                // `0x00A0EC10`, CONFIRMED).
+                // Each expired one's attribute and ability effects come off as it goes
+                // (`0x009D2E50` → `0x00A0EC10`, CONFIRMED).
                 let mut i = 0;
                 while i < d.ancillaries.len() {
                     if rules.characters.ancillaries.get(&d.ancillaries[i]).is_none_or(|r| year < r.end_year) {
@@ -714,7 +744,7 @@ pub fn yearly_character_pass(model: &mut CampaignModel) -> YearlyPass {
                         continue;
                     }
                     let gone = d.ancillaries.remove(i);
-                    shift_attributes(&mut d.attributes, rules.effects.ancillary_attribute.get(&gone), -1);
+                    shift_ancillary_effects(&rules.effects, d, &gone, -1);
                     out.expired.push((c, gone));
                 }
             }
@@ -954,7 +984,7 @@ impl CampaignModel {
     /// admiral or captain or a navy's commander.
     pub fn turn_end_counters(&mut self, c: CharacterId) {
         let Some(ch) = self.world.characters.get(&c).cloned() else { return };
-        let region = self.world.regions.values().find(|r| super::economy::in_region(self, r, &ch)).map(|r| r.owner);
+        let region = super::economy::region_of(self, &ch).map(|r| r.owner);
         let enemy = region.is_some_and(|o| o != ch.faction && self.world.stance(ch.faction, o) == super::world::Stance::War);
         let home = region == Some(ch.faction);
         let naval = matches!(ch.kind, super::world::CharacterKind::Admiral | super::world::CharacterKind::Captain)

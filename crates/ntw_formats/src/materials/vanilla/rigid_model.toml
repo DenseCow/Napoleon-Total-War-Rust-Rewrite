@@ -48,7 +48,8 @@ occlusion = 0.0           # PROVISIONAL: likewise
 # The material record's own named constants (the names the exe looks for are CONFIRMED,
 # analysis/worker1/GRAPHICS_EXE.md §2.2). The other names (specfresnelpower, fresnelpower,
 # reflect_factor, ambient_factor, rimoffset, rimpower, specbrightness, glossfactor) have no
-# input here yet: what each one does in the original's shader is not traced.
+# input here yet: what each one does in the original's shader is not traced. The vec4 constants
+# (rimcolor, specfactor) cannot be bound: [constants] takes float constants only.
 [constants]
 specpower = "roughness.power"   # INFERRED: the Blinn-Phong exponent
 bumpfactor = "normal.scale"     # INFERRED: the strength of the normal map

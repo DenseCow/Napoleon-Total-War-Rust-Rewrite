@@ -31,7 +31,8 @@ use ntw_ai::campaign::CampaignAiData;
 use ntw_ai::campaign::driver;
 use ntw_campaign::script_values::ScriptSaveValue;
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_script::{ScriptContext, ScriptHost, ScriptSource, ScriptValue};
@@ -429,7 +430,8 @@ fn add_units(host: &mut ScriptHost) {
     ];
     for (key, id, unit) in picks.into_iter().flatten() {
         println!(" raise {unit} in {key}");
-        m.spawn_recruited_unit(id, unit);
+        let raised = m.spawn_recruited_unit(id, unit);
+        assert!(raised.is_some(), "{key}: no place for the unit, the save would miss it");
     }
 }
 
@@ -453,7 +455,8 @@ fn add_garrison_unit(host: &mut ScriptHost) {
     let (key, id, unit) = pick.expect("a french garrison that can recruit");
     let forces = m.world.forces.len();
     println!(" raise {unit} in {key} (joins the garrison)");
-    m.spawn_recruited_unit(id, unit);
+    let raised = m.spawn_recruited_unit(id, unit);
+    assert!(raised.is_some(), "{key}: no place for the unit, the save would miss it");
     assert_eq!(m.world.forces.len(), forces, "the unit joins the garrison");
 }
 

@@ -37,7 +37,7 @@ fn main() {
         // Every ship type's full gun count (`SHIP_DAMAGE_INFO` #13) over the given files (`vfs:` start positions
         // or saves), against the naval unit keys of the DB.
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+        let gf = ntw_formats::pack::GameFiles { vfs: &vfs };
         let mut guns: std::collections::BTreeMap<String, std::collections::BTreeSet<u32>> = std::collections::BTreeMap::new();
         for file in &files[1..] {
             let bytes = match file.strip_prefix("vfs:") {
@@ -71,7 +71,7 @@ fn main() {
         // Each start position's map: the theatres of `regions.esf` `theatres_and_region_keys` and how many
         // region keys each lists, against the start position's regions.
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-        let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+        let gf = ntw_formats::pack::GameFiles { vfs: &vfs };
         for file in &files[1..] {
             let bytes = gf.read(file.trim_start_matches("vfs:")).expect("vfs file");
             let l = ntw_campaign::read_esf(&EsfFile::from_bytes(&bytes).expect("esf"), &db).expect("load");
@@ -95,13 +95,13 @@ fn main() {
         let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
         for file in &files[1..] {
             let bytes = match file.strip_prefix("vfs:") {
-                Some(p) => ntw_formats::campaign_map::GameFiles { vfs: &vfs }.read(p).expect("vfs file"),
+                Some(p) => ntw_formats::pack::GameFiles { vfs: &vfs }.read(p).expect("vfs file"),
                 None => std::fs::read(file).expect("read"),
             };
             let esf = EsfFile::from_bytes(&bytes).expect("esf");
             let mut l = ntw_campaign::read_esf(&esf, &db).expect("load");
             {
-                let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+                let files = ntw_formats::pack::GameFiles { vfs: &vfs };
                 let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
                 l.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             }
@@ -177,7 +177,7 @@ fn main() {
         let mut l = ntw_campaign::read_file(file, &db).expect("load");
         if std::env::var("ECON_MAP").is_ok() {
             let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-            let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+            let files = ntw_formats::pack::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&files, &l.info.map_key).expect("map");
             l.model.attach_terrain(ntw_sim::campaign::Terrain(std::sync::Arc::new(ntw_campaign::pathing::build_grid(&map))));
             ntw_campaign::trade::attach_map(&mut l.model, &map.regions);
@@ -457,7 +457,7 @@ fn main() {
             for seed in [1u32, 2, 3] {
                 let mut x = m.clone();
                 x.rng = ntw_sim::rng::CaRng::new(seed);
-                x.pending_battle = Some(ntw_sim::campaign::PendingBattle { attacker: na, defenders: vec![nb], settlement: None, resume: None });
+                x.pending_battle = Some(ntw_sim::campaign::PendingBattle { attacker: na, defenders: vec![nb], settlement: None, resume: None, ambush: false });
                 let _ = x.autoresolve();
                 println!("  seed {seed}: A {}
            B {}", show(&x, na), show(&x, nb));
@@ -508,7 +508,7 @@ fn main() {
             // type, faction, rank), the conversion entries of the faction sum and of the region's own buildings.
             let fx = ntw_sim::campaign::effects::Effects::compute(m);
             let vfs = ntw_formats::pack::Vfs::open_install(std::path::Path::new(data)).expect("vfs");
-            let gf = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+            let gf = ntw_formats::pack::GameFiles { vfs: &vfs };
             let map = ntw_formats::campaign_map::CampaignMap::load(&gf, &l.info.map_key).expect("map");
             let rm = &map.regions;
             // The regions.esf region whose area outlines hold a point (even-odd over all its loops).

@@ -280,8 +280,39 @@ fn assassination_and_duel_commands_resolve_once_per_turn() {
     let won: u32 = [104, 105].iter().filter_map(|c| m.world.character_details.get(&CharacterId(*c))).map(|d| d.duels_won).sum();
     assert_eq!(won, 1);
     assert!(m.apply(CampaignCommand::Duel { challenger: CharacterId(104), target: CharacterId(105) }).is_err());
-
 }
+
+/// The assassination's script events carry the agent type of a character the attempt kills: the
+/// target of `SufferAssassinationAttempt` (posted before the roll) and the agent of
+/// `CharacterCriticallyFailsAssassination`, so the script gate's agent-type step (`0x008F9EE0`)
+/// still has it after the step removed him.
+#[test]
+fn assassination_events_carry_the_agent_type_of_a_character_it_kills() {
+    use super::agents::Outcome;
+    let (mut target_killed, mut agent_killed) = (0, 0);
+    for seed in 1..=200u32 {
+        let mut m = agents_model();
+        m.rng = crate::rng::CaRng::new(seed);
+        let ev = m.apply(CampaignCommand::Assassinate { agent: CharacterId(103), target: CharacterId(105) }).unwrap();
+        let suffered = CampaignEvent::SufferAssassinationAttempt { character: CharacterId(105), agent_type: Some(CharacterKind::Gentleman) };
+        assert!(ev.contains(&suffered), "seed {seed}");
+        let outcome = ev.iter().find_map(|e| match e {
+            CampaignEvent::AgentActionResolved { outcome, .. } => Some(*outcome),
+            _ => None,
+        });
+        match outcome.expect("resolved") {
+            Outcome::CriticalSuccess | Outcome::Success => target_killed += 1,
+            Outcome::CriticalFailure => {
+                let failed = CampaignEvent::CharacterCriticallyFailsAssassination { character: CharacterId(103), agent_type: Some(CharacterKind::Rake) };
+                assert!(ev.contains(&failed), "seed {seed}");
+                agent_killed += 1;
+            }
+            Outcome::Failure => {}
+        }
+    }
+    assert!(target_killed > 0 && agent_killed > 0, "target killed {target_killed}, agent killed {agent_killed}");
+}
+
 #[test]
 fn only_the_first_recruitment_points_items_train_and_a_queue_holds_ten() {
     let mut m = test_model();
@@ -397,7 +428,17 @@ fn a_duel_counts_and_the_loser_dies_or_flees() {
                 _ => None,
             })
             .expect("resolved");
-        assert_eq!(ev.iter().filter(|e| matches!(e, CampaignEvent::DuelFought { .. })).count(), 2);
+        // Both carry their duellist's agent type, a loser who died too (the exe posts them while he
+        // is there; the script gate's agent-type step reads it, 0x008F9EE0).
+        let fought: Vec<_> = ev.iter().filter(|e| matches!(e, CampaignEvent::DuelFought { .. })).cloned().collect();
+        let gentleman = Some(CharacterKind::Gentleman);
+        assert_eq!(
+            fought,
+            [
+                CampaignEvent::DuelFought { character: CharacterId(104), agent_type: gentleman },
+                CampaignEvent::DuelFought { character: CharacterId(105), agent_type: gentleman },
+            ]
+        );
         let (winner, loser) = if outcome.succeeded() { (104, 105) } else { (105, 104) };
         assert_eq!(m.world.character_details[&CharacterId(winner)].duels_won, 1);
         match outcome {

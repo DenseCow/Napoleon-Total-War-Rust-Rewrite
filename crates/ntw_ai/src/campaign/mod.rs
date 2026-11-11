@@ -1267,13 +1267,22 @@ pub fn apply_orders_with_events(
             }
             Err(e) => rejected.push((order.clone(), e)),
         }
-        if model.pending_battle.is_some()
-            && let Ok(ev) = model.apply(CampaignCommand::Autoresolve)
-        {
-            events.extend(ev);
-        }
+        autoresolve_pending(model, events);
     }
     accepted
+}
+
+/// Autoresolves the pending battle, if any: one an order started (above), or one already pending when
+/// the faction's turn came (`driver::play_faction`, before it plans).
+fn autoresolve_pending(model: &mut CampaignModel, events: &mut Vec<CampaignEvent>) {
+    if model.pending_battle.is_none() {
+        return;
+    }
+    match model.apply(CampaignCommand::Autoresolve) {
+        Ok(ev) => events.extend(ev),
+        // The model then refuses the faction's orders with `BattlePending`, each reported as rejected.
+        Err(e) => log::warn!("AI driver: the pending battle could not be autoresolved: {e:?}"),
+    }
 }
 
 #[cfg(test)]
@@ -1349,9 +1358,10 @@ mod tests {
         assert_eq!(keys(&m), Vec::<String>::new(), "a script-restricted level is left out by the model's rule");
     }
 
-    /// The AI's peace is the model's `MakePeace` with its messages on: the exe's AI makes peace only through
-    /// an accepted deal (`0x00AA5ED0` → `0x00C114B0` → the peace item `0x00C18B60`), which calls
-    /// `0x00B262C0` with suppress 0 and no turn test, so `MakePeace` has none.
+    /// The AI's peace is the model's `MakePeace` with its messages on. This AI's peace differs from the exe's
+    /// path: it orders the peace directly, while the exe's AI makes peace only through an accepted deal
+    /// (`0x00AA5ED0` → `0x00C114B0` → the peace item `0x00C18B60`, with the deal's other items and offer).
+    /// The deal's peace item calls `0x00B262C0` with suppress 0 and no turn test, so `MakePeace` has none.
     #[test]
     fn the_ai_peace_is_the_models_make_peace_with_messages() {
         let (a, b) = (FactionId(1), FactionId(2));
@@ -1615,5 +1625,88 @@ mod tests {
         assert!(events.contains(&CampaignEvent::FactionDestroyed { faction: human }), "{events:?}");
         assert!(m.turn.campaign_over && !m.has_pending_steps());
         assert_eq!((accepted, rejected), (1, Vec::new()), "the orders after the end are neither applied nor refused");
+    }
+
+    /// Review (polish76): a battle pending when the AI's turn comes (an ambush sprung on its standing orders
+    /// at its turn start) is autoresolved before the AI plans (`driver::play_faction`; the exe's CAI step gate
+    /// `0x008EFAB0` waits for the battle), not after: the AI plans on the state the battle left, with the RNG
+    /// after the battle's draws. Here the AI's army, which would march on the enemy's region, is lost in it.
+    #[test]
+    fn a_battle_pending_when_the_ai_plays_is_autoresolved_before_it_plans() {
+        use ntw_sim::campaign::{CampaignUnit, Character, CharacterId, CharacterKind, Faction, GovernmentType, MilitaryForce, PendingBattle, TurnState, TurnStep, UnitId};
+        let mut m = model(Some(CampaignRules::test_rules()));
+        let (ai, other) = (FactionId(2), FactionId(1));
+        for (id, key) in [(other, "test_faction_other"), (ai, "test_faction_ai")] {
+            let f = Faction {
+                id,
+                key: key.into(),
+                treasury: 1000,
+                government: GovernmentType::AbsoluteMonarchy,
+                government_key: String::new(),
+                tax_lower: "tax_normal".into(),
+                tax_upper: "tax_normal".into(),
+                diplomacy: BTreeMap::new(),
+            };
+            m.world.factions.insert(id, f);
+        }
+        m.world.turn_order = vec![ai, other];
+        // The enemy's region (1), ungarrisoned, 10 east of the AI's army, and the AI's own (2) 5 west of it.
+        let region = m.world.regions.get_mut(&RegionId(1)).unwrap();
+        region.settlement.position = (Fixed20::from_int(10), Fixed20::from_int(0));
+        region.slots[0].key = "settlement:test_region:town:test_slot:0".into();
+        let mut own = m.world.regions[&RegionId(1)].clone();
+        (own.id, own.key, own.owner) = (RegionId(2), "test_region_2".into(), ai);
+        own.settlement.position = (Fixed20::from_int(-5), Fixed20::from_int(0));
+        own.slots[0].key = "settlement:test_region_2:town:test_slot:0".into();
+        m.world.regions.insert(own.id, own);
+        for (f, r) in [(other, RegionId(1)), (ai, RegionId(2))] {
+            let d = m.world.faction_details.entry(f).or_default();
+            (d.capital, d.capital_2, d.out_of_game) = (Some(r), Some(r), Some(false));
+        }
+        // The AI's army of one weak unit (force 9) and the enemy's of ten full ones (force 10), side by side.
+        for (c, f, faction, units, men) in [(100, 9, ai, 1, 5), (101, 10, other, 10, 100)] {
+            let general = Character {
+                id: CharacterId(c),
+                faction,
+                kind: CharacterKind::General,
+                position: (Fixed20::from_int(c - 100), Fixed20::from_int(0)),
+                movement_points: 30,
+                max_movement_points: 30,
+                base_movement_points: 30,
+                garrisoned_in: None,
+            };
+            m.world.characters.insert(general.id, general);
+            let units = (0..units).map(|u| CampaignUnit { id: UnitId(f * 100 + u), unit_key: "test_unit".into(), men, max_men: 100, character: None, officer_name: Default::default() }).collect();
+            m.world.forces.insert(ForceId(f as u32), MilitaryForce { id: ForceId(f as u32), faction, commander: Some(CharacterId(c)), units, is_navy: false });
+        }
+        m.apply(CampaignCommand::DeclareWar { a: other, b: ai }).unwrap();
+        m.turn = TurnState::in_turn_of(other, vec![other]);
+        m.turn.in_turn = false;
+        m.turn.queue.extend([TurnStep::AiTurn(ai), TurnStep::FactionEnd(ai)]);
+        // An AI that expands only (the manager the faction falls back to, `FactionAiConfig::resolve`).
+        let mut data = CampaignAiData::default();
+        data.managers.insert("nap_eur_full".into(), BTreeMap::from([("EXPANSION_BEHAVIOUR".to_string(), 1.0)]));
+        let ctx = TurnContext::new("test_campaign");
+        let marches = |orders: &[AiOrder]| orders.iter().any(|o| matches!(o, AiOrder::MoveForce { force: ForceId(9), .. }));
+        let mut rng = m.rng;
+        let plan = take_turn(&m, &data, &ctx, ai, &mut rng);
+        assert!(marches(&plan), "without the battle the army marches: {plan:?}");
+
+        m.pending_battle = Some(PendingBattle { attacker: ForceId(10), defenders: vec![ForceId(9)], settlement: None, resume: None, ambush: true });
+        // What "resolve, then plan, then apply" gives.
+        let mut expected = m.clone();
+        expected.apply(CampaignCommand::Autoresolve).unwrap();
+        assert!(!expected.world.forces.contains_key(&ForceId(9)), "the AI's army is lost in the battle");
+        let mut rng = expected.rng;
+        let orders = take_turn(&expected, &data, &ctx, ai, &mut rng);
+        expected.rng = rng;
+        apply_orders(&mut expected, &orders);
+
+        let (report, events) = driver::play_faction(&mut m, &data, &ctx, ai);
+        assert!(events.iter().any(|e| matches!(e, CampaignEvent::BattleCompleted { .. })), "{events:?}");
+        assert_eq!(m.pending_battle, None);
+        assert!(!marches(&report.orders), "no order for the lost army: {:?}", report.orders);
+        assert_eq!((report.orders, report.rejected), (orders, Vec::new()));
+        assert_eq!(m.state_hash(), expected.state_hash(), "the battle's draws come before the plan's");
     }
 }

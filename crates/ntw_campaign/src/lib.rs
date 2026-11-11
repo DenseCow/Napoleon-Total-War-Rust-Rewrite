@@ -336,19 +336,13 @@ pub fn read_info(bytes: &[u8]) -> Result<CampaignInfo, LoadError> {
 /// `SAVE_GAME_HEADER` record ([`EsfFile::read_root_children`]). Nothing outside the header is
 /// checked, so a file damaged elsewhere still gives its header here and fails when it is loaded.
 pub fn read_header_file(path: impl AsRef<Path>) -> Result<SaveHeader, LoadError> {
-    use std::io::{Read, Seek, SeekFrom};
+    use std::io::{Seek, SeekFrom};
     let path = path.as_ref();
     let io = |error| LoadError::Io { path: path.to_path_buf(), error };
     let mut file = std::fs::File::open(path).map_err(io)?;
-    // An own save: its magic, version and header length, then the header section.
-    let mut start = Vec::with_capacity(own_save::MAGIC.len() + 8);
-    file.by_ref().take(own_save::MAGIC.len() as u64 + 8).read_to_end(&mut start).map_err(io)?;
-    if own_save::is_own_save(&start) {
-        // The length word; a file cut short before it reads as truncated below.
-        if let Some(len) = start.get(own_save::MAGIC.len() + 4..).and_then(|w| Some(u32::from_le_bytes(w.try_into().ok()?))) {
-            file.by_ref().take(u64::from(len)).read_to_end(&mut start).map_err(io)?;
-        }
-        return Ok(own_save::read_info(&start)?.header);
+    // An own save: its header section, read without the body.
+    if let Some(head) = own_save::read_head(&mut file).map_err(io)? {
+        return Ok(own_save::read_info(&head)?.header);
     }
     file.seek(SeekFrom::Start(0)).map_err(io)?;
     let root = EsfFile::read_root_children(&mut file, "SAVE_GAME_HEADER").map_err(|e| match e.get_ref().and_then(|x| x.downcast_ref::<ntw_formats::esf::EsfError>()) {
@@ -743,10 +737,11 @@ impl LoadedCampaign {
                 Some(c) => {
                     self.model.world.victory_conditions.insert(id, c.clone());
                 }
-                // The start position's own record stays: one with no regions to hold and no deadline
-                // is met at the first update.
+                // The record it was loaded with stays: the start position's own (one with no regions to
+                // hold and no deadline is met at the first update), or none for a map without victory
+                // options (an open-format map), and then the victory test never decides for it.
                 None => log::warn!(
-                    "set_human: {faction_key} has no victory option in the start position; it keeps the start position's own conditions record"
+                    "set_human: {faction_key} has no victory option in the campaign; it keeps the conditions record it was loaded with, if any (a map without victory options has none)"
                 ),
             }
         }

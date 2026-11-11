@@ -3,7 +3,8 @@
 
 use std::path::PathBuf;
 
-use ntw_formats::campaign_map::{BorderRibbon, CampaignMap, DISPLAY_TO_LOGIC, GameFiles};
+use ntw_formats::campaign_map::{BorderRibbon, CampaignMap, DISPLAY_TO_LOGIC};
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 
 fn data_dir() -> PathBuf {

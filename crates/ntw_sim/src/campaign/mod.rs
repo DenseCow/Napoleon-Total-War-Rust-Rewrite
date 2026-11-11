@@ -25,6 +25,7 @@
 //! our own.
 
 pub mod agents;
+pub mod ambush;
 pub mod autoresolve;
 pub mod battles;
 pub mod capture;
@@ -85,7 +86,7 @@ pub mod portraits;
 pub mod visibility;
 pub mod world;
 
-pub use battles::{battle_grade, battle_side_results, BattleCommandRole, BattleGeneralCard, BattleResult, BattleResultCode, PendingBattle};
+pub use battles::{battle_grade, battle_side_results, BattleCommandRole, BattleGeneralCard, BattleResult, BattleResultCode, BattleType, PendingBattle};
 pub use capture::{CaptureChoice, CaptureOutcome, CapturePreview};
 pub use commander_recruitment::{CommanderOption, CommanderRecruitment};
 pub use commands::{CampaignCommand, CommandError, CommandQueue, ConstructionOption, PlannedMove};
@@ -101,7 +102,7 @@ pub use world::{SlotRef, FactionAiKeys, AiArea, AiHlci, RebelArmySide,
 };
 pub use visibility::{FogState, Shroud, SightGrid};
 pub use world::{Fort, PopulationClassState};
-pub use siege::SiegeState;
+pub use siege::{FortificationDamage, SiegeState};
 pub use zoom_limit::ZoomLimit;
 pub use map_bounds::MapBounds;
 pub use world::{EconomyRecord, ECONOMY_HISTORY_LEN, TREATY_BREAKS_START, CAI_RNG_SEED};

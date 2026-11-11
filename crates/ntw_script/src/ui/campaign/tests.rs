@@ -332,6 +332,8 @@ fn a_repair_card_counts_the_repair_length() {
         std::sync::Arc::make_mut(&mut st.model.rules).buildings.get_mut(FORT_LEVEL).unwrap().turns = 10;
         let r = st.model.world.regions.get_mut(&REGION).unwrap();
         r.fortification.as_mut().unwrap().health = 50;
+        // The walls' repair cost comes from their damage entry's factor (`0x00B66410`; 0 with no entry).
+        r.siege.fortifications = vec![ntw_sim::campaign::FortificationDamage { factor: 0.5, kind: 0, ..Default::default() }];
         // floor(0.5 × 10) = 5 turns of repair (the item keeps its length), 3 of them left.
         r.construction.push(ntw_sim::campaign::ConstructionItem { slot: SlotRef::Walls, level_key: FORT_LEVEL.into(), turns_remaining: 3, cost: 0, kind: ntw_sim::campaign::ConstructionKind::Repair { health_per_turn: 10, turns: 5 }, active: true });
     }

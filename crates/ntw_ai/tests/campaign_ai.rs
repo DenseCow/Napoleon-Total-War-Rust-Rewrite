@@ -12,7 +12,8 @@ use ntw_ai::campaign::keys::FactionAiKeys;
 use ntw_ai::campaign::world::dist;
 use ntw_ai::campaign::{Node, AiOrder, AiWorld, CampaignAiData, FactionAiConfig};
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::{CampaignModel, FactionId, RegionId, Terrain};
 

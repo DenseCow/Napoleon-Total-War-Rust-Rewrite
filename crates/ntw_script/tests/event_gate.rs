@@ -5,14 +5,16 @@
 mod common;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use ntw_formats::db::{DbTable, DbValue, Schema};
 use ntw_formats::db_folder::RawTable;
 use ntw_formats::db_folder::tables::{TRIGGER_EVENTS, TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES};
 use ntw_formats::pack::{LayerKind, Vfs};
+use ntw_script::event_classes::EventGate;
 use ntw_script::{ScriptContext, ScriptHost, ScriptSource};
 use ntw_sim::campaign::{
-    BuildingRef, CampaignEvent, CampaignModel, Character, CharacterId, CharacterKind, Region, RegionId, Settlement, SlotRef,
+    BuildingRef, CampaignEvent, CampaignModel, Character, CharacterId, CharacterKind, Region, RegionId, SlotRef,
 };
 use ntw_sim::fixed::Fixed20;
 
@@ -116,6 +118,54 @@ fn a_gated_event_without_a_character_never_reaches_lua() {
     assert_eq!(calls(&h), ["CharacterTurnEnd", "FactionTurnStart"]);
 }
 
+/// Step 1 refuses only a null character: one the model no longer has still reaches Lua, with or
+/// without the tables. The exe posts while he is there; ours fires after the step that may have
+/// removed him. With no agent type known, step 3 is skipped.
+#[test]
+fn a_gated_event_of_a_character_the_model_no_longer_has_reaches_lua() {
+    let src = ScriptSource::empty().with_memory_file("events.lua", EVENTS).with_memory_file("test.lua", SCRIPT);
+    let h = host(src);
+    assert_eq!(h.fire("CharacterTurnEnd", of(99)).handlers, 1, "no character 99");
+    let tables = Tables::new("lacks", &["CharacterTurnEnd"], &[("CharacterTurnEnd", "colonel")]);
+    let with_tables = host(tables.source());
+    assert_eq!(with_tables.fire("CharacterTurnEnd", of(99)).handlers, 1, "the tables let it through");
+    assert_eq!(with_tables.fire("CharacterTurnEnd", of(99)).handlers, 1, "asked again (logged once)");
+    assert_eq!(with_tables.fire("CharacterTurnEnd", of(8)).handlers, 0, "the colonel is there and excluded");
+    assert_eq!(calls(&h), ["CharacterTurnEnd"]);
+    assert_eq!(calls(&with_tables), ["CharacterTurnEnd", "CharacterTurnEnd"]);
+}
+
+/// The events whose posting step may kill their character: `CharacterCriticallyFailsAssassination`
+/// (the agent dies), `DuelFought` (a loser who dies) and `SufferAssassinationAttempt` (a target
+/// killed). They reach Lua for a character the model no longer has, and step 3 checks the agent
+/// type the event captured when it was posted ([`CampaignEvent::agent_type`]).
+#[test]
+fn the_events_of_a_character_their_step_killed_reach_lua_and_keep_their_exclusions() {
+    let names = ["CharacterCriticallyFailsAssassination", "DuelFought", "SufferAssassinationAttempt"];
+    let excluded: Vec<(&str, &str)> = names.iter().map(|n| (*n, "rake")).collect();
+    let tables = Tables::new("killed", &names, &excluded);
+    let h = host(tables.source());
+    h.exec(
+        r#"local e = require "data.events"
+           for _, name in ipairs({ "CharacterCriticallyFailsAssassination", "DuelFought", "SufferAssassinationAttempt" }) do
+               e[name] = { function(context) calls[#calls+1] = name end }
+           end"#,
+    )
+    .unwrap();
+    for name in names {
+        assert_eq!(h.fire(name, of(99)).handlers, 1, "{name}: no character 99");
+    }
+    assert_eq!(calls(&h), names);
+    let gate = EventGate::new(Rc::new(tables.source()));
+    for name in names {
+        assert_eq!(gate.admit(&h.state(), name, of(99), Some(CharacterKind::Rake)), None, "{name}: the captured rake is excluded");
+        assert_eq!(gate.admit(&h.state(), name, of(99), Some(CharacterKind::Gentleman)), Some(of(99)), "{name}: a gentleman is not");
+    }
+    // The captured type wins over the model's: the colonel (8) posted as a rake is excluded.
+    assert_eq!(gate.admit(&h.state(), "DuelFought", of(8), Some(CharacterKind::Rake)), None);
+    assert_eq!(gate.admit(&h.state(), "DuelFought", of(8), None), Some(of(8)), "the model's colonel");
+}
+
 /// Step 2: a gated event whose name is not a `trigger_events` key is not handed to Lua (the exe logs
 /// the name as not a valid key); one with a row is. An open class's event never asks the table.
 #[test]
@@ -146,38 +196,9 @@ fn an_excluded_agent_type_stops_the_event() {
     assert_eq!(calls(&h), ["CharacterTurnEnd", "CharacterCompletedBattle", "CharacterCompletedBattle"]);
 }
 
+/// [`common::region`] with made-up walls.
 fn region(id: u32, owner: ntw_sim::campaign::FactionId) -> Region {
-    Region {
-        id: RegionId(id),
-        key: format!("test_region_{id}"),
-        owner,
-        settlement: Settlement { key: format!("settlement:test_region_{id}:town"), position: (Fixed20::from_int(0), Fixed20::from_int(0)) },
-        slots: Vec::new(),
-        road: None,
-        fortification: Some(BuildingRef { level_key: "test_walls_1".into(), health: 100 }),
-        road_holder: None,
-        fortification_holder: None,
-        population: 1000,
-        base_gdp: 100,
-        gdp: 100,
-        wealth_growth_offset: 0,
-        discontent_growth: 0,
-        town_wealth: 0,
-        town_wealth_growth: 0,
-        town_wealth_refresh: Default::default(),
-        commodity_demand: Vec::new(),
-        tax_exempt: false,
-        religions: Vec::new(),
-        class_bases: Vec::new(),
-        unit_resources: Vec::new(),
-        population_state: Default::default(),
-        recruitment_queue: Vec::new(),
-        construction: Vec::new(),
-        garrison: None,
-        fleet: None,
-        siege: Default::default(),
-        traits: Vec::new(),
-    }
+    Region { fortification: Some(BuildingRef { level_key: "test_walls_1".into(), health: 100 }), ..common::region(id, owner) }
 }
 
 /// What the host gathers for a model event is what the event's exe class answers: an accessor the
@@ -199,9 +220,10 @@ fn a_model_events_context_is_what_its_class_answers() {
     // SettlementOccupied (vtable 0x01355EC0): the settlement; +0x38 (faction) and +0x28 (region) are null.
     assert_eq!(h.context_for(&CampaignEvent::SettlementOccupied { region: r, faction: fr }), only_settlement);
     // The character classes (e.g. 0x013558E0): the character and no faction.
-    assert_eq!(h.context_for(&CampaignEvent::CharacterCompletedBattle { character: c }), only_character);
-    assert_eq!(h.context_for(&CampaignEvent::CharacterTurnEnd { character: c }), only_character);
-    assert_eq!(h.context_for(&CampaignEvent::CharacterCreated { character: c }), only_character);
+    let general = Some(CharacterKind::General);
+    assert_eq!(h.context_for(&CampaignEvent::CharacterCompletedBattle { character: c, agent_type: general }), only_character);
+    assert_eq!(h.context_for(&CampaignEvent::CharacterTurnEnd { character: c, agent_type: general }), only_character);
+    assert_eq!(h.context_for(&CampaignEvent::CharacterCreated { character: c, agent_type: general }), only_character);
     // CharacterEntersGarrison (0x013561B0): the character and the settlement it entered.
     assert_eq!(
         h.context_for(&CampaignEvent::CharacterEntersGarrison { character: c, region: r }),

@@ -128,7 +128,8 @@ pub struct ManMarch {
     /// Metres left to his timed-move point (the soldier's distance to his order's `+0x3F4`).
     pub distance: f32,
     /// His timed move has finished (his order's `+0x10` = 1): he reached his place at the path's
-    /// end or braked to a stop for it, and stands until he is issued again ([`reissued`]).
+    /// end or braked to a stop for it, or the idle update (`0x005577C0`) ended his action
+    /// ([`LandUnit::end_men_actions`]); he stands until he is issued again ([`reissued`]).
     pub finished: bool,
     /// His kept order speed (`+0x440`), for an order at the path's end ([`TimedMove::speed_for`]).
     pub kept: Option<f32>,

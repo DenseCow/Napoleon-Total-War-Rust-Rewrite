@@ -500,7 +500,7 @@ mod tests {
         m.apply(CampaignCommand::RepairShip { force: NAVY, unit: 0 }).unwrap();
         let paid = treasury(&m, a);
         let ev = m.apply(CampaignCommand::Disembark { force: army, to: at((15, 5)) }).unwrap();
-        assert!(ev.contains(&CampaignEvent::CharacterDisembarksNavy { character: general, navy: NAVY }), "{ev:?}");
+        assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CharacterDisembarksNavy { character, navy: NAVY, .. } if *character == general)), "{ev:?}");
         assert_ne!(m.world.characters[&CharacterId(109)].position, at(PORT), "the navy sailed");
         assert!(!flagged(&m));
         assert_eq!(treasury(&m, a), paid + 400);
@@ -515,7 +515,7 @@ mod tests {
         let (mut m, a) = docked();
         m.apply(CampaignCommand::RepairShip { force: NAVY, unit: 0 }).unwrap();
         let paid = treasury(&m, a);
-        m.pending_battle = Some(super::super::battles::PendingBattle { attacker: ForceId(1001), defenders: vec![NAVY], settlement: None, resume: None });
+        m.pending_battle = Some(super::super::battles::PendingBattle { attacker: ForceId(1001), defenders: vec![NAVY], settlement: None, resume: None, ambush: false });
         m.apply_battle_result(super::super::battles::BattleResult { attacker_won: false, attacker_casualties: 0.0, defender_casualties: 0.0, codes: None });
         assert!(!flagged(&m));
         assert_eq!(treasury(&m, a), paid + 400);
@@ -552,7 +552,7 @@ mod tests {
             let enemy = ForceId(1007);
             let whole = |id: i32| CampaignUnit { id: UnitId(id), unit_key: "test_ship".into(), men: 300, max_men: 300, character: None, officer_name: Default::default() };
             m.world.forces.insert(enemy, MilitaryForce { id: enemy, faction: b, commander: Some(CharacterId(111)), units: vec![whole(60)], is_navy: true });
-            m.pending_battle = Some(super::super::battles::PendingBattle { attacker: enemy, defenders: vec![NAVY], settlement: None, resume: None });
+            m.pending_battle = Some(super::super::battles::PendingBattle { attacker: enemy, defenders: vec![NAVY], settlement: None, resume: None, ambush: false });
             m.rng = crate::rng::CaRng::new(seed);
             m.autoresolve().unwrap();
 

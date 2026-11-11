@@ -291,8 +291,11 @@ impl NamedTransforms {
 ///   (image type 2, 32 bits, 8 alpha bits; CONFIRMED: the 18-byte header's width x height x 4 + 18 is
 ///   the chunk size, except that a few chunks carry trailing zero bytes, e.g. 4,096 after a 166 x 764
 ///   image). Decode with [`FarmTileTexture::tga`]. The 20 small fort grass maps are kind 1 (JPEG pairs).
-///   Pixel meaning: like the presets' `grassmap.tga` (B, G, A channels used); the channel semantics
-///   are UNKNOWN.
+///   Pixel meaning: like the presets' `grassmap.tga` (B, G, A channels used), whose R, G, B, A are
+///   the densities of grass kinds g0..g3 (CONFIRMED: `0x01248590` reads bytes +2, +1, +0, +3 as kinds
+///   0..3 of an image the loader keeps B, G, R, A as stored, `0x004CDCA0` / `0x004D6210`, or decodes
+///   to `A8R8G8B8`, `0x010A6890`; see [`crate::grass::GrassMap`]); that these
+///   tiles are read the same way is INFERRED (their reader is not traced).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FarmTileTexture {
     /// The first byte (0 grass, 1 blend/colour).

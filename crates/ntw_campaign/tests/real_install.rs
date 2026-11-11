@@ -268,6 +268,45 @@ fn preopen_ownership(esf: &EsfFile) -> BTreeMap<String, String> {
     out
 }
 
+/// The settlements' fortification damage entries (`SIEGEABLE_GARRISON_RESIDENCE/FORTIFICATIONS_BLOCK`,
+/// CONFIRMED, reader `0x00AF4B00` → `0x00514CC0`) as each start position stores them: only Egypt
+/// (three settlements, each one entry per kind 0..=3) and the Italy pair (one settlement) carry any,
+/// all undamaged (factor 1, no hits). Prints the region keys.
+#[test]
+fn startpos_fortification_damage_loads() {
+    let Some(db) = db() else {
+        println!("SKIPPED: no install at {}", data_dir().display());
+        return;
+    };
+    for c in CAMPAIGNS {
+        let path = data_dir().join("campaigns").join(c).join("startpos.esf");
+        if !path.is_file() {
+            println!("SKIPPED {c}: {} missing", path.display());
+            continue;
+        }
+        let esf = EsfFile::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+        let l = ntw_campaign::read_esf(&esf, db).unwrap_or_else(|e| panic!("{c}: {e}"));
+        let with: Vec<_> = l.model.world.regions.values().filter(|r| !r.siege.fortifications.is_empty()).collect();
+        let keys: Vec<&str> = with.iter().map(|r| r.key.as_str()).collect();
+        println!("    {c}: fortification damage in {keys:?}");
+        let expected = match c {
+            "egy_napoleon" => 3,
+            "ita_napoleon" | "mp_ita_napoleon" => 1,
+            _ => 0,
+        };
+        assert_eq!(with.len(), expected, "{c}");
+        for r in &with {
+            for e in &r.siege.fortifications {
+                assert_eq!((e.factor, e.hits), (1.0, 0), "{c} {}: undamaged", r.key);
+            }
+            if c == "egy_napoleon" {
+                let kinds: Vec<u32> = r.siege.fortifications.iter().map(|e| e.kind).collect();
+                assert_eq!(kinds, [0, 1, 2, 3], "{c} {}", r.key);
+            }
+        }
+    }
+}
+
 #[test]
 fn loads_all_eight_startpos() {
     let Some(db) = db() else {
@@ -346,7 +385,40 @@ fn loads_all_eight_startpos() {
         for (f, d) in &w.faction_details {
             assert_eq!(d.out_of_game, Some(l.model.out_of_game_by_startpos_rule(*f)), "{c}: the rule for {:?}", w.factions[f].key);
         }
+        // Every playable faction gets a victory option (`set_human` warns for one without).
+        let playable: Vec<&str> = l.info.players.iter().filter(|p| p.is_playable).map(|p| p.faction_key.as_str()).collect();
+        assert!(!playable.is_empty(), "{c}: a playable faction");
+        for key in playable {
+            let id = l.model.faction_by_key(key).unwrap_or_else(|| panic!("{c}: playable {key} is not a faction")).id;
+            assert!(l.victory_options.contains_key(&id), "{c}: playable {key} has no victory option");
+        }
     }
+}
+
+/// A faction's out-of-game flag (faction +0x824, the bool two before the flag anchor) is written from the
+/// model: a save of the start position with one faction taken out of the game and one brought back
+/// reloads both flags, and every other faction keeps its own.
+#[test]
+fn the_out_of_game_flag_round_trips() {
+    let Some(db) = db() else { return };
+    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    if !path.is_file() {
+        return;
+    }
+    let esf = EsfFile::from_bytes(&std::fs::read(&path).unwrap()).unwrap();
+    let l = ntw_campaign::read_esf(&esf, db).unwrap();
+    let mut m = l.model.clone();
+    let france = m.faction_by_key("france").unwrap().id;
+    let w = &l.model.world;
+    let back_in = *w.faction_details.iter().find(|(_, d)| d.out_of_game == Some(true)).expect("a faction out of the game").0;
+    m.world.faction_details.get_mut(&france).unwrap().out_of_game = Some(true);
+    m.world.faction_details.get_mut(&back_in).unwrap().out_of_game = Some(false);
+    let out = ntw_campaign::save::write_save(&esf, &m, &l.info.header.faction_key, 1, None).unwrap();
+    let back = ntw_campaign::read(&out.to_bytes().unwrap(), db).unwrap().model.world;
+    for (f, d) in &back.faction_details {
+        assert_eq!(d.out_of_game, m.world.faction_details[f].out_of_game, "{}", w.factions[f].key);
+    }
+    assert_eq!((back.faction_details[&france].out_of_game, back.faction_details[&back_in].out_of_game), (Some(true), Some(false)));
 }
 
 /// Exact counts for the Europe start position (W3 §3.3-§3.8: 41 factions, 72 regions,

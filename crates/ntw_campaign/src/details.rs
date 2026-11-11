@@ -261,6 +261,8 @@ pub(crate) fn character_details(ch: &EsfRecord) -> Option<CharacterDetails> {
         duels_lost: ch.get_u32(36).unwrap_or(0),
         duels_won: ch.get_u32(37).unwrap_or(0),
         hidden: ch.get_bool(22).unwrap_or(false),
+        defensive_sieges: ch.get_u32(18).unwrap_or(0),
+        offensive_sieges: ch.get_u32(20).unwrap_or(0),
         turns_at_sea: ch.get_u32(28).unwrap_or(0),
         turns_in_enemy_lands: ch.get_u32(29).unwrap_or(0),
         turns_at_home: ch.get_u32(30).unwrap_or(0),

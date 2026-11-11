@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use ntw_campaign::pathing::poly_map;
-use ntw_formats::campaign_map::{CampaignMap, GameFiles};
+use ntw_formats::campaign_map::CampaignMap;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::movers::{kind7_closed, open_shared, shared_group, Family};
 use ntw_sim::campaign::polypath::{kind, Mover, PolyMap};

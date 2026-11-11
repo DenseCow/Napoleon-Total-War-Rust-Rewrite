@@ -133,12 +133,7 @@ pub fn rank(model: &CampaignModel, c: CharacterId) -> i32 {
 ///   the line (6).
 /// - `management`: his post (character +0x2B8): `management_army` / `_navy` / `_finance` / `_justice`
 ///   for the `army`, `navy`, `finance` and `justice` posts.
-///
-/// PROVISIONAL: during a pending battle the exe also adds, for `command_land` and `command_sea`, the
-/// battle-type bonuses (`land_command_attack` / `_defence` / `_ambush` / `_siege_attack` /
-/// `_siege_defence`, `sea_command_attack` / `_defence`, by the battle's type and his side, `0x008CE700`)
-/// and the enemy bonuses (`hates_ottomans`, `hates_europeans`, `hates_french`, `hates_british`); the
-/// model has no pending-battle state for them yet.
+/// - `command_land` and `command_sea`, during a pending battle he fights in: [`pending_battle_bonus`].
 ///
 /// The `agent_attribute_situations` table and its two effect tables
 /// (`trait_attribute_situation_effects`, `ancillary_to_attribute_situation_effects`) give nothing to
@@ -159,11 +154,14 @@ pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &OwnEffects<'_>
         f.units.iter().filter(|u| model.rules.units.get(&u.unit_key).is_some_and(|r| codes.contains(&crate::unit_kind::category(&r.category).code()))).count()
     };
     let mut bonus = 0;
+    if matches!(main, "command_land" | "command_sea") {
+        bonus += pending_battle_bonus(model, c, own, faction);
+    }
     match main {
         "zeal" if model.rules.features.faction_zeal => {
             bonus += own.get_int("zeal_europe");
             if faction {
-                bonus += Effects::faction_sum(model, ch.faction).get_int("zeal_europe");
+                bonus += super::effects::int_bonus(Effects::faction_bonus(model, ch.faction, "zeal_europe"));
             }
         }
         "command_land" => {
@@ -192,8 +190,7 @@ pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &OwnEffects<'_>
             }
         }
         "management" => {
-            let post = model.world.faction_details.get(&ch.faction).and_then(|d| d.posts.iter().find(|p| p.holder == Some(c)));
-            bonus += match post.map(|p| p.key.as_str()) {
+            bonus += match model.held_post(c).map(|p| p.key.as_str()) {
                 Some("army") => own.get_int("management_army"),
                 Some("navy") => own.get_int("management_navy"),
                 Some("finance") => own.get_int("management_finance"),
@@ -204,6 +201,62 @@ pub fn rank_original(model: &CampaignModel, c: CharacterId, own: &OwnEffects<'_>
         _ => {}
     }
     (level + bonus).max(lo).min(hi)
+}
+
+/// The rank bonuses of a `command_land` or `command_sea` character in the pending battle
+/// (`GetCharacterRank` `0x00A198D0` at `0x00A19B32`..`0x00A19D5F`, CONFIRMED by disassembly). The exe adds
+/// them while the battle sequence's state (`0x004B4A50`) is 1..3, which spans the pre-battle panel and
+/// the autoresolve (`0x008AE5A0` runs at `0x008F7969` in state 1): the model's
+/// [`CampaignModel::pending_battle`], which the autoresolve takes only after reading the ranks. He fights
+/// in it when he commands the attacking force (side +0x68, `0x008CE700` / `0x008CE7B0` / `0x008CE850`:
+/// the side's force or one of its reinforcements, whose commander, force +0x74, is he) or a defending one
+/// (side +0x6C, the same test, `0x008CE780`); anyone else gets nothing. Then, from his own effects `own`:
+/// - by the battle's type ([`CampaignModel::battle_type`], battle +0x60) and his side: land 0/2/9/10
+///   `land_command_attack` (plus his faction's, faction +0x6FC through character +0x2A0, which the exe
+///   adds whatever the caller; ours only when `faction`, which only the minister level clears and which
+///   never reaches here) or `land_command_defence`; naval 11/12 `sea_command_attack` /
+///   `sea_command_defence`; ambush 1 `land_command_ambush` for the attacker, nothing for the defender;
+///   fort and settlement assault 3/6 `land_command_siege_attack` / `land_command_siege_defence`; the rest
+///   (4, 5, 7, 8, 13) nothing;
+/// - against the other side's faction (the first defender's for the attacker, the attacker's for a
+///   defender, [`CampaignModel::battle_sides`]), unless it is the rebels (no faction record, +0x514
+///   null): each of [`super::features::CampaignFeatures::enemy_rank_bonuses`] it matches, by key or by
+///   culture ([`super::characters::CharacterRules::culture`]).
+pub fn pending_battle_bonus(model: &CampaignModel, c: CharacterId, own: &OwnEffects<'_>, faction: bool) -> i32 {
+    let Some(battle) = model.pending_battle.as_ref() else { return 0 };
+    let commands = |f: &ForceId| model.world.forces.get(f).is_some_and(|f| f.commander == Some(c));
+    let attacker = if commands(&battle.attacker) {
+        true
+    } else if battle.defenders.iter().any(commands) {
+        false
+    } else {
+        return 0;
+    };
+    use super::battles::BattleType as T;
+    let mut bonus = match (model.battle_type(battle), attacker) {
+        (T::LandNormal | T::LandBridge | T::SettlementUnfortified | T::TownNormal, true) => {
+            let from_faction = model.world.characters.get(&c).filter(|_| faction);
+            own.get_int("land_command_attack") + from_faction.map_or(0, |ch| super::effects::int_bonus(Effects::faction_bonus(model, ch.faction, "land_command_attack")))
+        }
+        (T::LandNormal | T::LandBridge | T::SettlementUnfortified | T::TownNormal, false) => own.get_int("land_command_defence"),
+        (T::NavalNormal | T::NavalBlockade, true) => own.get_int("sea_command_attack"),
+        (T::NavalNormal | T::NavalBlockade, false) => own.get_int("sea_command_defence"),
+        (T::LandAmbush, true) => own.get_int("land_command_ambush"),
+        (T::FortStandard | T::SettlementStandard, true) => own.get_int("land_command_siege_attack"),
+        (T::FortStandard | T::SettlementStandard, false) => own.get_int("land_command_siege_defence"),
+        _ => 0,
+    };
+    let (attacking, defending) = model.battle_sides(battle);
+    let enemy = if attacker { defending } else { attacking };
+    if let Some(enemy) = enemy.filter(|&f| !model.world.is_rebel_faction(f))
+        && let Some(key) = model.world.factions.get(&enemy).map(|f| f.key.as_str())
+    {
+        let culture = model.rules.characters.culture(key);
+        for b in model.rules.features.enemy_rank_bonuses.iter().filter(|b| b.enemy.matches(key, culture)) {
+            bonus += own.get_int(&b.bonus);
+        }
+    }
+    bonus
 }
 
 /// A bonus of a character's own effects (traits and ancillaries, character +0x48C; `0x00E1F130`
@@ -598,7 +651,7 @@ impl CampaignModel {
         let chance = assassination_chance(self, agent, target).unwrap_or(5);
         let (culprit, victim) = (self.world.characters[&agent].faction, self.world.characters[&target].faction);
         // `SufferAssassinationAttempt` for the target before the roll (CONFIRMED order).
-        events.push(CampaignEvent::SufferAssassinationAttempt { character: target });
+        events.push(CampaignEvent::SufferAssassinationAttempt { character: target, agent_type: self.world.agent_type(target) });
         let outcome = self.forced_or_roll(agent, chance, SUBTERFUGE, self.world.force_success_for_human.0);
         self.world.agents_acted.insert(agent);
         match outcome {
@@ -607,7 +660,7 @@ impl CampaignModel {
                     self.blamed_misdeed(culprit, victim, Misdeed::Assassination);
                 }
                 events.extend(self.residence_after_action(agent, target, outcome));
-                events.push(CampaignEvent::AssassinationAttemptSuccess { character: agent });
+                events.push(CampaignEvent::AssassinationAttemptSuccess { character: agent, agent_type: self.world.agent_type(agent) });
                 self.character_falls(target);
             }
             Outcome::Failure => {
@@ -618,7 +671,7 @@ impl CampaignModel {
             Outcome::CriticalFailure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Assassination);
                 self.expose(victim, agent);
-                events.push(CampaignEvent::CharacterCriticallyFailsAssassination { character: agent });
+                events.push(CampaignEvent::CharacterCriticallyFailsAssassination { character: agent, agent_type: self.world.agent_type(agent) });
                 self.character_dies(agent);
             }
         }
@@ -715,12 +768,14 @@ impl CampaignModel {
         let (winner, loser) = if outcome.succeeded() { (challenger, target) } else { (target, challenger) };
         self.world.character_details.entry(winner).or_default().duels_won += 1;
         self.world.character_details.entry(loser).or_default().duels_lost += 1;
+        // Both agent types before the loser may die: the exe posts `DuelFought` while he is there.
+        let types = (self.world.agent_type(challenger), self.world.agent_type(target));
         let flees = matches!(outcome, Outcome::Success | Outcome::Failure) && self.flee_duel(loser, &mut events);
         if !flees {
             self.character_falls(loser);
         }
-        events.push(CampaignEvent::DuelFought { character: challenger });
-        events.push(CampaignEvent::DuelFought { character: target });
+        events.push(CampaignEvent::DuelFought { character: challenger, agent_type: types.0 });
+        events.push(CampaignEvent::DuelFought { character: target, agent_type: types.1 });
         events.push(CampaignEvent::AgentActionResolved { agent: challenger, target: Some(target), action: AgentAction::Duel(weapon), outcome });
         Ok(events)
     }
@@ -732,7 +787,7 @@ impl CampaignModel {
         let Some(ch) = self.world.characters.get(&loser).cloned() else { return false };
         let to = match self.force_of(loser).and_then(|f| self.force_position(f)) {
             Some(p) => Some(p),
-            None => self.world.regions.values().find(|r| super::economy::in_region(self, r, &ch)).map(|r| r.settlement.position),
+            None => super::economy::region_of(self, &ch).map(|r| r.settlement.position),
         };
         let Some(to) = to else { return false };
         if let Some(d) = self.world.character_details.get_mut(&loser) {
@@ -842,7 +897,7 @@ impl CampaignModel {
         // spy's faction leader) and `CharacterFactionSuffersSuccessfulSpyAttempt` (the victim's);
         // on 2 and 3 `EspionageAgentApprehended` (the force's commander; none for a settlement).
         if let Some(c) = watched {
-            events.push(CampaignEvent::SufferSpyingAttempt { character: c });
+            events.push(CampaignEvent::SufferSpyingAttempt { character: c, agent_type: self.world.agent_type(c) });
         }
         // The settlement order honours `force_garrison_infiltration_success_for_human`.
         let forced = matches!(target, SpyTarget::Settlement(_)) && self.world.force_success_for_human.1;
@@ -865,19 +920,19 @@ impl CampaignModel {
                         }
                     }
                 }
-                events.push(CampaignEvent::SpyingAttemptSuccess { character: agent });
+                events.push(CampaignEvent::SpyingAttemptSuccess { character: agent, agent_type: self.world.agent_type(agent) });
                 if let Some(l) = self.world.faction_details.get(&culprit).and_then(|d| d.leader()) {
-                    events.push(CampaignEvent::CharacterFactionSpyAttemptSuccessful { character: l });
+                    events.push(CampaignEvent::CharacterFactionSpyAttemptSuccessful { character: l, agent_type: self.world.agent_type(l) });
                 }
                 if let Some(l) = self.world.faction_details.get(&victim).and_then(|d| d.leader()) {
-                    events.push(CampaignEvent::CharacterFactionSuffersSuccessfulSpyAttempt { character: l });
+                    events.push(CampaignEvent::CharacterFactionSuffersSuccessfulSpyAttempt { character: l, agent_type: self.world.agent_type(l) });
                 }
             }
             Outcome::Failure | Outcome::CriticalFailure => {
                 self.detected_misdeed(culprit, victim, Misdeed::Spying);
                 self.expose(victim, agent);
                 if let Some(c) = watched {
-                    events.push(CampaignEvent::EspionageAgentApprehended { character: c });
+                    events.push(CampaignEvent::EspionageAgentApprehended { character: c, agent_type: self.world.agent_type(c) });
                 }
                 if outcome == Outcome::CriticalFailure {
                     self.character_dies(agent);
@@ -1175,9 +1230,9 @@ impl CampaignModel {
                 }
                 events.extend(self.residence_after_action(agent, commander, outcome));
                 events.push(if guerilla {
-                    CampaignEvent::HarassmentAttemptSuccess { character: agent }
+                    CampaignEvent::HarassmentAttemptSuccess { character: agent, agent_type: self.world.agent_type(agent) }
                 } else {
-                    CampaignEvent::ArmySabotageAttemptSuccess { character: agent }
+                    CampaignEvent::ArmySabotageAttemptSuccess { character: agent, agent_type: self.world.agent_type(agent) }
                 });
             }
             Outcome::Failure => {
@@ -1228,7 +1283,7 @@ impl CampaignModel {
                 if outcome == Outcome::CriticalSuccess {
                     self.blamed_misdeed(culprit, victim, Misdeed::Sabotage);
                 }
-                events.push(CampaignEvent::SabotageAttemptSuccess { character: agent });
+                events.push(CampaignEvent::SabotageAttemptSuccess { character: agent, agent_type: self.world.agent_type(agent) });
             }
             Outcome::Failure => self.detected_misdeed(culprit, victim, Misdeed::Sabotage),
             Outcome::CriticalFailure => {

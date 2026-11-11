@@ -549,7 +549,7 @@ fn a_reinforcement_whose_order_cannot_be_given_keeps_its_entry() {
     let mut m = commander_recruitment_model();
     let (_, colonel) = raised_reinforcement(&mut m, 0);
     let entry = m.world.reinforcements.clone();
-    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None });
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None, ambush: false });
     assert!(m.march_reinforcements(A).is_empty());
     assert_eq!(m.world.reinforcements, entry);
     assert!(m.world.standing_orders.is_empty());
@@ -557,6 +557,39 @@ fn a_reinforcement_whose_order_cannot_be_given_keeps_its_entry() {
     m.march_reinforcements(A);
     assert!(m.world.reinforcements.is_empty());
     assert!(m.world.standing_orders.contains_key(&colonel));
+}
+
+/// While a battle is pending (an ambush sprung by an earlier march of the same turn start), a standing
+/// order's army does not walk and keeps its order (`0x00973B90` steps no mover then, `0x00973C20`); once
+/// the battle is over the next resume merges. An invalid order is still cancelled then.
+#[test]
+fn a_standing_order_waits_while_a_battle_is_pending() {
+    let mut m = commander_recruitment_model();
+    let general = CharacterId(100);
+    let (force, colonel) = raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    m.world.characters.get_mut(&general).unwrap().position = pos(10, 1);
+    m.world.characters.get_mut(&colonel).unwrap().movement_points = 25;
+    let before = m.world.characters[&colonel].position;
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None, ambush: true });
+    assert!(m.resume_standing_orders(A).is_empty());
+    assert_eq!(m.world.characters[&colonel].position, before, "no walk while the battle is pending");
+    assert_eq!((m.world.characters[&colonel].movement_points, m.world.forces.contains_key(&force)), (25, true));
+    assert_eq!(m.world.standing_orders.get(&colonel), Some(&StandingOrder::JoinForce { into: ForceId(1000) }));
+    m.pending_battle = None;
+    let ev = m.resume_standing_orders(A);
+    assert!(ev.contains(&CampaignEvent::CampaignArmiesMerge { force, into: ForceId(1000) }), "{ev:?}");
+
+    // The still-valid check still runs while a battle is pending: an order whose target force is
+    // gone is cancelled, not kept (`0x009653D0`, review).
+    let mut m = commander_recruitment_model();
+    let (_, colonel) = raised_reinforcement(&mut m, 0);
+    m.march_reinforcements(A);
+    assert!(m.world.standing_orders.contains_key(&colonel));
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1002)], settlement: None, resume: None, ambush: true });
+    m.world.forces.remove(&ForceId(1000));
+    assert!(m.resume_standing_orders(A).is_empty());
+    assert!(m.world.standing_orders.is_empty(), "an invalid order is cancelled while a battle is pending");
 }
 
 /// A new order ends the march (`0x00924D30` cancels the holder's old order), and so does the target's
@@ -590,7 +623,7 @@ fn a_new_order_refused_for_its_points_still_ends_the_reinforcement_march() {
     let march = m.world.standing_orders.clone();
     assert_eq!(march.len(), 1);
     let order = CampaignCommand::MoveForce { force, to: pos(10, 1) };
-    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None });
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1001), defenders: vec![ForceId(1000)], settlement: None, resume: None, ambush: false });
     assert_eq!(m.apply(order.clone()), Err(CommandError::BattlePending));
     assert_eq!(m.world.standing_orders, march, "refused at the gate");
     m.pending_battle = None;

@@ -2,7 +2,9 @@
 //! [`CampaignFeatures`] the exe hard-codes for them (MODDING_AUDIT.md §1.1). The model reads the
 //! table, never the key, so a campaign of another source sets its own.
 
-use ntw_sim::campaign::features::{AiCaptureLiberation, CampaignFeatures, LootResentment, PeaceAccessGrant, UnitKeyEffects, VictoryRival};
+use ntw_sim::campaign::features::{
+    AiCaptureLiberation, CampaignFeatures, EnemyKey, EnemyRankBonus, LootResentment, PeaceAccessGrant, UnitKeyEffects, VictoryRival,
+};
 
 /// The Peninsular campaign's key: the exe's switches below test it (each CONFIRMED at the address the
 /// feature's field names).
@@ -24,13 +26,33 @@ const PENINSULAR_CONDITIONS: u32 = 5;
 /// The rival the victory test looks up for that type (`0x0096FCE0` → `0x00955B70`, CONFIRMED).
 const VICTORY_RIVAL: &str = "spa_france";
 
+/// The rank bonuses against the enemy of a pending battle, in the exe's order (`GetCharacterRank`
+/// `0x00A198D0` at `0x00A19C80`..`0x00A19D5F`, CONFIRMED; keys `0x01314778`, `0x0132EE78`, `0x01319F48`,
+/// `0x01316004`), applied in every campaign.
+///
+/// ORIGINAL BUG: the `hates_british` test (`0x00A19D35`..`0x00A19D40`) compares the enemy's culture
+/// with `spa_britain`, a faction key; no culture has that key (the cultures table holds `european`,
+/// `middle_east`, `indian`, `tribal` and the `egy_`/`PIR_` ones), so the bonus can never apply, while
+/// its twin `hates_french` compares the faction key. Ours compares the faction key. (Vanilla gives no
+/// trait or ancillary the `hates_british` effect, so vanilla play is unchanged; a mod's would now work.)
+fn enemy_rank_bonuses() -> Vec<EnemyRankBonus> {
+    let bonus = |bonus: &str, enemy| EnemyRankBonus { bonus: bonus.into(), enemy };
+    vec![
+        bonus("hates_ottomans", EnemyKey::Faction("ottomans".into())),
+        bonus("hates_europeans", EnemyKey::Culture("european".into())),
+        bonus("hates_french", EnemyKey::Faction("spa_france".into())),
+        bonus("hates_british", EnemyKey::Faction("spa_britain".into())),
+    ]
+}
+
 /// The feature set the exe gives the original's campaign `key`; any other key gets only the rules the
-/// exe applies in every campaign (the victory test's rival rule).
+/// exe applies in every campaign (the victory test's rival rule and the enemy rank bonuses).
 pub fn original(key: &str) -> CampaignFeatures {
     // The victory test `0x0096FCE0` looks the rival up whatever the campaign; outside the Peninsular map
     // the faction does not exist, so a type-5 record is then met by its regions alone.
     let mut f = CampaignFeatures {
         victory_rival: Some(VictoryRival { kind: PENINSULAR_CONDITIONS, faction: VICTORY_RIVAL.into() }),
+        enemy_rank_bonuses: enemy_rank_bonuses(),
         ..CampaignFeatures::default()
     };
     if key == PENINSULAR {
@@ -86,9 +108,30 @@ pub fn original(key: &str) -> CampaignFeatures {
 mod tests {
     use super::*;
 
-    /// What every original key gets: the default plus the victory test's rival rule.
+    /// What every original key gets: the default plus the victory test's rival rule and the enemy rank
+    /// bonuses.
     fn base() -> CampaignFeatures {
-        CampaignFeatures { victory_rival: Some(VictoryRival { kind: 5, faction: "spa_france".into() }), ..CampaignFeatures::default() }
+        CampaignFeatures {
+            victory_rival: Some(VictoryRival { kind: 5, faction: "spa_france".into() }),
+            enemy_rank_bonuses: enemy_rank_bonuses(),
+            ..CampaignFeatures::default()
+        }
+    }
+
+    /// The enemy rank bonuses follow the exe's order, `hates_british` comparing the faction key (the
+    /// ORIGINAL BUG fix: the exe compares the culture).
+    #[test]
+    fn the_enemy_rank_bonuses_follow_the_exe() {
+        let got: Vec<_> = original("eur_napoleon").enemy_rank_bonuses.into_iter().map(|b| (b.bonus, b.enemy)).collect();
+        assert_eq!(
+            got,
+            [
+                ("hates_ottomans".to_owned(), EnemyKey::Faction("ottomans".into())),
+                ("hates_europeans".to_owned(), EnemyKey::Culture("european".into())),
+                ("hates_french".to_owned(), EnemyKey::Faction("spa_france".into())),
+                ("hates_british".to_owned(), EnemyKey::Faction("spa_britain".into())),
+            ]
+        );
     }
 
     /// Only the two switched campaigns get rule features, and the four single-player Napoleon

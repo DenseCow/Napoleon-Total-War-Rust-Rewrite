@@ -28,11 +28,19 @@
 //! - [`HISTORICAL_EVENTS`]: the round start's historical events ([`super::historical_events::historical_events`]).
 //! - [`OUTCOME_MOVIE`]: the movie a faction's campaign outcome plays ([`super::outcome::outcome_movie`]).
 //! - [`SIEGE_ATTRITION`]: a besieged settlement's round-start attrition ([`super::siege::siege_attrition`]).
+//! - [`SIEGE_FALL`]: whether a besieged settlement falls to a besieging army at its faction's turn
+//!   ([`super::siege::siege_falls`]).
+//! - [`SIEGE_WALL_DAMAGE`]: the wall damage a besieging army does at its commander's turn start
+//!   ([`super::siege::siege_wall_damage`]).
+//! - [`SIEGE_ASSAULT_ALLOWED`]: whether a besieging army can assault the settlement now
+//!   ([`super::siege::siege_assault_allowed`]).
 //! - [`CHARACTER_RANK`]: a character's rank, his command stars ([`super::agents::rank_original`]).
 //! - [`CAPTURE_AI_CHOICE`]: an AI faction's loot / occupy / liberate choice after it takes a settlement
 //!   ([`super::capture_ai::capture_choice_original`]).
 //! - [`PORT_ARRIVAL`]: whether a navy arriving at a hostile port docks there or blockades it
 //!   ([`super::port_blockade::port_arrival`]).
+//! - [`AMBUSH_SPRING`]: whether a hidden force springs an ambush on an enemy that walked into its zone
+//!   ([`super::ambush::ambush_springs`]).
 //! - [`VICTORY_STATE`]: whether a human faction has won or lost by its victory conditions
 //!   ([`super::outcome::victory_state_original`]).
 
@@ -84,6 +92,12 @@ pub const HISTORICAL_EVENTS: &str = "events.historical";
 pub const OUTCOME_MOVIE: &str = "campaign.outcome_movie";
 /// Seam key of a besieged settlement's round-start attrition ([`SiegeAttrition`]).
 pub const SIEGE_ATTRITION: &str = "siege.attrition";
+/// Seam key of whether a besieged settlement falls to a besieging army ([`SiegeFall`]).
+pub const SIEGE_FALL: &str = "siege.fall";
+/// Seam key of the wall damage a besieging army does at its commander's turn start ([`SiegeWallDamage`]).
+pub const SIEGE_WALL_DAMAGE: &str = "siege.wall_damage";
+/// Seam key of whether a besieging army can assault the settlement now ([`SiegeAssaultAllowed`]).
+pub const SIEGE_ASSAULT_ALLOWED: &str = "siege.assault_allowed";
 /// Seam key of a character's rank ([`CharacterRank`]).
 pub const CHARACTER_RANK: &str = "character.rank";
 /// Seam key of an AI faction's choice after it takes a settlement ([`CaptureAiChoice`]).
@@ -92,11 +106,16 @@ pub const CAPTURE_AI_CHOICE: &str = "capture.ai_choice";
 pub const PORT_ARRIVAL: &str = "port.arrival";
 /// Seam key of a human faction's state by its victory conditions ([`VictoryStateRule`]).
 pub const VICTORY_STATE: &str = "campaign.victory_state";
+/// Seam key of whether a hidden force springs an ambush ([`AmbushSpring`]).
+pub const AMBUSH_SPRING: &str = "ambush.spring";
 
-/// A region's population after one round of growth: given the model, the region, its population
-/// and its population state, the new population and state. The original's is
-/// [`super::population::grow`]. Its mod-state changes go to the [`ModWrites`].
-pub type PopulationGrow = dyn Fn(&CampaignModel, &Region, u32, &PopulationState, &mut ModWrites) -> (u32, PopulationState) + Send + Sync;
+/// A region's population after one round of growth: given the model, the region, its population, its
+/// population state and its classes after the round's passes (the region's stored [`Region::class_bases`] at
+/// the round end, the projection's passed classes in [`super::population::project`]), the new population and
+/// state. The original's is [`super::population::grow`], which reads no class. Its mod-state changes go to the
+/// [`ModWrites`].
+pub type PopulationGrow =
+    dyn Fn(&CampaignModel, &Region, u32, &PopulationState, &[PopulationClassState], &mut ModWrites) -> (u32, PopulationState) + Send + Sync;
 /// A region's population classes after their round-end passes, before the region grows: given the model, the
 /// region, its classes and the random stream the riot draws take (the model's at the round end, a fixed seed in
 /// the projection), its new classes (the region's [`Region::class_bases`] is replaced with them). The original's
@@ -171,6 +190,24 @@ pub type OutcomeMovieRule = dyn Fn(&CampaignModel, FactionId, CampaignOutcome) -
 /// for each region whose settlement is under siege, in region order. The original's is
 /// [`super::siege::siege_attrition`]. Its mod-state changes go to the [`ModWrites`].
 pub type SiegeAttrition = dyn Fn(&mut CampaignModel, RegionId, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
+/// Whether a besieged settlement falls to a besieging army: given the model, the army and the region it
+/// besieges, true when the settlement surrenders to it now; the model then destroys the garrison and the
+/// army takes the settlement ([`CampaignModel::siege_falls_at_turn`]). Asked once per besieging army at the
+/// start of its faction's turn, the armies in the faction's character list order. The original's is
+/// [`super::siege::siege_falls`]. A query: it changes no state.
+pub type SiegeFall = dyn Fn(&CampaignModel, ForceId, RegionId) -> bool + Send + Sync;
+/// The wall damage a besieging army does at its commander's turn start: given the model (it changes state: the
+/// settlement's fortification damage, [`super::SiegeState::fortifications`], and its walls' health), the army
+/// and the region it besieges, the events to report. Called once per besieging army at its commander's turn
+/// start, after its siege turn has started ([`CampaignModel::start_siege_turn`]). The original's is
+/// [`super::siege::siege_wall_damage`]. Its mod-state changes go to the [`ModWrites`].
+pub type SiegeWallDamage = dyn Fn(&mut CampaignModel, ForceId, RegionId, &mut ModWrites) -> Vec<CampaignEvent> + Send + Sync;
+/// Whether a besieging army can assault the settlement it besieges now: given the model, the army and the
+/// region, true when it may. Asked when the army's attack order arrives and lays siege (it assaults at once
+/// unless the order holds) and by the assault command, which is refused on a no
+/// ([`CampaignModel::can_assault_now`]). The original's is [`super::siege::siege_assault_allowed`]. A query:
+/// it changes no state.
+pub type SiegeAssaultAllowed = dyn Fn(&CampaignModel, ForceId, RegionId) -> bool + Send + Sync;
 /// A character's rank, his command stars: given the model, the character, his own effect set (traits and
 /// ancillaries; [`OwnEffects`] reads as the set and builds it only when read) and whether to include his
 /// faction's effects (false when the faction's own set asks, for its
@@ -190,6 +227,12 @@ pub type CaptureAiChoice = dyn Fn(&mut CampaignModel, &CapturePreview, Option<Fa
 /// navy's route can end outside a port it will blockade. The original's is
 /// [`super::port_blockade::port_arrival`]. A query: it changes no state.
 pub type PortArrivalRule = dyn Fn(&CampaignModel, ForceId, RegionId, usize) -> PortArrival + Send + Sync;
+/// Whether a hidden character springs an ambush on an enemy that walked into his zone of control: given the
+/// model, the hidden character and the mover, true to fight; the model then stops the walk there and sets
+/// up the ambush battle ([`CampaignModel::spring_ambush`]). Asked at most once per walk for each hidden
+/// enemy whose zone the walk enters, in the walk's order ([`CampaignModel::ambush_on_walk`]); a no lets
+/// the walk go on. The original's is [`super::ambush::ambush_springs`]. A query: it changes no state.
+pub type AmbushSpring = dyn Fn(&CampaignModel, CharacterId, CharacterId) -> bool + Send + Sync;
 /// Whether a human faction has won or lost by its victory conditions ([`VictoryState`]): given the model
 /// (it changes state: the faction's [`World::victory_conditions`](super::World::victory_conditions) record)
 /// and the faction, the state; the events it posts (the conditions met or failed, the `campaign_won`
@@ -229,12 +272,20 @@ pub struct CampaignSeams {
     pub outcome_movie: Seam<OutcomeMovieRule>,
     /// [`SIEGE_ATTRITION`].
     pub siege_attrition: Seam<SiegeAttrition>,
+    /// [`SIEGE_FALL`].
+    pub siege_fall: Seam<SiegeFall>,
+    /// [`SIEGE_WALL_DAMAGE`].
+    pub siege_wall_damage: Seam<SiegeWallDamage>,
+    /// [`SIEGE_ASSAULT_ALLOWED`].
+    pub siege_assault_allowed: Seam<SiegeAssaultAllowed>,
     /// [`CHARACTER_RANK`].
     pub character_rank: Seam<CharacterRank>,
     /// [`CAPTURE_AI_CHOICE`].
     pub capture_ai_choice: Seam<CaptureAiChoice>,
     /// [`PORT_ARRIVAL`].
     pub port_arrival: Seam<PortArrivalRule>,
+    /// [`AMBUSH_SPRING`].
+    pub ambush_spring: Seam<AmbushSpring>,
     /// [`VICTORY_STATE`].
     pub victory_state: Seam<VictoryStateRule>,
 }
@@ -243,7 +294,11 @@ impl Default for CampaignSeams {
     /// The original game's rules.
     fn default() -> Self {
         CampaignSeams {
-            population_grow: Seam::original(Arc::new(|m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &mut ModWrites| super::population::grow(m, r, pop, s))),
+            population_grow: Seam::original(Arc::new(
+                |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, _: &[PopulationClassState], _: &mut ModWrites| {
+                    super::population::grow(m, r, pop, s)
+                },
+            )),
             population_class_round: Seam::original(Arc::new(
                 |m: &CampaignModel, r: &Region, c: &[PopulationClassState], rng: &mut CaRng, _: &mut ModWrites| super::population::class_round(m, r, c, rng),
             )),
@@ -263,11 +318,15 @@ impl Default for CampaignSeams {
             historical_events: Seam::original(Arc::new(super::historical_events::historical_events)),
             outcome_movie: Seam::original(Arc::new(super::outcome::outcome_movie)),
             siege_attrition: Seam::original(Arc::new(|m: &mut CampaignModel, r: RegionId, _: &mut ModWrites| super::siege::siege_attrition(m, r))),
+            siege_fall: Seam::original(Arc::new(super::siege::siege_falls)),
+            siege_wall_damage: Seam::original(Arc::new(|m: &mut CampaignModel, f: ForceId, r: RegionId, _: &mut ModWrites| super::siege::siege_wall_damage(m, f, r))),
+            siege_assault_allowed: Seam::original(Arc::new(super::siege::siege_assault_allowed)),
             character_rank: Seam::original(Arc::new(super::agents::rank_original)),
             capture_ai_choice: Seam::original(Arc::new(|m: &mut CampaignModel, p: &CapturePreview, prev: Option<FactionId>, _: &mut ModWrites| {
                 super::capture_ai::capture_choice_original(m, p, prev)
             })),
             port_arrival: Seam::original(Arc::new(super::port_blockade::port_arrival)),
+            ambush_spring: Seam::original(Arc::new(super::ambush::ambush_springs)),
             victory_state: Seam::original(Arc::new(|m: &mut CampaignModel, f: FactionId, e: &mut Vec<CampaignEvent>, _: &mut ModWrites| {
                 super::outcome::victory_state_original(m, f, e)
             })),
@@ -278,7 +337,7 @@ impl Default for CampaignSeams {
 impl CampaignSeams {
     /// Every seam's key and implementation chain, in a fixed order (for the multiplayer handshake
     /// and the log).
-    pub fn chains(&self) -> [(&'static str, &[String]); 18] {
+    pub fn chains(&self) -> [(&'static str, &[String]); 22] {
         [
             (POPULATION_GROW, self.population_grow.chain()),
             (POPULATION_CLASS_ROUND, self.population_class_round.chain()),
@@ -294,9 +353,13 @@ impl CampaignSeams {
             (HISTORICAL_EVENTS, self.historical_events.chain()),
             (OUTCOME_MOVIE, self.outcome_movie.chain()),
             (SIEGE_ATTRITION, self.siege_attrition.chain()),
+            (SIEGE_FALL, self.siege_fall.chain()),
+            (SIEGE_WALL_DAMAGE, self.siege_wall_damage.chain()),
+            (SIEGE_ASSAULT_ALLOWED, self.siege_assault_allowed.chain()),
             (CHARACTER_RANK, self.character_rank.chain()),
             (CAPTURE_AI_CHOICE, self.capture_ai_choice.chain()),
             (PORT_ARRIVAL, self.port_arrival.chain()),
+            (AMBUSH_SPRING, self.ambush_spring.chain()),
             (VICTORY_STATE, self.victory_state.chain()),
         ]
     }
@@ -335,12 +398,20 @@ pub struct CampaignRuleRegistry {
     pub outcome_movie: SeamRegistry<OutcomeMovieRule>,
     /// [`SIEGE_ATTRITION`] implementations.
     pub siege_attrition: SeamRegistry<SiegeAttrition>,
+    /// [`SIEGE_FALL`] implementations.
+    pub siege_fall: SeamRegistry<SiegeFall>,
+    /// [`SIEGE_WALL_DAMAGE`] implementations.
+    pub siege_wall_damage: SeamRegistry<SiegeWallDamage>,
+    /// [`SIEGE_ASSAULT_ALLOWED`] implementations.
+    pub siege_assault_allowed: SeamRegistry<SiegeAssaultAllowed>,
     /// [`CHARACTER_RANK`] implementations.
     pub character_rank: SeamRegistry<CharacterRank>,
     /// [`CAPTURE_AI_CHOICE`] implementations.
     pub capture_ai_choice: SeamRegistry<CaptureAiChoice>,
     /// [`PORT_ARRIVAL`] implementations.
     pub port_arrival: SeamRegistry<PortArrivalRule>,
+    /// [`AMBUSH_SPRING`] implementations.
+    pub ambush_spring: SeamRegistry<AmbushSpring>,
     /// [`VICTORY_STATE`] implementations.
     pub victory_state: SeamRegistry<VictoryStateRule>,
 }
@@ -367,9 +438,13 @@ impl CampaignRuleRegistry {
                 HISTORICAL_EVENTS => self.historical_events.apply(&mut seams.historical_events, key),
                 OUTCOME_MOVIE => self.outcome_movie.apply(&mut seams.outcome_movie, key),
                 SIEGE_ATTRITION => self.siege_attrition.apply(&mut seams.siege_attrition, key),
+                SIEGE_FALL => self.siege_fall.apply(&mut seams.siege_fall, key),
+                SIEGE_WALL_DAMAGE => self.siege_wall_damage.apply(&mut seams.siege_wall_damage, key),
+                SIEGE_ASSAULT_ALLOWED => self.siege_assault_allowed.apply(&mut seams.siege_assault_allowed, key),
                 CHARACTER_RANK => self.character_rank.apply(&mut seams.character_rank, key),
                 CAPTURE_AI_CHOICE => self.capture_ai_choice.apply(&mut seams.capture_ai_choice, key),
                 PORT_ARRIVAL => self.port_arrival.apply(&mut seams.port_arrival, key),
+                AMBUSH_SPRING => self.ambush_spring.apply(&mut seams.ambush_spring, key),
                 VICTORY_STATE => self.victory_state.apply(&mut seams.victory_state, key),
                 _ => {
                     warnings.push(format!("rule seam {seam}: no such seam; {key} is ignored"));
@@ -398,8 +473,8 @@ mod tests {
     fn lean_years() -> CampaignRuleRegistry {
         let mut reg = CampaignRuleRegistry::default();
         let maker = |prev: Arc<PopulationGrow>| {
-            Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, w: &mut ModWrites| {
-                let (grown, state) = prev(m, r, pop, s, w);
+            Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, c: &[PopulationClassState], w: &mut ModWrites| {
+                let (grown, state) = prev(m, r, pop, s, c, w);
                 let key = ModKey::new(OWNER, ModScope::Region(r.id), "rounds");
                 let rounds = match m.mod_state.get(&key) {
                     Some(ModValue::Int(n)) => *n + 1,
@@ -456,9 +531,13 @@ mod tests {
                 (HISTORICAL_EVENTS, &original[..]),
                 (OUTCOME_MOVIE, &original[..]),
                 (SIEGE_ATTRITION, &original[..]),
+                (SIEGE_FALL, &original[..]),
+                (SIEGE_WALL_DAMAGE, &original[..]),
+                (SIEGE_ASSAULT_ALLOWED, &original[..]),
                 (CHARACTER_RANK, &original[..]),
                 (CAPTURE_AI_CHOICE, &original[..]),
                 (PORT_ARRIVAL, &original[..]),
+                (AMBUSH_SPRING, &original[..]),
                 (VICTORY_STATE, &original[..]),
             ]
         );

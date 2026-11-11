@@ -271,7 +271,7 @@ fn an_assassin_enters_before_the_success_event() {
     m.world.force_success_for_human.0 = true;
     let ev = m.apply(CampaignCommand::Assassinate { agent, target }).unwrap();
     let enter = ev.iter().position(|e| *e == CampaignEvent::CharacterEntersGarrison { character: agent, region: r });
-    let success = ev.iter().position(|e| *e == CampaignEvent::AssassinationAttemptSuccess { character: agent });
+    let success = ev.iter().position(|e| matches!(e, CampaignEvent::AssassinationAttemptSuccess { character, .. } if *character == agent));
     assert!(enter.is_some() && enter < success, "{ev:?}");
     assert!(!m.world.characters.contains_key(&target));
     assert_eq!(m.settlement_residents(r), vec![agent]);

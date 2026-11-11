@@ -1800,7 +1800,7 @@ against a focused text field are CONFIRMED: see "Shortcut keys" below.
   binding); the handler lock (`0x00A22430`, `steal_user_input`) is not modelled (the input layer
   is: "Input layer" below);
   the release's post to the event lists is not ported; a key's stealer is our newest shown
-  stealer, a re-steal keeping its place as in the exe (`0x00EC3DE0`, ported: `stealer_of`, test
+  stealer, a re-steal keeping its place as in the exe (`0x00EC3DE0`, ported in the `StealShortcutKey` binding, test
   `a_re_steal_keeps_the_stealers_place`); the exe also tests the stealer's handler +0x38 / +0x3C
   (`0x00DACBA0` / `0x00DACBB0`), ours does not; the camera's controllers (its busy test is ported: "Busy test" below).
   PROVISIONAL (`input_focus_held`): ours keeps the focus on a component that is destroyed; what the

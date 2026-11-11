@@ -10,7 +10,8 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, Face, TextureDimension, TextureFormat};
 use ntw_campaign::map_display::{LineKind, MapDisplay, level_rgba};
-use ntw_formats::campaign_map::{DISPLAY_TO_LOGIC, GameFiles};
+use ntw_formats::campaign_map::DISPLAY_TO_LOGIC;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_formats::rigid_model::RigidModel;
 use ntw_script::{CampaignOpening, ScriptContext, ScriptHost, ScriptSource};
@@ -460,9 +461,7 @@ pub fn enter(world: &mut World) {
         if name == "LoadingGame" && opening == CampaignOpening::LoadedSave {
             info!("Campaign: save loaded as {human} (LoadingGame: {} handlers, {} errors)", r.handlers, r.errors.len());
         }
-        for e in r.errors {
-            warn!("Campaign script {name}: {e}");
-        }
+        super::play::log_script_errors(&r);
     }
     // Turn 1 of a new campaign: its project events go to the game side once the sim exists
     // (`CampaignSim::note_events`), which keeps the outcome movies and lost campaigns and logs the dropped items. Its walks
@@ -475,12 +474,7 @@ pub fn enter(world: &mut World) {
         let errors: usize = started.iter().map(|(_, r)| r.errors.len()).sum();
         let scripted = started.iter().filter(|(e, _)| e.script_name().is_some()).count();
         info!("Campaign: turn 1 started as {human} ({scripted} script events, {errors} script errors)");
-        for (event, r) in &started {
-            for e in &r.errors {
-                warn!("Campaign script {} (turn 1): {e}", event.script_name().unwrap_or("event"));
-            }
-        }
-        opening_events = started.into_iter().map(|(e, _)| e).collect();
+        opening_events = super::play::fired_events(started).collect();
     }
     let demo = std::env::args().any(|a| a == "--campaign-demo");
     let saver = CampaignSaver {
@@ -496,6 +490,7 @@ pub fn enter(world: &mut World) {
     let mut sim = CampaignSim {
         host,
         saver: std::rc::Rc::new(saver),
+        session: CampaignSim::new_session(),
         generation: 0,
         selected: None,
         selected_region: None,
@@ -722,14 +717,13 @@ pub fn sync_walls(
     mut commands: Commands,
     sim: Option<NonSend<CampaignSim>>,
     walls: Option<Res<SettlementWalls>>,
-    mut synced: Local<u64>,
+    mut synced: Local<Option<(u64, u64)>>,
     mut views: Query<(Entity, &mut SettlementWallsView, &mut Visibility)>,
 ) {
     let (Some(sim), Some(walls)) = (sim, walls) else { return };
-    if *synced == sim.generation + 1 {
+    if !super::play::model_moved(&mut synced, sim.stamp()) {
         return;
     }
-    *synced = sim.generation + 1;
     let m = sim.model();
     let mut changed = 0;
     for (entity, mut view, mut vis) in &mut views {

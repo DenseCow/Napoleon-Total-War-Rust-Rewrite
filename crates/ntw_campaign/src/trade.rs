@@ -495,6 +495,11 @@ type AreaOutlines = BTreeMap<RegionId, Vec<Vec<(f32, f32)>>>;
 
 /// The settlement area outlines of every game region that has them (see
 /// [`attach_settlement_areas`]) and the regions left out.
+///
+/// Cost: each game region scans the map's areas' triangles until one holds its settlement (regions ×
+/// faces at worst), once per campaign load. Measured in release (polish75, 2026-11-11, best of 5):
+/// eur_napoleon 32.7 ms (72 regions, 543 areas, 148,118 faces), ita_napoleon 2.5 ms, egy_napoleon
+/// 2.1 ms. A one-off load cost, so no index; a debug build is slower and was not measured.
 fn settlement_areas(w: &ntw_sim::campaign::World, map: &ntw_formats::campaign_map::RegionMap) -> (AreaOutlines, SettlementAreaGaps) {
     let v = |i: u32| map.vertices.get(i as usize).copied();
     let holds = |area: &ntw_formats::campaign_map::RegionArea, p: (f32, f32)| {

@@ -13,6 +13,10 @@ fn human_capture_waits_for_the_choice_then_loots() {
     assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }));
     assert_eq!(m.rng, rng, "both passes draw, loot first");
     let p = m.pending_capture.clone().unwrap();
+    // The previews apply each option to the region and put it back.
+    let r = &m.world.regions[&RegionId(11)];
+    assert_eq!((r.slots[0].building.as_ref().unwrap().health, r.town_wealth), (100, 1000), "the previews leave the region as it was");
+    assert!(r.class_bases.iter().all(|c| c.resistance == 0), "{:?}", r.class_bases);
     // Money: rolls + clamp(0.15 × 1000, 150, 7000) + clamp(0.15 × 0.15 × 8000, 150, 6000), × 1 (no looting bonus).
     assert_eq!(p.loot.money, value as i32 + 150 + 180);
     assert_eq!(p.loot.buildings, vec![(0, loot_h)]);
@@ -104,17 +108,27 @@ fn ai_capture_occupies_and_liberation_hands_the_region_over() {
     m.world.region_rebel_factions.insert(RegionId(11), "test_faction_c".into());
     m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     assert_eq!(m.pending_capture.as_ref().unwrap().liberate, Some(C));
+    // The model has no terrain: an expelled army is placed at its candidate's point itself (its own
+    // position when it may stay, else the candidate region's settlement).
+    assert!(m.terrain.is_none());
     let mut no_capital = m.clone();
-    let pos_before = m.world.characters[&CharacterId(100)].position;
+    let pos_before = no_capital.world.characters[&CharacterId(100)].position;
     set_details(&mut m, A, Some(10), false);
     m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert_eq!(m.world.regions[&RegionId(11)].owner, C);
-    // The liberation expels the capturer's army from the region (0x008D9DC0 at 0x00B508C5, before
-    // the owner change), so a capturer without a capital, which the owner change's own pass
-    // (0x00A64AC0, factions with a capital only) skips, is moved out of the settlement too (it stays in the region on the map: the owner is still
-    // the liberator at expel time, so it may stay).
+    // The liberation expels the capturer's army from the region's settlement (0x008D9DC0 at
+    // 0x00B508C5, before the owner change); the owner is still the liberator then, so the army may
+    // stay and keeps its position in the region. With a capital, the owner change's own pass
+    // (0x00A64AC0 → 0x008D9DC0 at 0x00A650E4) tests it again with the region now C's, but C came back
+    // first (HandleFactionReemergence 0x008AE6E0 at 0x00A64CB9) as A's protectorate (the liberation
+    // flag, `reemergence_record`), and a protectorate's owner lets its patron's army stay
+    // (`record_lets_stand`): it keeps its position.
     assert_eq!(m.world.characters[&CharacterId(100)].garrisoned_in, None);
     assert_eq!(m.world.regions[&RegionId(11)].garrison, None);
+    assert_eq!(m.world.stance(C, A), Stance::Protectorate);
+    assert_eq!(m.world.characters[&CharacterId(100)].position, pos_before);
+    // Without a capital the owner change's pass (factions with a capital only) skips A, so the first
+    // expulsion is what moves it out of the settlement, and it stays where it stood.
     assert_eq!(no_capital.world.capital(A), None);
     no_capital.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
     assert_eq!(no_capital.world.regions[&RegionId(11)].owner, C);
@@ -408,7 +422,7 @@ fn alliance_broken_messages_follow_the_exe() {
         !notices.is_empty()
             && notices.iter().all(|e| matches!(
                 e,
-                CampaignEvent::Message { recipient: B, message: CampaignMessage::YourArmyRetreatsRegion { .. } }
+                CampaignEvent::Message { recipient: B, message: CampaignMessage::YourArmyRetreatsRegion { character: CharacterId(101), .. } }
             )),
         "{events:?}"
     );
@@ -969,7 +983,7 @@ fn looting_posts_character_looted_settlement_with_the_capturing_commander() {
     assert_eq!(looted(&ev), 0, "the choice waits: {ev:?}");
     assert_eq!(m.pending_capture.as_ref().unwrap().looter, Some(CharacterId(100)));
     let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Loot }).unwrap();
-    let loot = event_at(&ev, |e| *e == CampaignEvent::CharacterLootedSettlement { character: CharacterId(100) });
+    let loot = event_at(&ev, |e| matches!(e, CampaignEvent::CharacterLootedSettlement { character: CharacterId(100), .. }));
     let resolved = event_at(&ev, |e| matches!(e, CampaignEvent::CaptureResolved { choice: CaptureChoice::Loot, .. }));
     assert!(loot < resolved, "{ev:?}");
     assert_eq!(looted(&ev), 1, "{ev:?}");
@@ -988,7 +1002,7 @@ fn looting_posts_character_looted_settlement_with_the_capturing_commander() {
     let mut m = capture_model(vec![A]);
     m.capture_by_force(RegionId(11), A, Some(ForceId(1000)));
     let ev = m.apply(CampaignCommand::ChooseCapture { choice: CaptureChoice::Liberate }).unwrap();
-    assert!(ev.contains(&CampaignEvent::CharacterLootedSettlement { character: CharacterId(100) }), "{ev:?}");
+    assert!(ev.iter().any(|e| matches!(e, CampaignEvent::CharacterLootedSettlement { character: CharacterId(100), .. })), "{ev:?}");
     // A capture with no force (a scripted capture) has no commander: the exe posts the event, but its
     // +0xB8 check (0x008F9EE0) fails on the null character, so 0x00E30700 never hands it to Lua.
     let mut m = capture_model(vec![A]);
@@ -1055,18 +1069,33 @@ fn reported(m: &CampaignModel, ev: &[CampaignEvent]) -> bool {
 
 /// The player's walk into an undefended settlement is besieged, walls or not: the arrival
 /// `0x0094B600`'s flag starts from the residence's virtual +0x54, `ReturnThis` `0x004470B0` in the
-/// settlement vtable `0x0137C9A4` (slot at `0x0137C9F8`), so it never tests the walls. The model has
-/// no siege start yet and takes it as the assault does, with the report (tagged in `attack_settlement`).
+/// settlement vtable `0x0137C9A4` (slot at `0x0137C9F8`), so it never tests the walls. The army lays
+/// siege and assaults at once when it can (`0x008B26C0`: no walls, or a siege unit), and the empty
+/// settlement is taken with the report; behind walls without a siege unit it waits, and the settlement
+/// falls with the report at its faction's next turn start (`0x008C2120`: no garrison).
 #[test]
-fn a_walk_in_walled_or_not_takes_the_siege_stand_in_with_the_report() {
-    for walls in [None, Some(BuildingRef { level_key: "test_building_level".into(), health: 100 })] {
-        let mut m = capture_model(vec![A]);
-        m.world.regions.get_mut(&RegionId(11)).unwrap().fortification = walls.clone();
-        let ev = m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
-        assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }), "{walls:?}: {ev:?}");
-        assert!(reported(&m, &ev), "{ev:?}");
-        assert_eq!(m.world.regions[&RegionId(11)].owner, A);
-    }
+fn a_walk_in_is_besieged_and_taken_with_the_report() {
+    let enter = |m: &mut CampaignModel| m.apply(CampaignCommand::EnterSettlement { force: ForceId(1000), region: RegionId(11) }).unwrap();
+    let mut m = capture_model(vec![A]);
+    let ev = enter(&mut m);
+    assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }), "{ev:?}");
+    assert!(reported(&m, &ev), "{ev:?}");
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert!(!m.world.regions[&RegionId(11)].siege.under_siege(), "the capture ends the captor's siege");
+    let mut m = capture_model(vec![A]);
+    m.world.regions.get_mut(&RegionId(11)).unwrap().fortification = Some(BuildingRef { level_key: "test_building_level".into(), health: 100 });
+    let ev = enter(&mut m);
+    assert!(!reported(&m, &ev), "{ev:?}");
+    assert_eq!(m.world.regions[&RegionId(11)].owner, B);
+    assert_eq!(m.world.regions[&RegionId(11)].siege.besiegers, [ForceId(1000)]);
+    let mut ev = Vec::new();
+    // The next turn start: the commander's starts the siege turn (`0x008F2F30`), then state 0 asks.
+    m.start_siege_turn(ForceId(1000), &mut ev);
+    m.siege_falls_at_turn(A, &mut ev);
+    assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }), "{ev:?}");
+    assert!(reported(&m, &ev), "{ev:?}");
+    assert_eq!(m.world.regions[&RegionId(11)].owner, A);
+    assert!(!m.world.regions[&RegionId(11)].siege.under_siege());
 }
 
 /// A risen rebel army, or a rebel owner with no risen armies, takes the settlement without the report
@@ -1096,10 +1125,10 @@ fn a_rebel_walk_in_occupies_without_the_report() {
 }
 
 /// The attack's resume after the battle outside (`0x008F7880` calls the attack entry `0x00916980`
-/// with its skip-gate flag set) takes an unwalled settlement with the report (`0x00B58560`).
+/// with its skip-gate flag set) takes an undefended settlement with the report (`0x00B58560`).
 #[test]
 fn the_resume_after_a_battle_keeps_the_report() {
     let mut m = capture_model(vec![A]);
-    let ev = m.attack_settlement(ForceId(1000), RegionId(11), true).unwrap();
+    let ev = m.attack_settlement(ForceId(1000), RegionId(11), true, false).unwrap();
     assert!(ev.contains(&CampaignEvent::CaptureChoicePending { region: RegionId(11), faction: A }), "{ev:?}");
 }

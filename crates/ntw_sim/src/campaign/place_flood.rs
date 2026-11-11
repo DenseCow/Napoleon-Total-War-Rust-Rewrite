@@ -302,6 +302,14 @@ fn row_snap(outline: &[Point], px: i32, row: i32, recs: &mut Vec<Crossing>) -> O
 ///
 /// The original has no other bound: an outline with nothing on any row (one of no area) is walked
 /// over its whole z range, one raw unit a step. The grid's polygons all have an area.
+///
+/// Cost bound: each row is one [`row_snap`] (a pass over the outline's n edges, then a sort and a pass
+/// over its crossings). The only caller, [`nearest_point`], starts on one of the outline's edges, so
+/// `p`'s row lies in the outline's z range and the loop ends after at most z_max − z_min + 1 steps
+/// (`hit_top`, then the first row below z_min); a polygon lies in one grid cell (2 map units = 2^21 raw
+/// rows), so that is at most 2^21 + 1 steps, two rows each. Once a row has found a place the loop
+/// also ends at i² ≥ that cost, so i < 2^16 (the cost is a u32), which bounds every outline with an
+/// area; only a sliver with no span on most rows walks its whole z range.
 fn row_search(outline: &[Point], p: Point, recs: &mut Vec<Crossing>) -> Option<Point> {
     let z_min = outline.iter().map(|q| q.1).min()?;
     let z_max = outline.iter().map(|q| q.1).max()?;

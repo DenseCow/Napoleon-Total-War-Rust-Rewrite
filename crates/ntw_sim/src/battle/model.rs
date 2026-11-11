@@ -1022,8 +1022,14 @@ impl Battle {
     /// `limits.unit_scales`, the original's four [`super::unit_scale::STEPS`] by default) and
     /// returns the clamped float the battle will use, so the caller can log the step it picked.
     pub fn set_unit_scale_step(&mut self, index: i32, limits: &crate::limits::GameLimits) -> f32 {
+        self.set_step_scale(limits.unit_scale(index), limits)
+    }
+
+    /// Sets [`Battle::unit_scale`] to the step scale `scale` clamped as `0x004A6540` clamps it, and
+    /// returns it: the one place both setters store the scale.
+    fn set_step_scale(&mut self, scale: f32, limits: &crate::limits::GameLimits) -> f32 {
         self.unit_scale_top = limits.max_scale();
-        self.unit_scale = super::unit_scale::clamp(limits.unit_scale(index), self.unit_scale_top);
+        self.unit_scale = super::unit_scale::clamp(scale, self.unit_scale_top);
         self.unit_scale
     }
 
@@ -1031,13 +1037,12 @@ impl Battle {
     /// ([`crate::limits::UNIT_SIZE_SETTING`], a scale; `None`: a game that registers no such
     /// setting) and returns the clamped float: the setting's step
     /// ([`crate::limits::GameLimits::unit_scale_setting`], as `LoadBattleSetup` `0x004709F0` fills
-    /// the setup's `unit_scale`), then [`Battle::set_unit_scale_step`] (the game-settings key
-    /// `0x0B` that `0x004A6540` reads). The whole setting → scale decision of a battle's start.
+    /// the setup's `unit_scale`), then that step's scale clamped as [`Battle::set_unit_scale_step`]
+    /// clamps it (the game-settings key `0x0B` that `0x004A6540` reads). The whole setting → scale
+    /// decision of a battle's start.
     /// INFERRED for a single-player battle (see [`super::unit_scale`]).
     pub fn set_unit_scale_setting(&mut self, setting: Option<f32>, limits: &crate::limits::GameLimits) -> f32 {
-        let step = limits.unit_scale_setting(setting);
-        // `step` is inside the list, so the conversion keeps it.
-        self.set_unit_scale_step(i32::try_from(step).unwrap_or(i32::MAX), limits)
+        self.set_step_scale(limits.step_scale(limits.unit_scale_setting(setting)), limits)
     }
 
     /// Each side's current strength (alliance `+0x64`, `0x00539E80`), ascending side order.

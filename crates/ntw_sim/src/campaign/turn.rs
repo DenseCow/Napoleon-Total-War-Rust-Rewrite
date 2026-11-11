@@ -124,7 +124,8 @@ pub enum TurnStep {
     /// `CharacterTurnStart`, the action point refill and the hidden flag for the faction's characters.
     CharactersStart(FactionId),
     /// The end of the faction's turn start: the reinforcement march and research availability (not for the
-    /// rebels), the spy network and spotting, the pools' step, then `FactionTurnStart`.
+    /// rebels), its regions' unrest outcomes, the spy network (human factions) and spotting, the standing
+    /// orders, the pools' step, the sight refresh, then `FactionTurnStart`.
     FactionReady(FactionId),
     /// Either stop for a human player or play the AI's turn.
     Decide(FactionId),
@@ -253,8 +254,10 @@ impl CampaignModel {
     /// Whether `f` gets a turn when the turn moves on (`PassTurnToNextActiveFaction`
     /// `0x00948CF0`, CONFIRMED by disassembly): a listed faction out of the game (faction +0x824,
     /// [`Self::in_the_game`]) is passed over, so it gets no turn start, turn, turn end or handover
-    /// until it comes back ([`Self::reemerge_faction`]); its round-end economy still runs (that loop
-    /// walks every faction). The rebels (world +0x1C, after the list) are never tested. A save of
+    /// until it comes back ([`Self::reemerge_faction`]). Its round-end step still runs (that loop walks
+    /// every faction) but `0x008BC650` skips its settle, its regions' round end, construction,
+    /// relationships and research there ([`Self::in_the_game_with_record`], [`economy::settle_round`];
+    /// its trade routes still accumulate). The rebels (world +0x1C, after the list) are never tested: they always take turns. A save of
     /// ours from before the flag was kept has no +0x824: then `in_the_game` derives it by the exe's
     /// startpos rule ([`Self::out_of_game_by_startpos_rule`]). Not modelled: the exe also
     /// passes over a faction whose byte +0x93C is set, a flag no byte store in the exe writes
@@ -551,8 +554,9 @@ impl CampaignModel {
                     events.extend(self.march_reinforcements(f));
                     self.update_tech_availability(f);
                 }
-                // From the join at 0x008F2BB1 on (CONFIRMED by listing): the character pools' turn (0x00A24C90) and
-                // 0x008DA210 run for every faction, the rebels too; the message manager (0x00A18A70) and the
+                // From the join at 0x008F2BB1 on (CONFIRMED by listing): the character pools' turn (0x00A24C90, on
+                // the faction's +0x6F4 object, only when that is set and the +0x814 flag read by 0x008CA0B0 is
+                // clear, 0x008F2BD1-0x008F2BE8) and 0x008DA210 run for every faction, the rebels too; the message manager (0x00A18A70) and the
                 // government's popularity (0x008F2E10) are gated by IsFactionWithoutRecord 0x008CEEF0 (tested at
                 // 0x008F2BBA / 0x008F2C28), so the rebels skip them. None of these four is modelled here (the
                 // regions' own walk, 0x00AAE820, is `TurnStep::Region`, before the join). Between them, at
@@ -571,7 +575,7 @@ impl CampaignModel {
                 // (`0x008B4B70`; an AI faction runs only the spotting pass); CHARACTERS_FIDELITY.md §10.
                 if self.turn.humans.contains(&f) {
                     for character in self.spy_network_step(f) {
-                        events.push(CampaignEvent::CharacterBuildsSpyNetwork { character });
+                        events.push(CampaignEvent::CharacterBuildsSpyNetwork { character, agent_type: self.world.agent_type(character) });
                     }
                 }
                 self.spotting_pass(f);
@@ -598,7 +602,13 @@ impl CampaignModel {
                 let fx = super::effects::Effects::compute_for(self, f);
                 for character in ids {
                     self.world.agents_acted.remove(&character);
-                    events.push(CampaignEvent::CharacterTurnStart { character });
+                    events.push(CampaignEvent::CharacterTurnStart { character, agent_type: self.world.agent_type(character) });
+                    // His force's turn-start step (`0x00A24EB0` → force vfunc +0x28 at `0x00A2527E`, before
+                    // the refill `0x0096C140`): an army that besieges starts its siege turn (`0x008F2290` →
+                    // `0x008F2F30`, [`Self::start_siege_turn`]) and damages the walls.
+                    if let Some(army) = self.force_of_kind(character, false) {
+                        self.start_siege_turn(army, &mut events);
+                    }
                     let commands = self.world.forces.values().any(|x| x.commander == Some(character));
                     let factor = if commands {
                         force_action_point_factor(&self.rules, fx.character_total(character, "general_admiral_action_point_bonus"))
@@ -632,6 +642,10 @@ impl CampaignModel {
                 }
             }
             TurnStep::Decide(f) => {
+                // Turn-phase state 0 of `0x0094A940` first runs the faction's siege falls (`0x008C2120` until
+                // it returns 0), for a human and an AI alike: the armies whose siege turn started in
+                // `CharactersStart` above.
+                self.siege_falls_at_turn(f, &mut events);
                 if self.stops_for(f) {
                     self.turn.current = Some(f);
                     self.turn.in_turn = true;
@@ -655,7 +669,7 @@ impl CampaignModel {
                 for c in self.world.faction_characters_in_list_order(f) {
                     // The turn-end counters come first (`0x009DA210`, CharacterTurnEnd after them).
                     self.turn_end_counters(c);
-                    events.push(CampaignEvent::CharacterTurnEnd { character: c });
+                    events.push(CampaignEvent::CharacterTurnEnd { character: c, agent_type: self.world.agent_type(c) });
                 }
                 for region in self.world.faction_regions_in_list_order(f) {
                     events.push(CampaignEvent::RegionTurnEnd { region });
@@ -785,7 +799,9 @@ impl CampaignModel {
     /// the slot (`0x00B78800` frees it) and its result stands: a build's level (`BuildingCompleted`, posted by
     /// the build steps `0x00B78230` / `0x00B78560`), a repair's health ([`Self::set_building_health`]: 100,
     /// no event), or a demolition's empty slot, whose school stops researching first (`0x00B781B0` →
-    /// `0x00AA4BF0`: the technology's researcher cleared, its progress kept, as an owner change does).
+    /// `0x00AA4BF0`: the technology's researcher cleared, its progress kept, as an owner change does). Any
+    /// finished walls item then gives the settlement its default fortification entries
+    /// ([`super::siege::SiegeState::add_default_fortifications`], `0x00B143E0`).
     fn apply_construction_step(&mut self, region: RegionId, slot: super::SlotRef, step: ConstructionStep, events: &mut Vec<CampaignEvent>) {
         let Some(reg) = self.world.regions.get_mut(&region) else { return };
         let Some(index) = reg.construction.iter().position(|i| i.slot == slot) else { return };
@@ -806,7 +822,16 @@ impl CampaignModel {
                         }
                         events.push(CampaignEvent::BuildingCompleted { region, slot });
                     }
-                    ConstructionResult::Repaired(health) => self.set_building_health(region, slot, health, events),
+                    ConstructionResult::Repaired(health) => {
+                        // A finished walls repair first restores the walls' damage entry (`0x00B78490` →
+                        // `0x00576850`, written back by `0x00B69AF0`; CONFIRMED by decompile).
+                        if slot == super::SlotRef::Walls
+                            && let Some(e) = reg.siege.walls_damage_mut()
+                        {
+                            e.restore();
+                        }
+                        self.set_building_health(region, slot, health, events);
+                    }
                     ConstructionResult::Demolished => {
                         let (holder, id) = match slot {
                             super::SlotRef::Slot(i) => reg.slots.get(i).map_or((None, 0), |s| (s.holder, s.id)),
@@ -829,6 +854,14 @@ impl CampaignModel {
                 // `0x00A68478`, both calls conditional (the conditions not traced); ours does not yet (BACKLOG §5
                 // "Region demand step at the event sites").
                 self.refresh_region_town_wealth(region);
+                // Last in `0x00B78800` (after `0x00A682F0` and the owner's refresh `0x008CA100(0, 1)`): a
+                // finished walls item of any kind gives the settlement its default fortification entries
+                // (`0x00B143E0` at `0x00B788CF`, CONFIRMED by decompile; our bounded form, see the method).
+                if slot == super::SlotRef::Walls
+                    && let Some(r) = self.world.regions.get_mut(&region)
+                {
+                    r.siege.add_default_fortifications();
+                }
             }
         }
     }
@@ -914,9 +947,13 @@ impl CampaignModel {
         let held_naval = reg.slots.iter().find(|s| s.port).is_some_and(|s| s.blockade.is_some());
         // Asked only when a land item can finish this turn: the test changes nothing, so skipping it
         // otherwise gives the exe's result.
-        let no_place = !reg.siege.under_siege()
-            && reg.recruitment_queue.iter().zip(&naval).any(|(i, &n)| !n && i.turns_remaining <= 1)
-            && self.land_recruit_place(region).is_none();
+        let land_place = (!reg.siege.under_siege() && reg.recruitment_queue.iter().zip(&naval).any(|(i, &n)| !n && i.turns_remaining <= 1))
+            .then(|| self.land_recruit_place(region));
+        let no_place = land_place == Some(None);
+        // The place found, handed to the first land spawn below when no army or land unit has spawned
+        // before it (one can fill the garrison or raise an army near; a naval spawn changes nothing the
+        // place depends on), so its free-spot search does not run twice.
+        let mut known_place = land_place.flatten();
         let held_land = reg.siege.under_siege() || no_place;
         let reg = self.world.regions.get_mut(&region).expect("region exists");
         let mut finished = Vec::new();
@@ -1005,6 +1042,7 @@ impl CampaignModel {
             reg.recruitment_queue[index].target = None;
         }
         for (target, unit_keys) in groups {
+            known_place = None;
             let ev = self.spawn_reinforcement(region, target, unit_keys);
             events.extend(ev);
         }
@@ -1014,23 +1052,38 @@ impl CampaignModel {
         // The hold above has already found a place, so this happens only when an earlier spawn of this
         // pass used it up. The naval spawn is a separate manager and goes on.
         let mut land_stopped = false;
+        // Whether an item that finished this turn (not one already waiting at zero) stays queued, land and
+        // naval: reported once each per region, on the turn such an item first waits, not on every turn
+        // it stays. An item that waited before was reported then (here or by the hold above), except one
+        // loaded at zero turns, which is not reported (the queue gives every new item at least one turn).
+        let (mut land_left, mut naval_left) = (false, false);
         for (index, is_naval, waited) in others {
-            if land_stopped && !is_naval {
-                continue;
-            }
-            match self.spawn_recruited_unit(region, key_of(self, index)) {
-                Some(ev) => {
-                    keep[index] = false;
-                    events.push(ev);
-                }
-                None => {
-                    // Reported on the turn the item first waits, not on every turn it stays.
-                    if !waited {
-                        log::info!("no free spot near {region:?}'s settlement: its finished land recruits stay queued");
+            let spawned = !(land_stopped && !is_naval) && {
+                // A naval spawn (a fleet at the port) leaves the land place as it is
+                // (`land_recruit_place` reads the garrison, the armies near and the map), so the place
+                // is kept for the first land item after it.
+                let known = if is_naval { None } else { known_place.take() };
+                match self.spawn_recruited_unit_at(region, key_of(self, index), known) {
+                    Some(ev) => {
+                        keep[index] = false;
+                        events.push(ev);
+                        true
                     }
-                    land_stopped |= !is_naval;
+                    None => {
+                        land_stopped |= !is_naval;
+                        false
+                    }
                 }
+            };
+            if !spawned && !waited {
+                *(if is_naval { &mut naval_left } else { &mut land_left }) = true;
             }
+        }
+        if land_left {
+            log::info!("no free spot near {region:?}'s settlement: its finished land recruits stay queued");
+        }
+        if naval_left {
+            log::info!("no place for {region:?}'s finished naval recruits: they stay queued");
         }
         // `0x00B71FB0` deletes only the items spawned.
         let reg = self.world.regions.get_mut(&region).expect("region exists");
@@ -1109,7 +1162,8 @@ pub enum ConstructionResult {
 /// (`0x00B781A0`: elapsed + 1, done once the total is reached):
 /// - a build finishes as its level at full health (`0x00B78230` / `0x00B78560`);
 /// - a repair (`0x00B78490`) raises the standing building's health by its step each turn and finishes at 100
-///   (for the walls the exe also restores the fortification's damage object, vtable +0xC0, not in the model);
+///   (for the walls the exe also restores the walls' damage entry, `0x00576850`, which the model does when it
+///   applies the finished repair, [`super::siege::FortificationDamage::restore`]);
 /// - a demolition (`0x00B781B0`, one turn) finishes as an empty slot.
 pub fn construction_step(_model: &CampaignModel, reg: &Region, item: &ConstructionItem) -> ConstructionStep {
     use super::ConstructionKind::{Build, Demolish, Repair};

@@ -961,7 +961,10 @@ impl<'a> View<'a> {
     /// one flag per region id (the model's `region_test_flags`), id 0 always open; `None` tests
     /// nothing. `None` (no spot: the exe raises no army) when `pos` has no cell
     /// ([`place_flood::cell_of`], `0x00B44740`), when no building footprint (kind 7) of its cell
-    /// holds it, or when no reached polygon passes.
+    /// holds it, or when no reached polygon passes. A position off the map ends in the exe at
+    /// `0x00B53AB0` (no grid holds it) before `0x00B44740` would clamp it; ours clamps a position
+    /// west or south of the grid into its first column or row, where no footprint holds it: no
+    /// spot either way.
     ///
     /// The search runs over cells, each with its own set of reached polygons (CONFIRMED by
     /// disassembly, the addresses below):
@@ -1342,8 +1345,8 @@ mod tests {
         assert_eq!(m.view().free_spot(at(1.0, 1.0), Some(&[false, false, true])), Some(at(4.0, 1.0)));
         let cut = strip(3, |c| [(kind::SHARED, 1), (kind::RIVER, 2), (kind::LAND, 2)][c as usize]);
         assert_eq!(cut.view().free_spot(at(1.0, 1.0), Some(&[false, false, true])), None, "no open polygon reachable: no spot");
-        // West of the map: the first column's cell (`0x00B44740` clamps), whose footprint does not
-        // hold the point, so nothing is reached and there is no spot.
+        // West of the map: the exe finds no grid (`0x00B53AB0`); ours clamps into the first
+        // column's cell, whose footprint does not hold the point: no spot either way.
         assert_eq!(m.view().free_spot(at(-1.0, 1.0), None), None);
     }
 

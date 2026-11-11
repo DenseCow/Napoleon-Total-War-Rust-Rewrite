@@ -109,10 +109,21 @@ pub fn read_region_base_values(root: &EsfRecord) -> BTreeMap<String, i32> {
 /// `CAI_WORLD_REGION_HLCIS[]`, read by `0x00BEDB50`: #1 the connectivity index, #2 the pieces, the
 /// indexes into the map region's areas `0x00C47A00` resolves). A boundary or HLCI naming an unknown
 /// component is left out, and so is an HLCI record that cannot be read (no id, no connectivity index
-/// or no pieces array): each kind is counted in one warning of its own. Empty when the file has no
-/// CAI state.
+/// or no pieces array): each kind is counted in one warning of its own. A `CAI_WORLD_REGIONS[]` item
+/// with no id or no `CAI_REGION` is left out, and a `CAI_REGION` whose #1, #7 or #10 is missing or
+/// of another type is kept with that part empty; each is counted in one warning too. Empty when the
+/// file has no CAI state.
 pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
-    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD") else { return Vec::new() };
+    let (areas, warnings) = read_ai_areas_and_warnings(root);
+    for w in warnings {
+        log::warn!("load: {w}");
+    }
+    areas
+}
+
+/// [`read_ai_areas`], with its warnings returned instead of logged.
+fn read_ai_areas_and_warnings(root: &EsfRecord) -> (Vec<AiArea>, Vec<String>) {
+    let Some(world) = root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAI_INTERFACE/CAI_WORLD") else { return (Vec::new(), Vec::new()) };
     fn class<'a>(item: &'a [EsfNode], name: &str) -> Option<&'a EsfRecord> {
         item.iter().filter_map(EsfNode::as_record).find(|r| r.name == name)
     }
@@ -143,45 +154,58 @@ pub fn read_ai_areas(root: &EsfRecord) -> Vec<AiArea> {
             }
         }
     }
-    let regions: Vec<(u32, &EsfRecord)> = world
-        .record_array("CAI_WORLD_REGIONS")
-        .map_or(&[][..], |a| a.items.as_slice())
-        .iter()
-        .filter_map(|item| Some((id(item)?, class(item, "CAI_REGION")?)))
-        .collect();
+    let items = world.record_array("CAI_WORLD_REGIONS").map_or(&[][..], |a| a.items.as_slice());
+    let regions: Vec<(u32, &EsfRecord)> = items.iter().filter_map(|item| Some((id(item)?, class(item, "CAI_REGION")?))).collect();
+    let no_region = items.len() - regions.len();
     let index: BTreeMap<u32, usize> = regions.iter().enumerate().map(|(i, (id, _))| (*id, i)).collect();
-    let (mut dropped, mut dropped_hlcis) = (0usize, 0usize);
+    let (mut dropped, mut dropped_hlcis, mut malformed) = (0usize, 0usize, 0usize);
     let areas = regions
         .iter()
         .map(|(me, r)| {
+            let (bounds, own_hlcis, key) =
+                (r.get(7).and_then(EsfNode::as_u32_array), r.get(1).and_then(EsfNode::as_u32_array), r.get(10).and_then(EsfNode::as_str));
+            if bounds.is_none() || own_hlcis.is_none() || key.is_none() {
+                malformed += 1;
+            }
             let mut links = Vec::new();
-            for b in r.get(7).and_then(EsfNode::as_u32_array).unwrap_or_default() {
+            for b in bounds.unwrap_or_default() {
                 match boundaries.get(b).and_then(|&(x, y)| index.get(if x == *me { &y } else { &x })) {
                     Some(&i) => links.push(i),
                     None => dropped += 1,
                 }
             }
             let mut own = Vec::new();
-            for h in r.get(1).and_then(EsfNode::as_u32_array).unwrap_or_default() {
+            for h in own_hlcis.unwrap_or_default() {
                 match hlcis.get(h) {
                     Some(h) => own.push(h.clone()),
                     None if unreadable_ids.contains(h) => {}
                     None => dropped_hlcis += 1,
                 }
             }
-            AiArea { key: r.get(10).and_then(EsfNode::as_str).unwrap_or_default().to_string(), links, hlcis: own }
+            AiArea { key: key.unwrap_or_default().to_string(), links, hlcis: own }
         })
         .collect();
+    let mut warnings = Vec::new();
+    if no_region > 0 {
+        warnings.push(format!("{no_region} CAI_WORLD_REGIONS items have no id or no CAI_REGION record; left out"));
+    }
+    if malformed > 0 {
+        warnings.push(format!(
+            "{malformed} CAI_REGION records lack their HLCI ids (#1), boundaries (#7) or key (#10); kept with that part empty"
+        ));
+    }
     if dropped > 0 {
-        log::warn!("load: {dropped} CAI region links name no known boundary or area; left out");
+        warnings.push(format!("{dropped} CAI region links name no known boundary or area; left out"));
     }
     if unreadable > 0 {
-        log::warn!("load: {unreadable} CAI_REGION_HLCI records have no id, no connectivity index or no pieces array; left out, so their regions lack that land mass");
+        warnings.push(format!(
+            "{unreadable} CAI_REGION_HLCI records have no id, no connectivity index or no pieces array; left out, so their regions lack that land mass"
+        ));
     }
     if dropped_hlcis > 0 {
-        log::warn!("load: {dropped_hlcis} CAI region HLCI ids name no HLCI record; left out");
+        warnings.push(format!("{dropped_hlcis} CAI region HLCI ids name no HLCI record; left out"));
     }
-    areas
+    (areas, warnings)
 }
 
 /// The campaign AI's factions in a startpos or save ([`World::ai_factions`](ntw_sim::campaign::World::ai_factions)):
@@ -255,9 +279,42 @@ mod tests {
         let mut regions = EsfRecordArray::new("CAI_WORLD_REGIONS", 1);
         let mut r = EsfRecord::new("CAI_REGION", 1);
         r.children = vec![EsfNode::U32Array(vec![28]), EsfNode::U32Array(vec![36, 37, 35, 38, 99, 39])];
-        r.children.extend((2..10).map(|_| EsfNode::U32(0)));
+        r.children.extend((2..10).map(|i| if i == 7 { EsfNode::U32Array(Vec::new()) } else { EsfNode::U32(0) }));
         r.children.push(s("made_up_region"));
         regions.items.push(item(34, r));
+        let (areas, warnings) = read_ai_areas_and_warnings(&in_cai_world(regions, hlcis));
+        assert_eq!(areas.len(), 1);
+        assert_eq!(areas[0].key, "made_up_region");
+        assert_eq!(
+            areas[0].hlcis,
+            [AiHlci { index: 9, pieces: vec![1, 4] }, AiHlci { index: 2, pieces: vec![0] }, AiHlci { index: 6, pieces: Vec::new() }],
+            "a record with an empty pieces array is read; the unreadable ones and the unknown id are left out"
+        );
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("2 CAI_REGION_HLCI records") && warnings[1].starts_with("1 CAI region HLCI ids"), "{warnings:?}");
+    }
+
+    /// A `CAI_WORLD_REGIONS[]` item with no `CAI_REGION` is left out and a `CAI_REGION` lacking a
+    /// part keeps that part empty, as before, but neither is silent any more (regionvalue review).
+    #[test]
+    fn a_malformed_cai_region_is_reported() {
+        let mut regions = EsfRecordArray::new("CAI_WORLD_REGIONS", 1);
+        // No CAI_REGION record.
+        regions.items.push(vec![EsfNode::U32(40)]);
+        // A CAI_REGION with its HLCI ids and boundaries but no key (#10).
+        let mut r = EsfRecord::new("CAI_REGION", 1);
+        r.children = vec![EsfNode::U32Array(vec![28]), EsfNode::U32Array(Vec::new())];
+        r.children.extend((2..10).map(|i| if i == 7 { EsfNode::U32Array(Vec::new()) } else { EsfNode::U32(0) }));
+        regions.items.push(vec![EsfNode::U32(41), EsfNode::Record(Box::new(r))]);
+        let (areas, warnings) = read_ai_areas_and_warnings(&in_cai_world(regions, EsfRecordArray::new("CAI_WORLD_REGION_HLCIS", 0)));
+        assert_eq!(areas, [AiArea { key: String::new(), links: Vec::new(), hlcis: Vec::new() }]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].starts_with("1 CAI_WORLD_REGIONS items have no id"), "{warnings:?}");
+        assert!(warnings[1].starts_with("1 CAI_REGION records lack"), "{warnings:?}");
+    }
+
+    /// `regions` and `hlcis` in a `CAI_WORLD` at its startpos path.
+    fn in_cai_world(regions: EsfRecordArray, hlcis: EsfRecordArray) -> EsfRecord {
         let mut world = EsfRecord::new("CAI_WORLD", 0);
         world.children = vec![EsfNode::RecordArray(Box::new(regions)), EsfNode::RecordArray(Box::new(hlcis))];
         let mut root = world;
@@ -266,13 +323,6 @@ mod tests {
             up.children = vec![EsfNode::Record(Box::new(root))];
             root = up;
         }
-        let areas = read_ai_areas(&root);
-        assert_eq!(areas.len(), 1);
-        assert_eq!(areas[0].key, "made_up_region");
-        assert_eq!(
-            areas[0].hlcis,
-            [AiHlci { index: 9, pieces: vec![1, 4] }, AiHlci { index: 2, pieces: vec![0] }, AiHlci { index: 6, pieces: Vec::new() }],
-            "a record with an empty pieces array is read; the unreadable ones and the unknown id are left out"
-        );
+        root
     }
 }

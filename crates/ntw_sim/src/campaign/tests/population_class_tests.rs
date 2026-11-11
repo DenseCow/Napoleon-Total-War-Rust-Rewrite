@@ -371,11 +371,11 @@ fn the_projection_runs_the_class_passes_on_its_copy() {
     assert_eq!(m.world.regions[&RegionId(10)].class_bases, projected, "the next round's classes");
 }
 
-/// classfactor: the projection's growth rule is handed the copy with the classes its passes gave, as the
-/// round end's rule finds them stored. A MADE-UP mod growth rule that adds the first class's war factor to
-/// the population sees the lower class's 3 (5 after its two passes), not the region's 5.
+/// classfactor: the projection's growth rule is handed the classes its passes gave, as the round end's rule
+/// finds them stored. A MADE-UP mod growth rule that adds the first class's war factor to the population sees
+/// the lower class's 3 (5 after its two passes), not the region's 5.
 #[test]
-fn the_projections_growth_rule_sees_the_copys_classes() {
+fn the_projections_growth_rule_sees_the_passed_classes() {
     use super::super::mod_state::ModWrites;
     use super::super::population::{project, PopulationState};
     use super::super::seams::{CampaignRuleRegistry, PopulationGrow, POPULATION_GROW};
@@ -388,9 +388,9 @@ fn the_projections_growth_rule_sees_the_copys_classes() {
     assert_eq!(original.classes[0].war, 3);
     let mut reg = CampaignRuleRegistry::default();
     let maker = |prev: Arc<PopulationGrow>| {
-        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, w: &mut ModWrites| {
-            let (grown, state) = prev(m, r, pop, s, w);
-            (grown + r.class_bases[0].war as u32, state)
+        Arc::new(move |m: &CampaignModel, r: &Region, pop: u32, s: &PopulationState, c: &[PopulationClassState], w: &mut ModWrites| {
+            let (grown, state) = prev(m, r, pop, s, c, w);
+            (grown + c[0].war as u32, state)
         }) as Arc<PopulationGrow>
     };
     assert!(reg.population_grow.register(OWNER, Arc::new(maker)));
@@ -457,6 +457,39 @@ fn the_policing_cost_counts_the_owners_classes_under_another_governor() {
     // empty (not B's `upper`), and the lower find names `lower`.
     let (upper, lower) = economy::governed_class_factors(&m, RegionId(10));
     assert_eq!((upper.map(|c| c.class), lower.map(|c| c.class)), (None, Some("lower".to_owned())));
+}
+
+/// A region with no classes takes its default ones from the **owner's** government
+/// (`economy::government_class_bases` on region +0xF4, as the factor pass `0x008EDF70` picks), also where
+/// another faction's governorship lists the region: A's (`middle`, `lower`), not B's (`upper`, `lower`).
+#[test]
+fn a_region_without_classes_takes_the_owners_default_classes_under_another_governor() {
+    let mut m = ranked_model();
+    {
+        let rules = Arc::make_mut(&mut m.rules);
+        rules.government_classes.insert("gov_a".into(), ("middle".into(), "lower".into()));
+        rules.government_classes.insert("gov_b".into(), ("upper".into(), "lower".into()));
+    }
+    m.world.factions.get_mut(&A).unwrap().government_key = "gov_a".into();
+    m.world.factions.get_mut(&B).unwrap().government_key = "gov_b".into();
+    m.world.regions.get_mut(&RegionId(10)).unwrap().class_bases.clear();
+    m.world.faction_details.entry(B).or_default().posts.push(super::details::GovernmentPost {
+        id: 1,
+        key: "governor_europe".into(),
+        holder: None,
+        governorship: Some(super::details::Governorship {
+            taxes: super::details::GovernorshipTaxes { lower: 2, upper: 2, lower_rate: 15, upper_rate: 15 },
+            theatre_id: 1,
+            regions: vec![RegionId(10)],
+            faction: B,
+            flags: (false, false),
+        }),
+    });
+    assert_eq!(m.world.regions[&RegionId(10)].owner, A);
+    assert_eq!(m.world.governing_faction(RegionId(10)), Some(B), "the governorship took");
+    let classes: Vec<(String, bool)> = economy::public_order_factors(&m, RegionId(10)).into_iter().map(|c| (c.class, c.governed)).collect();
+    assert_eq!(classes, [("lower".to_owned(), true), ("middle".to_owned(), true)]);
+    assert_eq!(economy::government_class_bases(&m, A).into_iter().map(|c| c.class).collect::<Vec<_>>(), ["lower", "middle"]);
 }
 
 /// The projection's riot checks draw from their own stream seeded 0x61266 (`0x00A727D0`), on the copy's

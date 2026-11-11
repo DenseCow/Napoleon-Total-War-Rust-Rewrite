@@ -162,6 +162,8 @@ fn every_typed_table_decodes_and_merges_across_two_files() {
     two_files::<ntw_data::effects::TraitLevelEffect>();
     two_files::<ntw_data::effects::TraitAttributeEffect>();
     two_files::<ntw_data::effects::AncillaryAttributeEffect>();
+    two_files::<ntw_data::effects::TraitAbilityEffect>();
+    two_files::<ntw_data::effects::AncillaryAbilityEffect>();
     two_files::<ntw_data::effects::AncillaryEffect>();
     two_files::<ntw_data::effects::MinisterialEffect>();
     two_files::<ntw_data::effects::MinisterialEffectiveness>();

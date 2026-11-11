@@ -64,7 +64,7 @@ fn capitals() -> CampaignModel {
 }
 
 fn field_battle() -> PendingBattle {
-    PendingBattle { attacker: ForceId(1000), defenders: vec![ForceId(1001)], settlement: None, resume: None }
+    PendingBattle { attacker: ForceId(1000), defenders: vec![ForceId(1001)], settlement: None, resume: None, ambush: false }
 }
 
 fn result(attacker_won: bool, codes: (Code, Code)) -> BattleResult {

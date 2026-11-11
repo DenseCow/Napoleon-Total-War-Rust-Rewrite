@@ -162,7 +162,8 @@ impl MapDefinition {
 /// `<name>_diffuse.dds` (CONFIRMED: `detail_maps\cold_l0_diffuse.dds` exists, `cold_l0.dds` does not).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct MapTextures {
-    /// Grass type key, e.g. `Alpine_winter` (INFERRED: a `battleterrain\grass` set).
+    /// Grass type key, e.g. `Alpine_winter`: the grass atlas `battleterrain\grass\<type>.tai`
+    /// (CONFIRMED `0x011D0A10` builds `BattleTerrain/Grass/` + type + `.tai`).
     pub grass_type: String,
     /// The tiled ground texture (`t_detail_colour_map` in the shaders, INFERRED).
     pub tiled_detail_map: String,

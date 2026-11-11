@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use ntw_campaign::own_save::{self, SaveData};
 use ntw_campaign::source::{self, SourceError, Start};
 use ntw_data::GameDatabase;
-use ntw_formats::campaign_map::GameFiles;
+use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::CampaignModel;
 

@@ -411,7 +411,7 @@ pathing / zoc / embark, characters.rs and names), ranked by gameplay impact.
 | 14 | World bookkeeping: new id allocation (world.rs:387, :396), data loaded for the UI (:347), embark link (:358), id step (:365). | low | id allocator (save-compat) |
 | 15 | Others' areas: CAI beliefs (cai_world.rs:20, AI); grid obstacle shapes (grid_obstacle.rs:31, :82, pathing); government type for an unknown key (error.rs:132, world.rs:338); S1 leftovers (details.rs:323). | low | their owners |
 | 16 | Region religion: **conversion ported round 9**; spa looting shift round 10. Left: the spa drift with no source in the only vanilla pair (3 turns). No script or other breakdown writer was found: `0x00A4C9B0` is the population constructor and `0x00AA9C10` only renormalises. Population growth is also left. | low | more spa saves over consecutive turns |
-| 17 | Repairs (round 9, §Capture): **done 2026-10-15** (§Recruitment and construction queues, item types): the repair item's step and its ESF tail are CONFIRMED and modelled. Left: the walls' damage-object restore when a repair finishes (vtable +0xC0). | low | `0x00B78490` |
+| 17 | Repairs (round 9, §Capture): **done 2026-10-15** (§Recruitment and construction queues, item types): the repair item's step and its ESF tail are CONFIRMED and modelled; the walls' damage entry restore when a repair finishes (`0x00576850`) done 2026-11-11 (walldamage). | low | `0x00B78490` |
 | 18 | Fortifications: loaded (round 9), **built, upgraded and repaired round 10** through `FORTIFICATION_SLOT` (slot type `settlement_fortification`, repair cost from the fort branch of `0x00B66410`: round(cost × (1 − strength))). Left: their effects, the save writer (save-compat). No vanilla file has one. | low | — |
 
 ## How the exe holds `campaign_variables` (CONFIRMED)
@@ -643,9 +643,127 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
       0x008FF470 (the call 0x008FF4B7 through 0x00A0B8C0) at the start of every order of the besieging general but
       the settlement order onto the besieged settlement itself (0x0095D140; portblockade2, CONFIRMED by decompile;
       ours `begin_order`); (6) the casualty step 0x008AC010 (0x008AC130) for an army left with no units (ours
-      `remove_force`). PROVISIONAL (untraced callers): 0x008BEB42, 0x00B290B0, 0x008DB7BD (listener 0x008DB7A0),
-      0x008F801B (post-battle placement), 0x00A787C0, 0x00B584ED, 0x00B5881D, 0x00B58BD8, 0x00932794 (the
-      end-siege command), and event 0xDF. Nor the siege start's other callers of 0x00B112F0.
+      `remove_force`); (7) the end-siege command 0x00932760 (the call 0x00932794): `GetCharacterForceAsArmy`
+      0x009D3A40 of the ordered character, passed unchecked; (8) a siege's fall: 0x00B29080 (the call 0x00B290B0,
+      reached only from 0x008C2120) ends every siege of the residence, besieger list front to back; (9) the
+      capture variants' own besieger step (0x00B584ED, 0x00B5881D, 0x00B58BD8, the captor's siege again;
+      0x00B584A0 also sends event 253). 0x00B084F0 re-adds the residence character's path obstacle when
+      0x00B1D100 allows (he is the residence's own and it is no longer besieged); event 0xDF has no listener
+      (sieges 2026-11-10, xrefs). PROVISIONAL (callers whose effect is not run): the revolution's end
+      0x008BEB42 (in 0x008BEAA0), the listener 0x008DB7A0 (0x008DB7BD), the CAI region step 0x00A787C0 (in
+      0x00A787A0) and the post-battle placement 0x008F801B (in 0x008F7880: battle types other than 6 to 9 when
+      0x008CE7B0 fails, the character's army's siege).
+    - **Siege start, assault and fall** (worker sieges 2026-11-10; decompile, CONFIRMED unless tagged).
+      *Start:* the attack order's arrival 0x0094B600 (see "Walk-in" below): with a garrison, or a walk-in
+      that besieges, a settlement another army besieges first (besieger list head not this army) is left
+      alone; else the army lays siege when its siege object +0x94 is null. `LaySiege` 0x008AF6A0 (called at
+      0x0094B94B; `__thiscall`, this = army, the target at stack +0x04, `retn 4`), in order: clears the
+      commander's hidden flag +0x4E0 (`CHARACTER` #22) at 0x008AF6C2; builds the siege object (0x88 bytes,
+      constructor 0x0088A0D0(force, target, 1)) into army +0x94; `inc [commander+0x4D8]` at 0x008AF6FC (#20,
+      offensive sieges; read at 0x00991D4F; script `OffensiveSiegesFought` 0x008A21F0, registered 0x0041C2B0);
+      takes the target's virtual +0x24 (settlement 0x00B3F890: the garrison army's commander, or null) and does
+      `inc [that+0x4D0]` at 0x008AF709 (#18, defensive sieges; read at 0x00991D33; `DefensiveSiegesFought`
+      0x0089EC50, registered 0x0041B090). That dereference is unchecked: UNKNOWN whether it ever meets a target
+      without a garrison (the model raises the defender's count only when there is one). Last, event 0xDD
+      (221) with the commander on the model's notifier +0x9A8 (virtual +8, 0x008AF73C); it has no listener.
+      The constructor sets +0x84 = 0, stores 0x0088A690's result at +0x78 only when its allocation
+      sub_10D3140(108) succeeds, takes the residence character's path obstacle off (0x00B653A0), notifies the
+      model's list +0x3F0 with the siege object (listeners not traced) and calls AddBesieger 0x00B112F0: the
+      first besieger sets +0x108 from virtual +0xB4, +0x10C = 0, +0x110 = 0 and +0x114 = slot +0x2C; every
+      besieger joins the list's end, 0x005301C0(+0xEC) runs, and the model's list +0x2A0 is notified with the
+      force (listeners not traced). The exe never ends an old siege here (it lays one only when +0x94 is null,
+      and the order step has already ended any siege); `start_siege`'s `end_force_siege` call is the model's
+      own guard, which `attack_settlement` never reaches.
+      *Turn start (the fall gate):* the army's turn-start step 0x008F2290 runs 0x008F2F30 when +0x94 is set
+      (from 0x00A24EB0, the force's virtual +0x28 at 0x00A2527E, before 0x0096C140). 0x008F2F30 sets +0x84 = 1
+      (nothing else sets it); 0x008F9160 clears it. Model: `start_siege_turn` in `TurnStep::CharactersStart`
+      (turn.rs) fills `World::siege_turn_started`; saved, although UNKNOWN whether the original saves +0x84.
+      Ported 2026-11-11 (CONFIRMED, seam `siege.wall_damage`, `siege_wall_damage` in siege.rs): 0x008F2F30's
+      wall damage. With L = `GetSettlementFortificationLevel`
+      0x00B3F7C0 (a fort: fort +0x188 + 1), when L > 0 and the turns besieged (+0x10C) % L == 0, slot +0xC0
+      (0x00B42AA0) takes the first `FORTIFICATION_DAMAGE_INFO` entry with kind +0x14 == 0 of its 28-byte list
+      (count +0x148, array +0x14C) into a record (factor 1.0, field 4); with an entry and its hits below 4 the
+      hits rise, the factor drops by 0.1 (clamped 0..1), 0x00B69AF0 writes the record back and the walls
+      building (+0x1C4 → +0x1E0 → +8) gets health (int)(factor × 100) through `SlotBuilding__SetBuildingHealth`
+      0x00B452A0 (which posts `CampaignBuildingDamaged` below 100). The list (residence +0x140: capacity
+      +0x144, count +0x148, data +0x14C) has two adders in a campaign: 0x00AF4FFC in the ESF reader 0x00AF4B00
+      (`FORTIFICATIONS_BLOCK`), and 0x00B143E0, which appends four entries (kinds 0..3, factor 1.0, no hits,
+      no hit points; push_back 0x00B5E310) every time it runs. `StepSlotConstructionItem` 0x00B78800 calls it
+      at 0x00B788CF on the settlement (`0x00B62060(slot) +0xFC`) after any finished item in the walls slot
+      (`IsSettlementFortificationSlot` 0x00A8B580: build, repair or demolition), last, after 0x00A682F0 and
+      0x008CA100(0, 1); its other caller 0x00B457D0 (at 0x00B458B6) is reached only from the startpos
+      preprocessor 0x0090C4A0 (0x00A8A000 ← 0x00A8A350 ← 0x00A89F30 ← 0x00A89FD0). So walls built, repaired
+      or demolished in a campaign take siege damage from then on and cost to repair (0x00B66410). The exe's
+      list grows by four each time; every settlement reader takes the first entry of a kind (0x00B42AA0,
+      0x00B69AF0), so ours appends only the kinds it lacks (`SiegeState::add_default_fortifications`, called
+      from `apply_construction_step` in turn.rs; same results, bounded list; test
+      `a_finished_walls_item_adds_the_default_fortification_entries`). The occupy, loot, post-battle and repair
+      code only reads or overwrites entries. Shipped startpos data (CONFIRMED, ESF parse in the
+      siegesfix review): egy_napoleon has 3 `FORTIFICATIONS_BLOCK` arrays with 4 entries each (file offsets
+      1126776, 1192676, 1256692), ita_napoleon 1 (offset 1535226), mp_ita_napoleon carries the record too;
+      eur, mp_eur, mp_egy, spa and tut are empty. Each entry is a `FORTIFICATION_DAMAGE_INFO` v4 record (an
+      empty sub-array, float 1.0, a u32 0..3, a u32 0): full health, no hits. The residences (CONFIRMED,
+      test `startpos_fortification_damage_loads`): egy_palestine, egy_galilee and egy_north_sinai in egy,
+      ita_mantova in ita and mp_ita. Field map (CONFIRMED, reader 0x00514CC0, writer 0x00523AE0, written v4):
+      `HIT_POINTS_BLOCK` (floats, entry +4 capacity / +8 count / +0xC data), then F32 factor (+0x10), U32
+      kind (+0x14), U32 hits (+0x18). The importer loads the block into `SiegeState::fortifications`
+      (map-neutral), saved (`write_fortifications`; own save format 16, older saves copy the start's).
+      *A fort's wall damage (CONFIRMED, decompile and vtables; closed, not modelled):* the fort's L is its
+      level +0x188 + 1, and its +0xC0 (fort vtable 0x0137D3E4, slot 0x0137D4A4) is 0x00B42A70, not the base
+      residence's always-false 0x00462E90 (vtable 0x0137C8B4): with a non-empty list it copies the first
+      entry of any kind and returns true. 0x008F2F30 then damages and writes back that entry like a
+      settlement's, but sets no building health (`SetBuildingHealth` runs only for a settlement). A fort gets
+      entries only from its ESF record (ESF fort ctor 0x00AEB190, from `ConstructCampaignRegionFromEsf`
+      0x00A45950 at 0x00A466E8, → 0x00AF4B00) or from the preprocessor's built-fort ctor 0x00AEB4A0 (only
+      caller 0x0090C4A0 at 0x0090C8C8; one entry {factor 1.0, kind 4, no hits} at 0x00AEB95B). No shipped
+      startpos has forts (`FORT_ARRAY` empty) and the fort build command 0x009200F0 always fails, so in
+      vanilla no fort is ever damaged. The model's `Fort` (world.rs) has no residence or entries.
+      *Map-fort repair restore (CONFIRMED, decompile; not modelled):* `CCQ_REPAIR_FORT` (executor 0x00937000;
+      the AI's 0x00AA49A0) runs 0x00B4E4C0 (its cost: its line among the treasury charges below), which
+      gates on 0x00B1A6E0, 0x00B16460, the fort level record (`FindFortLevelRecordByIndex` 0x00B42EA0 with
+      +0x188) and the fort's +0xC0 (0x00B42A70) returning an entry, charges the treasury, pushes an item {fort, cost, countdown 1} and notifies the model's +0x300 list
+      (cancel: 0x00932270 → 0x00B1A940). At the faction's turn end
+      0x008BD0F0 calls 0x00B29940 (at 0x008BD25E), which counts down the items of its fort-repair list (count
+      +0x34, data +0x38; its other list, +0x20/+0x24, is not this one) and calls 0x00B01890 on each (0x00B29A68,
+      0x00B29A97): with the countdown (+8) at 0,
+      0x00B01890 restores every entry of the fort's list (0x0047B500 gives fort +0x140; `0x00576850` at
+      0x00B018C2: hit points 0, factor 1.0, no hits), frees the item and returns 1; else it returns 0. So
+      0x00576850's callers are the walls repair 0x00B78490 and this restore. Not modelled, with the fort repair
+      itself.
+      *Post-battle write-back (CONFIRMED, decompile; open, BACKLOG):* 0x008AC8B0 (only caller 0x008F7880 at
+      0x008F7B8A, the post-battle placement) runs when (this+0x70)+0x90 is set: it takes the battle's
+      fortification entry at (this+0xA4)+0x1C and writes it with 0x00B69AF0 onto the target residence (this+0x64,
+      its virtual +8); when the target's settlement (virtual +0x54) has walls (+0x1C4, building at +0x1C4 →
+      +0x1E0 → +8) it calls `SetBuildingHealth` with (int)(factor × 100), unclamped, and leaves the hits as the
+      entry has them. The model does not write back a siege battle's wall damage yet.
+      *Assault:* then, when the step's hold byte +0x5C is clear
+      (the attack command's byte → 0x00916980 → order +0x120) and `CanSiegeAssaultNow` 0x008B26C0 holds
+      (`GetSettlementFortificationLevel` 0x00B3F7C0 < 0, or `ForceHasSiegeUnits` 0x008CE1B0: a unit whose record
+      +0x1A0 is set, `unit_stats_land` #77, or of category artillery, code 1), the assault 0x008E1A90 builds
+      the battle (0x00883680, type from 0x008B5930); only when 0x008DC750(army, residence character) fails
+      does it start the battle and notify the model's list +0x168 (0x008BAE00); the model always raises
+      `PreBattle` (that branch is not traced; BACKLOG "Sieges"). #77 → record +0x1A0: the unit record
+      constructor 0x00E8CFF0 keeps the record in ebp (0x00E8CFF7), passes ebp+0x138 to 0x00E8F1D0
+      (0x00E8D188, call 0x00E8D214), which keeps it in edi (0x00E8F1D6) and copies the row's +0x20C there at
+      +0x68 (0x00E8F358 / 0x00E8F35F): +0x138 + 0x68 = +0x1A0. The assault command 0x009365D0
+      (`CCQ_INITIATE_SIEGE_ASSAULT`, string 0x0135B018, registered by 0x00421B00 at 0x00421B4B; `__cdecl`,
+      plain `retn`) does the same test and assault for a laid siege: 0x0090E430, the byte at the command's
+      +4, 0x008B26C0, 0x008C6450, the siege's +0x7C, 0x008E1A90. It is not an order (no 0x00A645C0), so it
+      stores no rebel view; nor does the end-siege command 0x00932760 (`CCQ_CHARACTER_END_SIEGE`, string
+      0x0135E510, registered by 0x00420080 at 0x004200CB). *Fall:* turn-phase state 0 of 0x0094A940 calls
+      0x008C2120(faction) until it returns 0. 0x008C2120 (`__thiscall`, this = faction, no stack arguments,
+      returns AL) walks the faction's characters (+0x768, count +0x764) in list order for the first army
+      whose siege object has +0x84 set; with none it returns 0. For that army 0x008F9160 clears +0x84 and
+      says it falls when the target has no garrison (virtual +0x1C null) or +0x10C ≥ +0x108 (it also counts
+      calls at +0x64, read nowhere traced); on a fall the target's virtual +0xA0 (0x00B58560) destroys the
+      garrison and takes the settlement with the capture report, 0x00880950 builds the move target (the
+      character, or the residence's), `IssueMoveToResidenceOrder` 0x009549B0 moves the commander in and
+      0x00B29080 ends every siege of it. It returns 1 either way, so each flagged army is asked once per
+      turn start. Whether the siege object has its own save block (and so whether +0x84 and +0x64 are
+      saved) is UNKNOWN: the "SIEGE" string 0x01357908 is used only at 0x008A7DA8 (in 0x008A7D70) and
+      0x0096E462 (in 0x0096E3D0), neither traced. Not ported: the
+      demand-surrender command 0x00932D50 (0x008DC8F0) and the AI's judgement 0x00AAA9D0; the sally (the
+      besieged army's attack on its besieger, battle types 4 / 7).
     - **Model:** `Region::siege` (`SiegeState`: besiegers, surrender turns, turns besieged; ntw_sim campaign/siege.rs),
       read from and written to #2 / #3 / #13 (ntw_campaign world.rs `read_siege`, save.rs `write_region`; every vanilla
       startpos.esf and evidence save has the residence at version 1 with all three fields, so only a corrupt save
@@ -659,10 +777,25 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
       `update_commodity_prices_with(false)` (the prices, `validate_commerce_raids`, the trade income); the
       recruitables rebuild needs no port (recruitables and building effects are derived from the slots when read).
       `RemoveUnitMenPercent`'s men × percent is a 32-bit IMUL that wraps (then unsigned /100),
-      and ours wraps alike. The state hash covers the siege. Forts are not modelled (their residences' sieges are
-      not read). Tests: siege.rs (13), turn_order_tests.rs `ending_a_siege_updates_the_prices_keeping_the_history`,
-      save_compat.rs
-      `siege_state_is_written`; the order: zoc_install.rs `vanilla_save_region_order_is_the_manager_order`. ORIGINAL BUGs: none.
+      and ours wraps alike. The state hash covers the siege. The start, assault and fall: `attack_settlement`
+      (commands.rs, `hold` = `CampaignCommand::BesiegeSettlement`), `start_siege`, `can_assault_now`,
+      `has_siege_units` (`UnitRules::siege_capable` from #77), `assault` (a `PendingBattle` with the settlement),
+      `assault_command` (`AssaultSettlement`), `end_siege_command` (`EndSiege`), `start_siege_turn` (sets
+      `World::siege_turn_started` per besieging army in `TurnStep::CharactersStart`), `siege_falls_at_turn` at
+      the start of `TurnStep::Decide` through the seam `siege.fall` (`siege_falls`; only flagged armies, each
+      flag cleared), `end_all_sieges` (siege.rs). `start_siege` clears the hidden flag and raises
+      `CharacterDetails::offensive_sieges` / `defensive_sieges` (#20 / #18, loaded and written back; script
+      conditions `OffensiveSiegesFought` / `DefensiveSiegesFought` in ntw_script characters.rs). The
+      model refuses an assault or end-siege command with nothing to act on (the exe does nothing, or passes a
+      null army on). INFERRED: an assault with no defenders takes the settlement at once (`settle_capture`); the
+      exe's empty battle is not traced. The besieged readers use `Region::siege`: the recruitables' 0x20 flag,
+      `tradeable_regions`, the director's `transferable_at` and the zones (a besieged garrison is no obstacle,
+      `besieged_garrison`). Forts are not modelled (`World::forts` is empty in every shipped campaign; their
+      residences' sieges are not read). Tests: siege.rs (24), siege_tests.rs (8),
+      capture_diplomacy_tests.rs `a_walk_in_is_besieged_and_taken_with_the_report`, deals_tests.rs
+      `tradeable_regions_leave_out_the_capital`, director.rs `a_region_is_transferable_only_far_from_the_humans`,
+      turn_order_tests.rs `ending_a_siege_updates_the_prices_keeping_the_history`, save_compat.rs
+      `siege_state_is_written`, `siege_counters_are_written`; the order: zoc_install.rs `vanilla_save_region_order_is_the_manager_order`. ORIGINAL BUGs: none.
   - The trade update 0x00BCB020 takes a byte flag: 0 here, 1 at the round end (`PUSH 0x1` at 0x00948E0E before the
     call at 0x00948E19 in 0x00948CF0). Both recompute the factors (first time), the prices #4 and the trends #7 (vs
     #5), then the route builder 0x00BC0960, 0x00B97310 twice and `RecomputeAllInternationalTradeRoutes` 0x00BBD870,
@@ -866,7 +999,7 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
     victory conditions `0x0096FCE0` at `0x0096FFF7`. 34 `campaign_lost` and 35 `campaign_lost_your_faction_destroyed`
     have no poster: every caller of `0x009D3250` (~88) and of `0x009D39A0` was read, none passes 0x22 / 0x23
     (INFERRED unused: names in the table only). The exe never calls `ShowCampaignLostMessage` (scripts only);
-    `InitialiseMoviePanel` is called by the UI's movie queue `0x00998E20`.
+    `InitialiseMoviePanel` is called by the movie-panel constructor `0x00998E20` (below).
   - **Who opens the movie panel** (worker victoryscreen2, 2026-10-20; CONFIRMED by disassembly): `0x00998E20` is the
     constructor (vtable `0x0136DA80`) of the 0x2C movie-panel object, thiscall (lua root, movie event, bink, volume int,
     local-involved byte). It calls the root's `InitialiseMoviePanel` with `bink_control_ptr`, `title` (only when the
@@ -992,8 +1125,8 @@ still runs (both loops walk the whole list). Code: `CampaignModel::takes_turns` 
   player's, a movie not shown to everyone opening only for that player (both CONFIRMED, `0x00A13EA0` and the title
   above; worker victoryscreen2, 2026-10-20). The movie plays once with its sound (CONFIRMED, worker victorytest
   2026-11-10: the panel's open passes option byte +1 = 0 to the bink control's open `0x00D9F600`, which hands
-  it to its player's open (vtable 0x01429D90 +12, `0x01215C10`); the player keeps it at +0x59 (`0x01215D72`),
-  and its update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is
+  it to the open of its movie controller (the Bink player, vtable 0x01429D90 slot +12, `0x01215C10`); the
+  controller keeps it at +0x59 (`0x01215D72`), and its update `0x0124DA70` at the last frame seeks back to frame 1 (vtable +16, `0x0121E110`) when it is
   set and closes the movie (vtable +20) when it is clear, `0x0124DB74`-`0x0124DB85`). Tests: outcome.rs `the_defeat_movie_is_the_last_row_with_the_factions_id`,
   `the_victory_movie_follows_the_government_and_the_culture`,
   `the_victory_movie_takes_a_culture_standing_in_for_the_factions`, `a_destroyed_human_plays_its_defeat_movie`; ntw_campaign
@@ -1271,8 +1404,12 @@ test `religion_gentlemen_war_and_education_in_public_order`).
     character is logged and dropped); `CampaignCommand::AgentEnterSettlement` walks and enters (`may_reside`, the
     room is the moddable `max_residence_characters`, default 20), `leave_garrison` (every walk) leaves; our save
     writes #14 (the source's ids still resident, then new ones) and `CHARACTER` #7; own saves keep `garrisoned_in`.
-    One rule says who is a resident (`World::residence_of`: `garrisoned_in` and in no force, neither commander
-    nor unit rider); the room check, the gentlemen factor, the save writer and the importer all read it. A
+    One rule says who is a resident (`World::resident_region`: `garrisoned_in` and in no force, neither commander
+    nor unit rider, the one list `World::force_characters`); every reader goes through `residence_of`,
+    `settlement_residents` or `settlement_residence_index`, which apply it: the agents and the gentlemen factor
+    through the first, the room check and the battle's residents through the second, the save writer through
+    the index. The importer sets
+    `garrisoned_in` only for a listed character outside `force_characters`, so a loaded resident passes it. A
     command change (General hire 0x00A164C0, admiral hire 0x00A16110, field promotions 0x008E1C20 / 0x008E2260)
     reaches no residence list (0x008CFA70 / 0x00B4EE70; call graphs to depth 3-4): the new commander holds the
     army's place inside and the old one rides on with his unit (`pool.rs` `pass_garrison_on`, CONFIRMED).
@@ -1436,22 +1573,26 @@ eur `auto_nr4_t4`, `auto_after_c8` and `auto_b2b3_0211` 144/144, `auto_nr1` and 
   the walls (+0x24) and road (+0x20) always pass. Model: `change_region_owner` (test
   `an_owner_change_hands_every_slot_over_but_a_port_with_a_navy_docked`); the docked check inherits
   `docked_port`'s PROVISIONAL position test (the occupant, `GetSlotGarrison` `0x00A64440`, and the exe's docked test are BACKLOG items).
-- **Governing faction** (INFERRED, one region): the region's faction part (government, ministers, technologies, tax
-  levels) comes from the faction whose governorship lists the region (`GOVERNORSHIP` #2), normally the owner. The
-  same `eur_bavaria` is still in the dead Bavaria's governorship and shows Bavaria's government and none of Austria's
-  minister effects (`happiness_character` −2 elsewhere in Austria). `World::governing_faction`; on capture the
-  region moves to the new owner's governorship. Only the effect set is the governing faction's (CONFIRMED by
-  decompile, 2026-11-10): the set builder `0x00A67530` takes its faction part from the governorship link (region
-  +0x248, at `0x00A67558`), while every class pick resolves the owner link (region +0xF4): the region class tests
+- **Governing faction**: the region's faction part (government, ministers, technologies, tax levels) comes from
+  the governing faction, normally the owner. CONFIRMED by decompile (2026-11-10): the set builder `0x00A67530`
+  takes its faction part from the region's governorship link (region +0x248, at `0x00A67558`), and only the
+  effect set reads it: every class pick resolves the owner link (region +0xF4): the region class tests
   `0x008CE320` (at `0x008CE32F`) / `0x008CE260`, the per-class factor refresh `0x008EDF70` (at
   `0x008EDF79`–`0x008EDF84`, then the faction tests `0x008CE230` / `0x008CE2F0` with that faction; its gentlemen
   factor at `0x008EE11D`–`0x008EE131` reads the same link) and the panel's active classes `0x00A975F0` (at
-  `0x00A975FF`). So in a region A owns and B's governorship lists, the classes that take factors, are policed
-  (`policing_cost`) and are shown are those of A's government, computed on a set with B's faction part. Ours:
-  `economy::region_effect_set` (governing faction) against `public_order_factors_with`,
-  `region_government_classes` and region_info.rs (owner); tests
-  `the_policing_cost_counts_the_owners_classes_under_another_governor`,
+  `0x00A975FF`; `CampaignRegion::GetActiveGovernmentRecord`). So in a region A owns and
+  B's governorship lists, the classes that take factors, are policed (`policing_cost`) and are shown are those
+  of A's government, computed on a set with B's faction part. Ours: `economy::region_effect_set` and the
+  panel's governorship post (`economy::governing_faction`) against `public_order_factors_with`,
+  `region_government_classes`, the default classes (`government_class_bases` of the owner) and region_info.rs's
+  active classes (owner); tests `the_policing_cost_counts_the_owners_classes_under_another_governor`,
+  `a_region_without_classes_takes_the_owners_default_classes_under_another_governor`,
   `region_info_active_classes_are_the_owners_under_another_governor`.
+  Still INFERRED (one region): that +0x248 is the governorship whose `GOVERNORSHIP` #2 region list names the
+  region (the loader's write of the link is not traced). The same `eur_bavaria` is still in the dead Bavaria's
+  governorship and shows Bavaria's government and none of Austria's minister effects (`happiness_character` −2
+  elsewhere in Austria). `World::governing_faction`; on capture the region moves to the new owner's
+  governorship.
 - **Gentlemen** (CONFIRMED, 2026-10-20): the term is the gentleman's rank `0x00A198D0` (call at `0x008C5698`) and
   his own set's `gentleman_happiness_bonus` (character +0x48C at `0x008C569E`), counted only for the settlement's
   residents (region +0xFC → +0xC8), see round 4 above; the earlier reading (rank 0, the faction's bonus) is withdrawn.
@@ -1726,8 +1867,8 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
     - `0x00B653A0` takes the docked navy's character off the path-grid obstacle layers; the re-add `0x00B084F0`
       (27 callers: the load pass `0x00B0DC10` / `0x00B0DF30`, the lift, the siege end...) floods his zone, stores it
       and adds him only when `0x00B1D100` lets it, which for a docked navy means its port (`0x00A17D20`) has no
-      blockader (+0x68). So the docked navy is no obstacle until the lift. Ours: `navies_docked_in_blockaded_ports`,
-      read by `seen_commanders` (zones.rs); the lift rebuilds the docked commander's zone (`rebuild_zone`). The
+      blockader (+0x68). So the docked navy is no obstacle until the lift. Ours: `docked_in_blockaded_port`, behind the
+      `any_port_blockaded` gate, read by `seen_commanders` (zones.rs); the lift rebuilds the docked commander's zone (`rebuild_zone`). The
       besieged-garrison half of `0x00B1D100` waits for sieges.
     - The +0x58 byte of the naval recruitment manager (slot +0x1E8) is read only by the queue step `0x00B71FB0`,
       which first writes it (`0x00B71FD5`): set when the queue cannot deliver (vt+0x1C: naval `0x00B61E70`, the port
@@ -1801,8 +1942,12 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
        fallback's deletion are not modelled. PROVISIONAL: the winning side record's byte +60 (writer untraced);
     6. the order helper `0x008FF470` with its flag set, at the start of every character order (30 call sites) but
        the settlement order onto the army's own besieged settlement (`0x0095D140`) and the docked navy's attack; it
-       acts on the ordered character's own force (`0x00A0B680` navy → lift; `0x00A0B8C0` army → siege end) before
-       the order is created, so the end stands when the order then fails. The orders built outside the command
+       acts on the ordered character's own force (`0x00A0B680` navy → lift; `0x00A0B8C0` army → siege end) in the
+       order's execute (at its start but for the reinforcement march's, below), so the end stands when the execute then finds no path or no action points. An
+       army's move is refused earlier when it has no path: the command's pre-check `0x00924790` (theatre move
+       `0x009246C0`) stops before `RunCharacterOrder`, so the execute `0x0095DC60` and its helper never run and the
+       siege stays (recruitmarchfix3, see "The pre-checks" below; ours `move_order` asks for the path before
+       `begin_order`). The orders built outside the command
        handlers reach it too (CONFIRMED by decompile): the duel loser's flight `0x00A18460` (→ `0x0094EE20` at
        `0x00A1852B`) and the post-battle retreat `0x00A18550` share the order `0x009069A0` above; the reinforcement
        march `0x00968B00` → `0x009195A0` builds the merge-with-force order `0x00905460` (vtable `0x0135F868`), whose execute
@@ -2310,7 +2455,9 @@ Recomputed for every owned region at the round end (then `tw += growth`, 0x00AB4
       taken = trunc(f32(taken) + f32(volume) × share) per entry (ftol 0x0126E2B0; with integer volumes the order
       does not change the result). Readers: the export split 0x00BC26D0 at 0x00BC2D6C (the exporter's supply), the
       spa_france home term 0x00BB3490 at 0x00BB362F, the route builder 0x00BA0270 (seeds a replaced domestic route
-      from the net volumes) and the UI/log 0x00BC7D80; the uses in 0x00BCB020 at 0x00BCDCBB / 0x00BCE5FA are debug
+      from the net volumes), the UI/log 0x00BC7D80 and the "Trade Commodity Prices" table 0x0093F140 at 0x00941737
+      (a display sum: over the faction's domestic routes whose last waypoint region passes IsRegionCapitalOfOwner at
+      0x00941728, formatted at 0x0094175D; polish78 2026-11-11, CONFIRMED static); the uses in 0x00BCB020 at 0x00BCDCBB / 0x00BCE5FA are debug
       log lines only ("supply_volume", "volume_lost_to_piracy"). The price update's supply S does not read it: it
       sums the fleets' gathering directly (0x00BC9DE0 at 0x00BCBBD3, each navy at its position 0x00A17D50), so S
       is gross. Ours: `raided_volume`, `domestic_net_volumes`; `trade_supply` (split) is net, `price_supply` (price
@@ -2417,8 +2564,9 @@ choice `0x00B541E0` posts `CharacterLootedSettlement` (vtable `0x0137CCB8`, at `
 for choice 2. It tests the campaign key against `spa_napoleon` (`0x00B4F0CC`) and both branches start the same way:
 the event is built on the stack (base `0x00DF2F20`, vtable `0x0137D064`), its payload at +0x10 is the settlement's
 owner (settlement vtable +0x14 `0x00B2B7D0`: region +0xF4), still the capturer since nothing has changed yet, and it
-is posted synchronously (`0x00E30700`) before anything else. Then the capturer's armies are put out of the region
-(`0x008D9DC0(capturer, region)` at `0x00B508C5`), then the owner change `0x00B58A10(target, 0, 1)` (the target's
+is posted synchronously (`0x00E30700`) before anything else. Then the capturer's armies in the region are expelled
+(`0x008D9DC0(capturer, region)` at `0x00B508C5`: they leave the settlement, and since the capturer still owns the
+region they may stay, so each army's first candidate is its own position in the region), then the owner change `0x00B58A10(target, 0, 1)` (the target's
 return inside it), then the new army for the target. So it fires before the owner change, the re-emergence and the
 capture report; a liberation posts no `SettlementOccupied` and no `FactionDestroyed` (the change's first flag is
 clear). The event's vtable has one game accessor, the faction (+0x38 `0x0044A500` returns +0x10; read by the
@@ -2500,8 +2648,11 @@ construction `0x00A6CBE0(0)`; then the two single slots +0x24 / +0x20 (walls / r
   non-NULL, compares that +0x34 with the region's current owner (region +0xF4, `0x006649C0`) at
   `0x00B44A3A`–`0x00B44A67`, never the new-owner argument. Force +0x98 is not the force's faction (that is the
   handle +0x7C the capture variants pass as the new owner) but the army's `REBEL_DATA` (0x74 bytes; set only on
-  a risen rebel army, PATHFINDING.md "REBEL_DATA"; built by `0x00886BA0`, called by the risings `0x00870E60` /
-  `0x008AF5D0`). Its +0x34 is a faction pointer or NULL: `0x00886D30` stores there the rising record's +0x28
+  a risen rebel army, PATHFINDING.md "REBEL_DATA"; built by `0x00886BA0`, called by the force constructor `0x00870E60`
+  when it is given a rising record (its third explicit argument, stack arg_8, tested at `0x00870F55` and passed
+  to `0x00886BA0` at `0x00870F72`; the fourth stack slot is the virtual-base flag) and by `0x008AF5D0`, each
+  storing `0x00886BA0`'s result at force +0x98 (`0x00870F7B` in the constructor); CONFIRMED by disassembly,
+  polish73). Its +0x34 is a faction pointer or NULL: `0x00886D30` stores there the rising record's +0x28
   (`0x00886BA0`'s fifth argument), the save reader `0x00886C90` zeroes it and fills it only when the record's flag
   is set, and when set the rebels take their name from that faction (`0x008C73A0`, a faction method,
   called with it at `0x00886DF6`). When they match it skips `0x00B44AC7`–`0x00B44B7F`
@@ -2606,8 +2757,9 @@ other walk-in, walls or not) the army lays siege (`0x008AF6A0` at `0x0094B94B`, 
 order's +0x5C is clear and `0x008B26C0` holds); with it clear the settlement is taken by `0x00B58890` (vtable +0xA4):
 no report, no choice. Both send code 211 with the character on the world's notifier +0x9A8 (`0x0094B804` /
 `0x0094B885`; no listener traced, not sent). Model: `attack_settlement(.., resumed)` and `walk_in_besieges`
-(commands.rs); the besieged walk-in stays PROVISIONAL (no siege start in the model yet: it takes the settlement as
-the assault does, with the report). Correction (residentsfix, 2026-11-10): the first version read virtual +0x54 as
+(commands.rs); the besieged walk-in lays siege and assaults like any attack (sieges 2026-11-10, "Siege start,
+assault and fall"): behind walls without a siege unit it is only besieged, and the settlement falls at the
+besieger's turn with the report. Correction (residentsfix, 2026-11-10): the first version read virtual +0x54 as
 "walled" and occupied an unwalled settlement without the report; the vtable slot above disproves it. Tests:
 `capture_diplomacy_tests.rs` (`a_walk_in_walled_or_not_...`, `a_rebel_walk_in_...`,
 `the_resume_after_a_battle_keeps_the_report`).
@@ -2728,7 +2880,7 @@ the army's units.
   effects recomputed.
 - occupy `0x00B582E0`: the occupy list's healths only.
 - liberate `0x00B4F090` (`ApplySettlementLiberation`): posts `FactionBecomesLiberationProtectorate` (the liberator),
-  puts the capturer's armies out of the region (`0x008D9DC0` at `0x00B508C5`, CONFIRMED; ours: `expel_from_region(liberator, region)` right after the event, so a capturer without a
+  expels the capturer's armies from the region's settlement (`0x008D9DC0` at `0x00B508C5`, CONFIRMED; ours: `expel_from_region(liberator, region)` right after the event, so a capturer without a
   capital, which the owner change's own expulsion skips, is moved out of the settlement too and stays in the region on the map: the owner is still the liberator at expel time, so it may stay), then `0x00B58A10(target, 0, 1)` → `0x00B449F0` hands the region over; then an army for the target
   (units filtered by `0x00B69BA0` from what the region's `sArmy` / `rHorse` / `tGuns` allow, a named general,
   `0x008D24B0`): not modelled. spa_napoleon has its own branch (guerrilla units).
@@ -2736,8 +2888,11 @@ the army's units.
 **Repairs** (`0x00B66260`, `0x00B66410`, `0x00B1A6B0`, `0x00B16430`): can repair = health < 100, no item in the slot,
 slot held by the owner; cost = round((100 + chain cost mod) × round((100 − health) × level cost × 0.01) × 0.01), the AI
 capped at its treasury; length = max(1, floor((100 − health) × 0.01 × level turns (+0x20))), health per turn =
-(100 − health) / length; the cost is paid at once. A building below 100 health has no effects (`0x00A62380`), so damage
-matters until repaired.
+(100 − health) / length; the cost is paid at once. The walls are the exception (CONFIRMED, `0x00B66410`'s walls
+branch): their base is FISTP(level cost × (1 − factor)) of the settlement's walls damage entry (kind 0), and 0 with
+no entry, whatever the health; the chain modifier then applies as above (model `repair_cost_uncapped`, tests
+`the_walls_repair_cost_follows_the_damage_factor`, `fortifications_are_built_and_repaired`). A building below 100
+health has no effects (`0x00A62380`), so damage matters until repaired.
 
 **Saves:** no vanilla save shows a capture's damage (settlement slots are all at 100 in the 13 vanilla files; the damaged
 buildings there are town and resource buildings — a college, a gentlemen's club, a timber camp at 64–82, sabotage
@@ -2912,8 +3067,8 @@ faction and liberation target.
   - 0x10 when `0x00A91FC0` holds: the slot's faction is not the region's owner. The same test keeps such a slot's
     building effects out (`0x00A62380`).
   - 0x20 when the settlement (region +0xFC) answers its virtual +0x98. The script function `IsUnderSiege`
-    (`0x008A1FF0`, strings `0x01352184` / `0x013521B4`) calls the same virtual. The model has no campaign sieges
-    yet, so this flag is never set (BACKLOG "Sieges on the campaign map").
+    (`0x008A1FF0`, strings `0x01352184` / `0x013521B4`) calls the same virtual. The model reads `Region::siege` (`SiegeState::under_siege`;
+    sieges 2026-11-10, test `a_besieged_settlements_entries_are_flagged`).
   - 0x80 when `0x008AAB60` fails: one of the unit's technologies (unit +0xCC/+0xD0, linked from
     `unit_required_technology_junctions` by `0x00EA9B10`) is not in state 0 (`0x008F3DB0` reads state 5 for one
     the tree lacks). So a unit whose technology is missing is listed and flagged, not left out. Our tech gate was
@@ -3196,8 +3351,10 @@ faction and liberation target.
   - 2 repair (loader `0x00AE6FE0`; made by `0x00AE7010` with +0x18 = (100 − health) / turns in u32 and +0x10 = max(1,
     floor((100 − health) × 0.01 × level turns))): `0x00B78490` raises the health by +0x18 each step that does not
     finish, through `SetBuildingHealth` `0x00B452A0`, which posts `CampaignBuildingDamaged` while it is below 100;
-    the last step sets 100 (no `BuildingCompleted`; for the walls it also restores the fortification's damage
-    object, vtable +0xC0, not modelled). Model: `ConstructionKind::Repair` (test above).
+    the last step sets 100 (no `BuildingCompleted`; for the walls it first restores the settlement's walls damage
+    entry through `0x00576850`: hit points zeroed, factor 1.0, hits 0, the kind kept). Model: `ConstructionKind::Repair`
+    (test above); the walls' restore is `FortificationDamage::restore` in turn.rs (CONFIRMED, test
+    `a_finished_walls_repair_restores_the_damage_entry`).
   - 3 demolish (loader `0x00AE6EB0`; made by `0x00AE6ED0`: one turn, cost 0), queued by `QueueSlotDemolition` `0x00B286C0`
     (the `DemolishBuilding` command): it first cancels the slot's item with its refund, then tests `0x00B16540`
     (not the road, the slot held by the owner, a building standing); an item in the slot does not block it. Its
@@ -3694,9 +3851,10 @@ capital), or comes from a loaded save. The settlement residence (vtable `0x0137C
   and not its east and north ones, so a spot on a land polygon's east or north edge is one raw unit
   inside it, where the `f32` port gave the edge point itself (tests
   `free_spot_on_an_east_edge_is_one_unit_inside`, and the east-edge case of
-  `a_recruit_outside_stands_at_the_nearest_free_spot`); a point west or south of the grid falls in its
-  first column or row (`0x00B44740` clamps), where the `f32` port had no cell (no spot either way: no
-  footprint holds such a point). Where they differed the other way the free-spot port was right:
+  `a_recruit_outside_stands_at_the_nearest_free_spot`); a point off the map ends in the exe at
+  `0x00B53AB0`, which finds no grid holding it, before `0x00B44740` would clamp it into the first
+  column or row; ours has one grid and no such step, so `place_flood::cell_of` clamps a point west or
+  south of it into that cell, whose footprints do not hold it: no spot, the same result. Where they differed the other way the free-spot port was right:
   `0x00B421D0`'s second kind test passes only kinds 0 and 6 for movers 0 and 1, not the run-time kinds
   10 and 11 the flood's mode 0 takes. The early return at a held point is gone (the exe has none;
   the result is the same).
@@ -4008,7 +4166,8 @@ capital), or comes from a loaded save. The settlement residence (vtable `0x0137C
     charges round(level cost × (1 − health)), category 1. Not modelled: our map forts have no health, and no vanilla
     startpos or save holds a fort (the fort UI calls are PLACEHOLDER no-ops, `settlement.rs`). Its cancel
     `0x00B1A940` (CCQ_CANCEL_REPAIR_FORT, executor `0x00932270`) refunds item +4,
-    category 1.
+    category 1. It needs the fort's +0xC0 (`0x00B42A70`, its first fortification entry) to return one; the
+    completed repair restores every entry (`0x00B29940` → `0x00B01890`, see "Sieges", fort wall damage).
   - `0x00B1AAB0` CCQ_CANCEL_UPGRADE_FORT (via `0x008B3680`, executor `0x00932360`): refunds
     (int)(rec +0x24 / rec +0x20 × (rec +0x20 − item +0xC)), through the mover (category 1) when item +0xC is 0, else
     as a credit (category 3). Unreachable in vanilla: the fort upgrade is constant-false.
@@ -4748,7 +4907,15 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
         `0x008B55A0` gives 6 only in its step 1, when fTestTargetFirst is set: the battle with a holding's
         character, `0x0094B600` → `0x008E18D0` at `0x0094B91E` (holding vfunc +0x4C ≠ 0), passes 0, so its
         steps 2..6 give 7, 8 or 9 for a settlement, and `0x008E18D0`'s ctor `0x00883120` keeps the settlement
-        only for types 3, 4, 6, 7, 9, 10, so type 8 never passes. Ours: walled =
+        only for types 3, 4, 6, 7, 9, 10, so type 8 never passes. The zone-entry encounter `0x00A15610` calls
+        `0x008E18D0` with fTestTargetFirst = 1 at both its calls (`0x00A15817`: the hidden zone holder attacks the
+        mover, fAmbush 1; `0x00A15829`: the mover attacks the holder, fAmbush 0). At `0x00A15817` (fHiddenTest
+        1) `0x008E18D0` can return before any battle: when `0x00B4DDF0` rejects the holder's position and
+        `0x00B37370` (radius 10.0) finds no other to place him at, it returns at `0x008E197B`. Otherwise step 1
+        runs there too: two armies with fAmbush give 1 (the hidden case); otherwise a holder in a settlement gives 6 (fortification
+        ≥ 0) or 9, a fort 3, a town 10, all kept by `0x00883120`, and a holder in none falls through to steps 2..6
+        (polish78 2026-11-11, CONFIRMED static).
+        Ours: walled =
         `Region::fortification.is_some()` on the battle's settlement (the model has no sally or relief).
         The walled calls pass `other` = side +0x6C's faction (kind 5) and side +0x68's (kind 4) whoever won;
         kinds 0..5 read `other` only for the rebels test, so this changes nothing.
@@ -4881,13 +5048,15 @@ CONFIRMED from the exe unless tagged; the Ghidra names below are in the program.
       Ours finds the region as the list holding the army, which is the exe's link (classslotsfix, CONFIRMED by
       decompilation): REBEL_DATA +0x68 is a link {+0 army, +4 the region's list +0x220, whose +0 is the region};
       `ResolveObjectHandle` `0x006649C0` gives the region only while +4 is set; +4 is set only by
-      `AppendOwnedLinkToOwnerList` `0x008CF7D0` together with the append (it refuses a link already in a list)
-      and cleared only by `0x008B0150` together with the erase. So the region found always holds the army (its
+      `AppendOwnedLinkToOwnerList` `0x008CF7D0` or `AttachOwnedLinkToOwnerList` `0x008CF6B0`, each together with
+      the append to the owner list's vector (both refuse a link already in a list; polish73, CONFIRMED by
+      decompilation of `0x008CF6B0`), and cleared only by `0x008B0150` together with the erase. So the region found always holds the army (its
       count, `0x006A3110` → +0x22C, is never 0 there) and "at most one" is the army alone. The loader keeps this:
       `0x00A45950` links each id through `0x008CFB60` in region file order (`0x00A4CE20`), so a repeated id stays
       in the first list that names it, once; the importer drops a repeat the same way (`link_risen_armies`, test
       `a_risen_army_is_linked_once`). An army with REBEL_DATA in no list (only a malformed save) gives the exe a
-      null region, read at `0x00A91EB9`; ours does nothing. Not modelled: `0x00A91EB0`'s second step, which with
+      null region: the call at `0x00A91EB9` hands `0x006A3110` the null region's list, whose count read
+      (+0xC of the list, region +0x22C) faults there; ours does nothing, and the load warns once for such an army. Not modelled: `0x00A91EB0`'s second step, which with
       at most one army left and an owner that is not the rebels (`IsFactionWithoutRecord` false at `0x00A91ED8`)
       frees the region's REBEL_DATA template (+0x21C) and zeroes it; the model keeps no template and the save
       rewrites REGION #34 as loaded, so an own save keeps a template the original would have dropped.
@@ -5174,9 +5343,17 @@ gated classes (and `CharacterTurnStart`); the exclusion table has none. So in va
 event; steps 2 and 3 are what a mod's tables change. Ours: `EventGate::admit`, called by `fire_in` (the one place
 an event is handed to Lua), reads both tables through the merged database (`db_folder::tables::TRIGGER_EVENTS`,
 `TRIGGER_EVENT_TO_EXCLUDED_AGENT_TYPES`; keys CONFIRMED as above), compares the agent key with
-`CharacterKind::esf_name`, and logs a refused name once. Tests (`tests/event_gate.rs`):
+`CharacterKind::esf_name`, and logs a refused name once. The exe posts while the character is there (step 3
+reads his +0x1AC then); ours fires after the model step, by when it may have removed him (the agent of
+`CharacterCriticallyFailsAssassination`, a duellist who died, a killed assassination target). So each event
+captures his agent type when the model pushes it (`CampaignEvent::agent_type`), step 3 reads that, and step 1
+refuses only an event with no character, not one whose character the model no longer has (a hand-fired event
+with neither skips step 3, logged once per name). Tests (`tests/event_gate.rs`):
 `a_gated_event_without_a_character_never_reaches_lua`, `a_gated_event_needs_its_trigger_events_row`,
-`an_excluded_agent_type_stops_the_event`.
+`an_excluded_agent_type_stops_the_event`, `a_gated_event_of_a_character_the_model_no_longer_has_reaches_lua`,
+`the_events_of_a_character_their_step_killed_reach_lua_and_keep_their_exclusions`; sim
+`assassination_events_carry_the_agent_type_of_a_character_it_kills`,
+`a_duel_counts_and_the_loser_dies_or_flees`.
 
 **What each class answers.** A `conditions.*` function reads the context through one accessor slot of the event's
 vtable; a class without that object has the null stub `ReturnNull` `0x00461180` there and the condition is false
@@ -5396,8 +5573,8 @@ manager's +0x20 −1 (only while above 0: `test eax,eax; jz` at `0x00B29139`, CO
       nothing to port, and no script listener.
     - The post gate at `0x009D3280`: model +0xD9C is the campaign session (built by `0x00987070` "from
       savegame", used by every real game, or `0x00988B00`, only from the startpos preprocessor `0x00A19350`).
-      Session +0x64/+0x68/+0x6C copy a 12-byte creation-flags struct (byte +0, thread count +4, dword +8);
-      the gate reads its byte. When set it skips every message post and `0x00987070`'s registration call on
+      Session +0x64/+0x68/+0x6C copy a 12-byte creation-flags struct (fields +0, +4, +8; what +0 and +4
+      hold is not traced); the gate reads the low byte of dword +8 (session +0x6C). When set it skips every message post and `0x00987070`'s registration call on
       the game interface (+0x20 vt+0xC). It is never set (CONFIRMED by disassembly 2026-10-22): every
       flags fill writes a literal 0 (`0x0098BBB0`, replay `0x008B8B50`, `0x00A19350`, `0x0047CC70`,
       `0x00482966`/`0x00482A97`, `0x00488B95`, `0x004AB607`/`0x004AB649`, loaded game `0x004865C2`), copies
@@ -5878,7 +6055,7 @@ further here).
   Each faction's `FactionDiplomacyManager` (faction +0x528, 0x24 bytes) holds +0x08 capacity, +0x0C
   count, +0x10 the record vector (stride 0x848, record +0 owner, +4 target). Records are made only:
   - on every campaign a player starts or loads, by `FactionDiplomacyManager::InitializeFromSave` `0x00AE8E10`,
-    appended in file order (inline grow 1, then doubling). A front-end new campaign (`0x00485B90`) reads
+    appended in file order (inline grow 1, then doubling). A new campaign (the game-mode runner `0x00485B90`, its `"campaign"` mode branch) reads
     `startpos.esf` through `0x008B8930` → `0x00987070` → `0x00872550` → `0x0090BEB0` → `0x0087A190` →
     `0x00AE8E10`; a save load reaches the same loader (`0x00AE8E10`'s one caller is `0x0087A190`, whose
     only path is that one through `0x00987070`) (CONFIRMED by xrefs, fixround 2026-10-20);
@@ -6317,8 +6494,8 @@ systems the model lacks stay PROVISIONAL.
   vt+0xC; seas and theatres have none); not under siege (`0x00C3E1E0`: CAI region +0x12C, its +0x34
   interface, vtable `0x01382C20` built by `0x00BEDE70` from the loader `0x00BF0130`, slot +0x94 =
   thunk `0x00C402D0` → [this+0x138] → `0x00A63FD0` (game region +0xFC, the settlement) → settlement
-  vt+0x98, the `IsUnderSiege` slot of `0x008A1FF0` / `0x00C5C040`; never true in ours until sieges
-  exist, BACKLOG "Sieges on the campaign map"); the owner is neither major nor human (`0x00BB51B0`);
+  vt+0x98, the `IsUnderSiege` slot of `0x008A1FF0` / `0x00C5C040`; ours reads `Region::siege`, sieges
+  2026-11-10); the owner is neither major nor human (`0x00BB51B0`);
   no human mobile in the area (`0x00C42DC0`/`0x00C42DD0`, the area's mobiles +0x18C as the loader
   `0x00BECCE0` reads them: the mobiles situated in the area, i.e. whose `CAI_SITUATED` #2 names it,
   `cai_audit mirror_loc`; in the original's save every mobile's #2 is the `regions.esf` region
@@ -7329,7 +7506,8 @@ systems the model lacks stay PROVISIONAL.
     Not modelled: the handler's event 0xBC when either side is human (+0x6E0, at `0x00932CB2`): posted on the
     model's event broadcaster (+0x9C0, vtable `0x0135510C`, `0x008DBAC0`) with the declarer and default position;
     the one listener (sub-object +0xC0 of the object `0x0090AE10` builds, vtable `0x01363C74`, handler
-    `0x009593A0`) acts only when the event faction is its own (+0x174, from its context +0xB0), so only the
+    `0x009593A0`) acts only when the event faction is its own (listener +0xB4 at `0x009593B9`, which is +0x174 of the built
+    object; from its context +0xB0), so only the
     local declarer hears it. 0xBC is a sound: slot 188, `CAMPAIGN_EVENT_WAR_DECLARED` (ntw_formats
     `sound/slots.rs`). The event's name key (+0x0C) is the default key `0x01457CAC`, so the listener plays
     the slot in +0x10 through its +0x74 object, the sound manager (vtable +0x1C; a named key would go to
@@ -7370,8 +7548,7 @@ ORIGINAL BUGs (fixed in ours, no toggle):
 5. `0x00BAEE3F`..`0x00BAEEDA` (XP desire `0x00BAE910`): the same pick loop over the armies. Ours
    gives each army its own weight.
 
-Open (PROVISIONAL in code): the siege test is never true (no sieges in the model; BACKLOG "Sieges on
-the campaign map"); the transfer does not expel the other factions' armies and docked navies
+Open (PROVISIONAL in code): the transfer does not expel the other factions' armies and docked navies
 (`0x00A64AC0` → `0x008D9DC0`, placement `0x008DCB30` untraced; the same for deals and liberation);
 the desires' unmodelled effects above (autoresolver pairs, XP steps, replenish
 allowances and navy half, the transfer's garrison); the teleport desire's effect
@@ -7748,6 +7925,96 @@ resolve was not read; ours leaves such a piece out and counts it in a warning. N
 in the builder, the HLCI loader `0x00BEDB50` (which ESF field lands in `+0x100`), and where a
 tunable the table lacks gets its value.
 
+## Ambush (forcedmarch, 2026-11-11; static trace, CONFIRMED unless tagged; code `ntw_sim::campaign::ambush`, `commands.rs` `walk_planned`, `battles.rs` `battle_type`; tests `tests/ambush_tests.rs`)
+
+**Forced march does not exist in Napoleon.** No string, no CCQ command and no stance names it in
+the exe or the data; the one text hit is the battle script `HB_Lodi_Intro_1`. It came with Shogun 2.
+BACKLOG §5's "forced march" has nothing to port.
+
+**No ambush stance either.** An ambush is a character standing hidden: his byte `+0x4E0`
+(`CharacterDetails::hidden`), set by the stealth test when he is set down. The script condition
+`CharacterEndedInAmbushPosition` (`0x0089C580`) returns that byte.
+
+**The spring.**
+1. After each step of a move (`StepCampaignCharacterMove` `0x00972CA0`, also `0x0096DB30` /
+   `0x0096DE70`), the zone-entry step `0x00B6A270` box-queries the characters within ±50.0 map units
+   of the mover (`0x00BA6440`).
+2. It keeps those with `+0x4E0` set that the mover's faction does not know (`0x008CE880`,
+   `agents::knows_character`).
+3. It tests the mover's point against each one's stored zone (`0x00B13690` on `+0x1C8`,
+   `CampaignModel::in_stored_zone`).
+4. A hit goes to `0x00959EA0`, which asks the encounter once per move per character: anyone already in
+   the tracker's `+124` list of {character, byte} pairs is skipped, whatever his byte. The byte is the
+   encounter's return (0 only when the mover is already in a pending battle), not the spring decision.
+5. The encounter `0x00A15610` (this = the hidden character) goes on only when all of these hold:
+   - both or neither lead an army (`0x009D3A60` / `0x009D3A40`; so an army never meets a navy);
+   - their factions differ and are at war;
+   - his army's residence is not besieged and his navy is not docked in a port a navy blockades;
+   - and the mover is not in a pending battle (`0x008CE780`, returns 0).
+6. The hidden side decides:
+   - a human faction (`+0x6E0`) always springs;
+   - an AI asks `0x00A60F10`: no when either CAI mobile is missing, has no units, or is of a
+     different kind (`0x00C3F4B0`); else the virtual `+200` of an object of the CAI faction-type
+     object (first mobile's virtual `+0xC` → `0x00A87F50` → `+8` (`0x005D6450`) → `+0xDC`
+     (`0x00CE5690`)), called with (mobile 1, mobile 2, 1, 0). UNKNOWN: that object's class and its
+     slot `+200` (the default faction-type constructor `0x00C91890`, vtable `0x0138AEB8`, builds its
+     parts through `0x00CB2980`; which lands at `+0xDC` is not found). The answer then goes through
+     the override list `0x009CB500`.
+7. On yes, a camera call (`0x0095E580` / `0x0095E550`, not modelled). Then the battle setup
+   `0x008E18D0` runs with the hidden character as the attacker, the mover as the target and fAmbush
+   = `+0x4E0` = 1. With fAmbush the setup reads the attacker's `+0x4E0` (`0x008E1910`) before its
+   placement retry; when neither the retry nor the free-spot search places him it returns with no
+   battle. The battle type takes that byte, not the raw fAmbush. The setup clears the attacker's
+   `+0x4E0` at its end.
+8. Two armies then fight a `land_ambush` (type 1, `SelectCampaignBattleType` `0x008B55A0` step 4).
+   Two navies get the naval types whatever fAmbush is.
+
+The same encounter, reached with a visible character (from the interception `0x00959F80` on the
+lists of `0x00B7AD30`), makes the mover the attacker with fAmbush 0. That is the attack of
+opportunity, not ported (BACKLOG §5).
+
+**Ours.**
+- `walk_planned` asks `ambush_on_walk` before the move. The model's walk is one jump, so the planned
+  path is sampled every 0.1 map units (`STEP`, INFERRED: the exe's step length is not traced).
+- The candidates are the hidden enemies: hidden, unknown, at war, of the mover's kind, and not held
+  in place (`hidden_enemies`, `held_in_place`). They are taken in character id order (INFERRED: the
+  box query's order is not traced), each asked once per walk.
+- The first yes stops the walk at that sample. Its action point cost is interpolated along the
+  segment (INFERRED). `spring_ambush` then sets `PendingBattle { ambush: true }` with the hidden
+  side's force attacking and clears his hidden flag.
+- The decision is the `ambush.spring` seam (`ambush::ambush_springs`). A human springs; the AI answer
+  is **PROVISIONAL**, always yes: the CAI decision and the override list are not ported.
+- No ambush springs while any battle is pending, and a standing order's army does not walk then
+  (`reinforce.rs` `resume_standing_orders` keeps the order for the next turn start). The exe issues
+  the turn start's orders without a gate (`0x009653D0` → `0x009651A0`(1, 0, 1) → execute
+  `0x0095BA40`, which does not call `0x008BE360`), but walks movers only in the per-frame
+  `UpdateMovingCampaignCharacters` `0x00973B90`, whose loop at `0x00973C20` steps none while the
+  battle sequence's stage (campaign `+0xF6C`, `+0x54`) is 1 or the pending-action stack `+0xF70` is
+  not empty; they stay on the moving list (CONFIRMED). That a set-up battle holds that gate until it
+  is fought is INFERRED (the write of stage 1 is not traced). PROVISIONAL: the exe's held mover walks
+  on once the battle is fought, in the same turn; ours keeps the order to the next turn start.
+- An AI faction whose turn starts with such a battle pending fights it before it plans (ntw_ai
+  `driver::play_faction` autoresolves it before `take_turn`): the CAI step gate `0x008EFAB0` calls
+  `0x008BE2A0`(faction, 1) at `0x008EFAF9`, which refuses unless the battle sequence's stage
+  (`+0xF6C` `+0x54`) is 0 or 8 and the pending-action stack `+0xF70` is empty (CONFIRMED), so no CAI
+  step comes before the battle (the turn start's other work after the standing orders, `0x00A25310`
+  at `0x008F2C99` and the loop at `0x008F2CD4`-`0x008F2D5F`, is not shown to be CAI-free). That the
+  set-up battle holds the stage is the INFERRED point above. The draw order matters only if the battle
+  and the CAI decisions share a stream; which stream the CAI turn's draws use is PROVISIONAL (ntw_ai
+  `driver` module docs, step 2).
+- Exposure stays at turn start, so a hidden force is not exposed by a force walking near it
+  (CONFIRMED: the exposed list is filled only by `0x008A8B30`, whose callers are the spotting pass
+  `0x008B4B70`, run only at the faction's turn start from `0x008F2480` / `0x008F2620`, and the
+  agent actions assassinate `0x0094ACB0`, force spy `0x0094C500` (also through `0x008D2BE0`),
+  settlement spy `0x0094CCB0` (also through `0x00B54A70`), army sabotage `0x0094DA30` and building
+  sabotage `0x0094DEF0`; each is an ordered agent action, not a walk: agent actions are reached
+  through the tables `0x0136118C` / `0x01361840`, while the move step `0x00972CA0` only ticks the
+  order's vfuncs +0xC / +0x10).
+- The flag is saved with the pending battle (`PendingBattle::ambush`, `serde(default)`: an older save
+  reads an ordinary battle).
+- The placement retry in the setup (`0x00B4DDF0`, a free spot within 10 map units, `0x00B37370`) is
+  not modelled: the hidden side has not moved.
+
 ## Resolved / open
 | question | answer | tag | code |
 |---|---|---|---|
@@ -7774,7 +8041,7 @@ tunable the table lacks gets its value.
 | Autoresolve (land): potentials, pair engagements, statistics, probabilities, winner roll, advantage, wipeout, unit loss rates, reshuffle | above | CONFIRMED (inputs marked INFERRED above: side A = attacker, adv = 0 at query time, range class, `+0x14`/`+0x18`/`+0x3D`) | `campaign::autoresolve`, `battles.rs` |
 | Retreat after a campaign battle | none: the loser stays (aftermath states 1–7 read); the attacker resumes its order (not modelled) | CONFIRMED absence / INFERRED | `battles.rs` |
 | Autoresolve: captives, naval, siege damage | not ported | open / PROVISIONAL | — |
-| Autoresolve star ratings (land and naval) | the battle card rank of every unit with a character, best per side from 0 (signed: ORIGINAL BUG fixed) | CONFIRMED path (`0x007CA330`, `0x0070D740`, `0x0078D9E0`); the rank still lacks the pending-battle bonuses (`rank_original` PROVISIONAL, CHARACTERS_FIDELITY.md §16) | `autoresolve::side_star_rating`, `battles.rs` |
+| Autoresolve star ratings (land and naval) | the battle card rank of every unit with a character, best per side from 0 (signed: ORIGINAL BUG fixed) | CONFIRMED path (`0x007CA330`, `0x0070D740`, `0x0078D9E0`); the rank holds the pending-battle bonuses (CHARACTERS_FIDELITY.md §18) | `autoresolve::side_star_rating`, `battles.rs` |
 | Autoresolve difficulty handicaps | [74]–[79] by the human's campaign difficulty | CONFIRMED formulas; difficulty source INFERRED | `autoresolve::potential`, `ai_loss_factor` |
 | Validation against vanilla saves | eur after 3 turns, spa turn 1 and after 3 turns (round 6) | see the round-6 checks | `economy_check`, `effects_check` |
 | `units` #6 meaning | recruitment time in turns (new item turns = UNIT_RECORD +0x34) | CONFIRMED (round 4) | `UnitRules::turns` |

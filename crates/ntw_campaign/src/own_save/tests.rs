@@ -118,7 +118,7 @@ pub(crate) fn made_up_model() -> CampaignModel {
     w.next_id = 4096;
     let start = Date { year: 1805, season: 1, month: 3, half: HALF_EARLY };
     let mut m = CampaignModel::new(Calendar::new(start, 5), CaRng::new(987_654), w);
-    m.pending_battle = Some(PendingBattle { attacker: ForceId(1), defenders: vec![ForceId(3)], settlement: Some(RegionId(2)), resume: None });
+    m.pending_battle = Some(PendingBattle { attacker: ForceId(1), defenders: vec![ForceId(3)], settlement: Some(RegionId(2)), resume: None, ambush: true });
     m
 }
 
@@ -181,6 +181,28 @@ fn a_made_up_campaign_round_trips() {
     let older = SaveData { camera: None, ..data };
     let loaded = read(&write(&info(), &older).expect("write"), &ntw_data::GameDatabase::test_fixture()).expect("load");
     assert_eq!(loaded.camera, None);
+}
+
+/// The header file read takes only the head (magic, version, length, header) off a reader, not the body;
+/// another file gives `None` and one cut short in its header reads as truncated.
+#[test]
+fn read_head_takes_the_header_without_the_body() {
+    let data = SaveData {
+        human: "made_up_a".into(),
+        model: made_up_model(),
+        rebel_faction: None,
+        script_values: Vec::new(),
+        restricted_units: Vec::new(),
+        camera: None,
+    };
+    let bytes = write(&info(), &data).expect("write");
+    let head = read_head(&mut std::io::Cursor::new(&bytes)).expect("read").expect("an own save");
+    assert!(head.len() < bytes.len() && bytes.starts_with(&head));
+    assert_eq!(read_info(&head).expect("header"), info());
+    assert_eq!(read_head(&mut std::io::Cursor::new(b"ESF not ours")).expect("read"), None);
+    let cut = &head[..head.len() - 1];
+    let short = read_head(&mut std::io::Cursor::new(cut)).expect("read").expect("an own save");
+    assert!(matches!(read_info(&short), Err(FormatError::Truncated)));
 }
 
 /// recruit-gates: the scripts' restricted units moved from the save body into the model
@@ -355,7 +377,8 @@ pub(crate) fn as_version_1(bytes: &[u8]) -> Vec<u8> {
 /// expense trackers (9: `upkeep_booked`, `policing_cost`, `policing_booked`) and the region manager's order (11: `region_order`),
 /// and the stored relation beliefs' ally lists (12: `allies`, the one field a save may lack: a model with no stored
 /// belief has none), the risen armies' sides and the CAI random stream (13: `rebel_army_sides`, `cai_rng`), the regions' stored demand (14: `commodity_demand`)
-/// and the CAI areas' connectivity indexes (15: `hlcis`, which a save with no CAI area lacks too).
+/// and the CAI areas' connectivity indexes (15: `hlcis`, which a save with no CAI area lacks too), the regions'
+/// fortification damage (16: `fortifications`).
 /// A list or map value ends at the `]` / `}` closing its own bracket (the made-up keys hold none; an
 /// `hlcis` item holds a `pieces` list), an
 /// `Option` of a faction id, a number or `cai_rng`'s `(state:…)` at its first `,`, a struct's last field (`,accumulated:`, the leading
@@ -364,6 +387,8 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
     let (_, header, body) = sections(bytes).expect("sections");
     let mut text = String::new();
     flate2::read::ZlibDecoder::new(body).read_to_string(&mut text).expect("inflate");
+    let current: SaveData = ron::from_str(&text).expect("a save of the current format");
+    let (no_beliefs, no_ai_areas) = (current.model.director.beliefs.is_empty(), current.model.world.ai_areas.is_empty());
     // The offset just past the bracket closing the one `value` starts with.
     fn bracket_end(value: &str, close: char) -> usize {
         let open = value.chars().next().expect("an opening bracket");
@@ -380,7 +405,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         }
         panic!("value end");
     }
-    let added: [(u32, &str, char); 18] = [
+    let added: [(u32, &str, char); 19] = [
         (2, "unit_resources:[", ']'),
         (3, "road_holder:", ','),
         (3, "fortification_holder:", ','),
@@ -399,6 +424,7 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         (13, "cai_rng:", ','),
         (14, "commodity_demand:[", ']'),
         (15, "hlcis:[", ']'),
+        (16, "fortifications:[", ']'),
     ];
     for (_, field, end_char) in added.into_iter().filter(|&(v, ..)| v > version) {
         let mut old = String::with_capacity(text.len());
@@ -416,9 +442,9 @@ pub(crate) fn as_version(bytes: &[u8], version: u32) -> Vec<u8> {
         }
         old.push_str(rest);
         // Every field is stripped from something, but for the ally lists of a save with no stored belief
-        // (`DirectorState::beliefs`, the one field so named, written empty as `beliefs:{}`) and the
-        // connectivity indexes of a save with no CAI area (`World::ai_areas`, written as `ai_areas:[]`).
-        let may_lack = (field == "allies:[" && text.contains("beliefs:{}")) || (field == "hlcis:[" && text.contains("ai_areas:[]"));
+        // (`DirectorState::beliefs`) and the connectivity indexes of a save with no CAI area
+        // (`World::ai_areas`), read from the parsed save.
+        let may_lack = (field == "allies:[" && no_beliefs) || (field == "hlcis:[" && no_ai_areas);
         assert!((old.len() < text.len() || may_lack) && !old.contains(field), "no {field} to strip");
         text = old;
     }
@@ -942,7 +968,8 @@ fn region_order_round_trips_the_gains_do_not_and_a_version_10_save_takes_it_from
 /// regions' land masses are built from at map attach (the land masses themselves are not saved). A version-14
 /// save's areas hold none: its load takes them from the start's area of the same key, whatever the start's
 /// order (an area the start lacks keeps none), and loads with none when there is no start. A save with no CAI
-/// area does not read the start (review: such a save loaded with every region on one land mass, silently).
+/// area has no HLCIs to take (review: such a save loaded with every region on one land mass, silently); since
+/// format 16 an older save reads the start for its fortification damage anyway.
 #[test]
 fn area_hlcis_round_trip_and_a_version_14_save_takes_them_from_the_start() {
     use ntw_sim::campaign::{AiArea, AiHlci};
@@ -985,8 +1012,37 @@ fn area_hlcis_round_trip_and_a_version_14_save_takes_them_from_the_start() {
     assert_eq!(links(&bare), links(&model));
     assert!(bare.world.ai_areas.iter().all(|a| a.hlcis.is_empty()));
 
-    let plain = read_with_start(&bytes(&made_up_model(), 14), &db, || panic!("start read for a save with no CAI area")).expect("read").model;
+    let plain = read_with_start(&bytes(&made_up_model(), 14), &db, || Err("no start (format 16 reads it only for the fortification damage)".into())).expect("read").model;
     assert!(plain.world.ai_areas.is_empty());
+}
+
+/// walldamage: format version 16 keeps the regions' fortification damage entries (`SiegeState::fortifications`).
+/// A version-15 save's regions hold none: its load takes them from the start's region of the same key (exact:
+/// nothing changed them before format 16), and loads with none when there is no start.
+#[test]
+fn fortification_damage_round_trips_and_a_version_15_save_takes_it_from_the_start() {
+    use ntw_sim::campaign::FortificationDamage;
+    let db = ntw_data::GameDatabase::test_fixture();
+    let walls = |factor: f32, hits: u32| FortificationDamage { hit_points: vec![0.0, 0.5], factor, kind: 0, hits };
+    let mut model = made_up_model();
+    model.world.regions.get_mut(&RegionId(2)).unwrap().siege.fortifications = vec![walls(0.7, 3), FortificationDamage { kind: 3, ..walls(1.0, 0) }];
+    let bytes = |model: &CampaignModel, version: u32| {
+        let data = SaveData { human: "made_up_a".into(), model: model.clone(), rebel_faction: None, script_values: Vec::new(), restricted_units: Vec::new(), camera: None };
+        as_version(&write(&info(), &data).expect("write"), version)
+    };
+    let fortifications = |m: &CampaignModel| m.world.regions.values().map(|r| r.siege.fortifications.clone()).collect::<Vec<_>>();
+    let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
+    assert_eq!(fortifications(&now), fortifications(&model));
+
+    let old = bytes(&model, 15);
+    let (_, _, stored) = read_stored(&old).expect("stored");
+    assert!(stored.model.world.regions.values().all(|r| r.siege.fortifications.is_empty()), "a version-15 save holds none");
+    let mut start = made_up_model();
+    start.world.regions.get_mut(&RegionId(2)).unwrap().siege.fortifications = vec![walls(1.0, 0)];
+    let from_start = read_with_start(&old, &db, || Ok(start.clone())).expect("read").model;
+    assert_eq!(fortifications(&from_start), fortifications(&start), "taken by key");
+    let bare = read_with_start(&old, &db, || Err("no start".into())).expect("loads without a start").model;
+    assert!(bare.world.regions.values().all(|r| r.siege.fortifications.is_empty()));
 }
 
 /// joinwarrule: format version 12 keeps each stored relation belief's ally list (`RelationBelief::allies`). A
@@ -1012,7 +1068,7 @@ fn stored_beliefs_keep_their_ally_list_and_a_version_11_save_rebuilds_it() {
     assert_eq!(now.director.beliefs, model.director.beliefs);
     let (_, _, stored) = read_stored(&bytes(&model, 11)).expect("read stored");
     assert!(stored.model.director.beliefs[&B].allies.is_empty(), "a version-11 save holds no ally list");
-    let old = read_with_start(&bytes(&model, 11), &db, || panic!("start read for a version-11 save")).expect("read").model;
+    let old = read_with_start(&bytes(&model, 11), &db, || Err("no start (format 16 reads it only for the fortification damage)".into())).expect("read").model;
     assert_eq!(old.director.beliefs, model.director.beliefs, "the ally list rebuilt, the rest kept");
     assert!(believes_allied(&old, B, A));
     // A destroyed since the belief was stored, by B's takeover (`take_over_faction` → `destroy_faction_by`:
@@ -1024,7 +1080,7 @@ fn stored_beliefs_keep_their_ally_list_and_a_version_11_save_rebuilds_it() {
     let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
     assert_eq!(now.director.beliefs[&B].allies, [A], "the stored list kept");
     assert!(believes_allied(&now, B, A));
-    let old = read_with_start(&bytes(&model, 11), &db, || panic!("start read for a version-11 save")).expect("read").model;
+    let old = read_with_start(&bytes(&model, 11), &db, || Err("no start (format 16 reads it only for the fortification damage)".into())).expect("read").model;
     let (kept, rebuilt) = (&model.director.beliefs[&B], &old.director.beliefs[&B]);
     assert!(rebuilt.allies.is_empty(), "the destroyed ally is off the rebuilt list");
     assert_eq!((&rebuilt.relations, &rebuilt.enemies), (&kept.relations, &kept.enemies), "the rest kept");
@@ -1049,7 +1105,7 @@ fn the_stored_demand_round_trips_and_a_version_13_save_builds_it() {
     assert_eq!(now.world.regions[&RegionId(1)].commodity_demand, [3], "the stored demand kept");
     let (_, _, stored) = read_stored(&bytes(13)).expect("read stored");
     assert!(stored.model.world.regions[&RegionId(1)].commodity_demand.is_empty(), "a version-13 save holds no demand");
-    let old = read_with_start(&bytes(13), &db, || panic!("start read for a version-13 save")).expect("read").model;
+    let old = read_with_start(&bytes(13), &db, || Err("no start (format 16 reads it only for the fortification damage)".into())).expect("read").model;
     for r in old.world.regions.values() {
         assert_eq!((r.commodity_demand.len(), &r.commodity_demand), (1, &old.commodity_demand(r)), "built by the demand step");
     }
@@ -1078,18 +1134,6 @@ fn population_classes_keep_their_war_factor_and_older_saves_read_zero() {
     let older: PopulationClassState = ron::from_str("(\"lower\",4,-2)").expect("decode");
     assert_eq!(older, PopulationClassState { education: 4, resistance: -2, ..PopulationClassState::new("lower") });
     assert_eq!(older.cause, 7);
-}
-
-/// classfactor: a class an older own save stored as `(class, education, resistance)` reads with war 0, and
-/// the 4-tuple written now round-trips.
-#[test]
-fn population_class_reads_an_older_three_tuple() {
-    use ntw_sim::campaign::PopulationClassState;
-    let old: PopulationClassState = ron::from_str(r#"("lower", 3, -2)"#).expect("an older class reads");
-    assert_eq!(old, PopulationClassState { education: 3, resistance: -2, ..PopulationClassState::new("lower") });
-    let now = PopulationClassState { war: -7, ..old };
-    let text = ron::to_string(&now).expect("a class writes");
-    assert_eq!(ron::from_str::<PopulationClassState>(&text).expect("a class reads back"), now);
 }
 
 /// A character without a force resident in a settlement (the settlement residence's list +0xC8,
@@ -1188,7 +1232,7 @@ fn the_cai_stream_round_trips_and_a_version_12_save_starts_it_from_the_preset() 
     let now = read_with_start(&bytes(&model, FORMAT_VERSION), &db, || panic!("start read for a current save")).expect("read").model;
     assert_eq!(now.cai_rng, model.cai_rng, "the stepped stream kept");
     assert_eq!(now.world.rebel_army_sides, model.world.rebel_army_sides);
-    let old = read_with_start(&bytes(&model, 12), &db, || panic!("start read for a version-12 save")).expect("a version-12 save loads").model;
+    let old = read_with_start(&bytes(&model, 12), &db, || Err("no start (format 16 reads it only for the fortification damage)".into())).expect("a version-12 save loads").model;
     assert_eq!(old.cai_rng, CaRng::new(CAI_RNG_SEED), "the exe's preset");
     assert!(old.world.rebel_army_sides.is_empty());
     assert_eq!(old.world.regions, now.world.regions, "the rest kept, as a current save loads (the load refreshes the GDP)");

@@ -13,10 +13,9 @@ Run: `cargo run -p napoleon -- --campaign eur_napoleon [--screenshot shot.png]`,
 
 ## 1. Where the files are
 `data\campaign_maps\<map>\` and `data\campaigns\<campaign>\startpos.esf` are **loose files**, not in
-any pack (CONFIRMED: none of the 1,419 loose files in `data\` is also in a pack). `main`'s `Vfs`
-mounts packs only, so the readers go through `campaign_map::GameFiles` = Vfs first, then the loose
-file under `data\`. When a Vfs with loose-file layers lands (parked `work/mod-loading`), the
-fallback simply stops triggering.
+any pack (CONFIRMED: none of the 1,419 loose files in `data\` is also in a pack). The readers take
+a `pack::GameFiles`, a read-only view of the `Vfs`, which mounts the loose files under `data\` as a
+layer of their own next to the packs and mods.
 
 ## 2. Coordinates
 - Logic map units: x east, z north; positions are Fixed20 in the startpos (W3, CONFIRMED).

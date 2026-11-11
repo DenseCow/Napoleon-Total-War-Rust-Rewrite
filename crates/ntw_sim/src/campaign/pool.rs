@@ -766,7 +766,7 @@ impl CampaignModel {
         // A raiding commander's raids pass to him, at the old commander's position (land `0x008E2170` /
         // `0x008E2190`, naval `0x008E2650` / `0x008E2670`).
         self.hand_over_raids_on_command_change(raider, force);
-        Ok(vec![CampaignEvent::CharacterPromoted { character: c }])
+        Ok(vec![CampaignEvent::CharacterPromoted { character: c, agent_type: self.world.agent_type(c) }])
     }
 }
 

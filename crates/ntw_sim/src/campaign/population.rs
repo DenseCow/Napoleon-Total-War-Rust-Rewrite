@@ -781,14 +781,13 @@ pub fn project(model: &CampaignModel, region: RegionId) -> Option<Projection> {
     // end's order; a projection drops the rules' mod-state writes. The copy's classes take the refresh's sums
     // first (`0x00A72990` → `0x00AA9C10` → `0x008EDF70` on the copy), and their riot draws come from a stream
     // of their own ([`PROJECTION_SEED`]), so the projection never moves the campaign's stream. The growth
-    // rule is handed the copy with the passes' classes, as the round end's rule finds them stored
+    // rule is handed the passes' classes, as the round end's rule finds them stored
     // ([`CampaignModel::population_region_round_end`]): the original's growth reads no class, a mod's may.
     let refreshed = refresh_class_sums(model, reg, &own);
     let mut rng = crate::rng::CaRng::new(PROJECTION_SEED);
     let classes = model.rules.seams.population_class_round.rule()(model, reg, &refreshed, &mut rng, &mut ModWrites::default());
-    let mut copy = reg.clone();
-    copy.class_bases.clone_from(&classes);
-    let (population, grown) = model.rules.seams.population_grow.rule()(model, &copy, reg.population, &current, &mut ModWrites::default());
+    let (population, grown) =
+        model.rules.seams.population_grow.rule()(model, reg, reg.population, &current, &classes, &mut ModWrites::default());
     let mut religions = current_religions.clone();
     let flows = model.conversion_flows_for(reg, population, &religions, &set);
     super::religion::apply_conversion(&mut religions, &flows, population);
@@ -840,8 +839,10 @@ pub fn unrest_outcome(model: &mut CampaignModel, region: RegionId) -> Vec<Campai
     let mut events = Vec::new();
     let Some(reg) = model.world.regions.get(&region) else { return events };
     let owner = reg.owner;
-    let classes: Vec<(u32, u32, i32)> = reg.class_bases.iter().map(|c| (c.unrest, c.cause, c.riot_chance)).collect();
-    for (kind, cause, riot_chance) in classes {
+    // By index: a riot changes the population and the slots' buildings, never the classes.
+    for i in 0..reg.class_bases.len() {
+        let Some(c) = model.world.regions.get(&region).and_then(|r| r.class_bases.get(i)) else { break };
+        let (kind, cause, riot_chance) = (c.unrest, c.cause, c.riot_chance);
         if !(1..=UNREST_REBELLION).contains(&kind) {
             continue;
         }
@@ -907,8 +908,11 @@ fn riot(model: &mut CampaignModel, region: RegionId, riot_chance: i32, events: &
         deaths = (pop as f32 - min) as i32;
     }
     r.population = if min + deaths as f32 <= pop as f32 { pop.saturating_sub(deaths.max(0) as u32) } else { min as u32 };
-    let candidates: Vec<usize> = r.slots.iter().enumerate().filter(|(_, s)| s.in_settlement() && s.building.is_some()).map(|(i, _)| i).collect();
-    let hit = (!candidates.is_empty()).then(|| candidates[rng.int_range(0, candidates.len() as i32 - 1) as usize]);
+    let candidate = |s: &&super::RegionSlot| s.in_settlement() && s.building.is_some();
+    let count = r.slots.iter().filter(candidate).count();
+    let hit = (count > 0)
+        .then(|| rng.int_range(0, count as i32 - 1) as usize)
+        .and_then(|nth| r.slots.iter().enumerate().filter(|(_, s)| candidate(s)).nth(nth).map(|(i, _)| i));
     model.rng = rng;
     let deaths = deaths.max(0) as u32;
     let Some(slot) = hit else { return (deaths, None) };
@@ -983,7 +987,8 @@ impl CampaignModel {
         }
         self.mod_state.apply(&mut writes);
         let Some(reg) = self.world.regions.get(&id) else { return };
-        let (pop, state) = self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &mut writes);
+        let (pop, state) =
+            self.rules.seams.population_grow.rule()(self, reg, reg.population, &reg.population_state, &reg.class_bases, &mut writes);
         if let Some(r) = self.world.regions.get_mut(&id) {
             r.population = pop;
             r.population_state = state;

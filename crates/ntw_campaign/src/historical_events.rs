@@ -88,8 +88,8 @@ pub fn rules(db: &GameDatabase) -> HistoricalEventRules {
 /// too. INFERRED: the tables of the other five lists (`cultures`, `factions`, `regions`,
 /// `regions_continents`, `cultures_subcultures`: the tables their keys belong to; the converter's
 /// lookups for them are not written up). Every vanilla member is a key of its table
-/// (ntw_data real_install.rs `historical_event_tables`), so only mod data loses a grouping; each
-/// dropped one is logged once, with its first unknown member.
+/// (ntw_data real_install.rs `historical_event_tables`), so only mod data loses a grouping; the
+/// dropped ones are logged in one warning per build, each with its first unknown member.
 fn groupings(db: &GameDatabase) -> BTreeMap<String, EventGrouping> {
     let t = &db.campaign.events;
     let c = &db.campaign.characters;
@@ -123,11 +123,15 @@ fn groupings(db: &GameDatabase) -> BTreeMap<String, EventGrouping> {
     for j in t.grouping_subcultures.iter() {
         add(&j.grouping, |g| &mut g.subcultures, &j.member, "cultures_subcultures", c.subcultures.get(&j.member).is_some());
     }
+    // Removed (and named) at its first unknown member only; one warning for them all.
+    let mut dropped = Vec::new();
     for (grouping, table, member) in unknown {
-        // Removed (and logged) at its first unknown member only.
         if groupings.remove(&grouping).is_some() {
-            log::warn!("groupings: {grouping} is dropped, as the original drops it: its member {member:?} is not in {table}");
+            dropped.push(format!("{grouping} ({member:?} not in {table})"));
         }
+    }
+    if !dropped.is_empty() {
+        log::warn!("groupings: {} dropped, as the original drops them, for a member not in its table: {}", dropped.len(), dropped.join(", "));
     }
     groupings
 }

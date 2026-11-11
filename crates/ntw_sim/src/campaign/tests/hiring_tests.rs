@@ -352,7 +352,7 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     let young = next(&m, 0);
     let before = m.world.factions[&A].treasury;
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1002), unit: 0 }).unwrap();
-    assert_eq!(ev, vec![CampaignEvent::CharacterPromoted { character: CharacterId(107) }]);
+    assert_eq!(ev, vec![CampaignEvent::CharacterPromoted { character: CharacterId(107), agent_type: Some(CharacterKind::General) }]);
     assert_eq!(m.world.characters[&CharacterId(107)].kind, CharacterKind::General);
     assert_eq!(m.world.forces[&ForceId(1002)].commander, Some(CharacterId(107)));
     assert!(m.world.factions[&A].treasury < before);
@@ -375,7 +375,7 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     let old = next(&m, 1);
     let before = m.world.factions[&A].treasury;
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1005), unit: 0 }).unwrap();
-    assert!(matches!(ev[0], CampaignEvent::CharacterPromoted { character: CharacterId(109) }));
+    assert!(matches!(ev[0], CampaignEvent::CharacterPromoted { character: CharacterId(109), agent_type: Some(CharacterKind::Admiral) }));
     assert_eq!(m.world.characters[&CharacterId(109)].kind, CharacterKind::Admiral);
     assert_eq!(m.world.factions[&A].treasury, before, "a naval promotion is free");
     // An admiral (50) draws from the General old deck (agents #6 of admiral is `General`).
@@ -389,7 +389,7 @@ fn promotion_in_the_field_makes_the_colonel_a_general_and_fires_character_promot
     let young = next(&m, 0);
     let ev = m.apply(CampaignCommand::PromoteUnit { force: ForceId(1004), unit: 0 }).unwrap();
     let new = match ev[0] {
-        CampaignEvent::CharacterPromoted { character } => character,
+        CampaignEvent::CharacterPromoted { character, .. } => character,
         _ => panic!("promoted"),
     };
     assert_eq!(m.world.characters[&new].kind, CharacterKind::General);

@@ -34,15 +34,9 @@ fn character(st: &ScriptState, ctx: &ScriptContext) -> Option<CharacterId> {
     st.model.world.characters.contains_key(&id).then_some(id)
 }
 
-/// The post a character holds, if any.
+/// The post a character holds, if any, by his own record (`CampaignModel::recorded_post`).
 fn post_of(st: &ScriptState, c: CharacterId) -> Option<&ntw_sim::campaign::GovernmentPost> {
-    let w = &st.model.world;
-    let ch = w.characters.get(&c)?;
-    let d = w.character_details.get(&c)?;
-    if d.post == 0 {
-        return None;
-    }
-    w.faction_details.get(&ch.faction)?.posts.iter().find(|p| p.id as u32 == d.post)
+    st.model.recorded_post(c)
 }
 
 /// A character condition (character context), or `None` if `name` is not one of them.
@@ -129,6 +123,10 @@ pub(crate) fn evaluate(st: &ScriptState, name: &str, args: &MultiValue, ctx: &Sc
         // The duel counters (`CHARACTER` #36 / #37).
         "CharacterDuelsLost" => num(d.map_or(0, |d| d.duels_lost as i32)),
         "CharacterDuelsFought" => num(d.map_or(0, |d| (d.duels_lost + d.duels_won) as i32)),
+        // 0x008A21F0 / 0x0089EC50 (CONFIRMED): the character's +0x4D8 / +0x4D0 siege counters
+        // (`CHARACTER` #20 / #18, raised by LaySiege `0x008AF6A0`), 0 without a character.
+        "OffensiveSiegesFought" => num(d.map_or(0, |d| d.offensive_sieges as i32)),
+        "DefensiveSiegesFought" => num(d.map_or(0, |d| d.defensive_sieges as i32)),
         "InSettlement" => is(ch.is_some_and(|ch| ch.garrisoned_in.is_some())),
         // 0x008A22D0: the character's faction is at war with anyone.
         "OnAWarFooting" => is(faction.is_some_and(|f| f.diplomacy.values().any(|s| *s == Stance::War))),

@@ -3,8 +3,46 @@
 use std::collections::BTreeMap;
 
 use ntw_sim::calendar::{Calendar, Date};
-use ntw_sim::campaign::{CampaignModel, Faction, FactionId, GovernmentType, World};
+use ntw_sim::campaign::{CampaignModel, Faction, FactionId, GovernmentType, Region, RegionId, Settlement, World};
+use ntw_sim::fixed::Fixed20;
 use ntw_sim::rng::CaRng;
+
+/// A made-up region `test_region_<id>` of `owner`'s: its settlement at the origin, no walls, no
+/// garrison, made-up numbers. Tests set the fields they need on the result.
+#[allow(dead_code)] // not every test file builds a region
+pub fn region(id: u32, owner: FactionId) -> Region {
+    Region {
+        id: RegionId(id),
+        key: format!("test_region_{id}"),
+        owner,
+        settlement: Settlement { key: format!("settlement:test_region_{id}:town"), position: (Fixed20::from_int(0), Fixed20::from_int(0)) },
+        slots: Vec::new(),
+        road: None,
+        fortification: None,
+        road_holder: None,
+        fortification_holder: None,
+        population: 1000,
+        base_gdp: 100,
+        gdp: 100,
+        wealth_growth_offset: 0,
+        discontent_growth: 0,
+        town_wealth: 0,
+        town_wealth_growth: 0,
+        town_wealth_refresh: Default::default(),
+        commodity_demand: Vec::new(),
+        tax_exempt: false,
+        religions: Vec::new(),
+        class_bases: Vec::new(),
+        unit_resources: Vec::new(),
+        population_state: Default::default(),
+        recruitment_queue: Vec::new(),
+        construction: Vec::new(),
+        garrison: None,
+        fleet: None,
+        siege: Default::default(),
+        traits: Vec::new(),
+    }
+}
 
 /// A made-up model with a few eur_napoleon faction KEYS (names only) and made-up numbers.
 pub fn tiny_model() -> CampaignModel {

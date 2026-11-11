@@ -676,8 +676,8 @@ impl UiScriptHost {
     }
 
     /// The key goes to its newest stealer (`StealShortcutKey`; stealing it again does not make a
-    /// component newer, [`Self::stealer_of`]) that is
-    /// still shown (attached under the top root and visible), whose `OnKey(key, false, true)` runs.
+    /// component newer, `stealer_of`) that is still shown (attached under the top root and
+    /// visible), whose `OnKey(key, false, true)` runs.
     /// INFERRED: root.lua steals ESCAPE and its `OnKey` calls `TransitionBack` only when the third
     /// argument is true; sub-panels such as the options gamma panel steal ESCAPE/RETURN later,
     /// while they are open. Returns `None` when no shown component holds the key, else its

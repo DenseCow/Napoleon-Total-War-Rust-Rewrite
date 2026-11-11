@@ -21,6 +21,7 @@
 //! *virtual* clock, so a tick's RESULT never depends on speed or frame rate (determinism).
 
 mod actions;
+mod camera;
 pub(crate) mod flag;
 pub(crate) mod fx;
 pub(crate) mod fx_draw;
@@ -183,10 +184,11 @@ impl Plugin for BattlePlugin {
                     view::apply_script_camera,
                     markers::sync_markers,
                     markers::sync_defences,
-                    view::move_camera,
                     view::spawn_missing_views,
                     flag::spawn_flags,
                     view::sync_views,
+                    // After the views: a tracking camera follows its unit's view this frame.
+                    view::move_camera,
                     flag::sync_flags,
                     labels::update_labels,
                     view::draw_volleys,

@@ -26,6 +26,31 @@ pub(crate) fn mode_shortcuts(vfs: &Vfs, mode: &str) -> ShortcutMachine {
 /// frame-rate test is on).
 pub(crate) const MAX_FRAME_TIME: f32 = 0.3;
 
+/// A camera bookmark binding of the keys file, the same in the campaign (`0x0095A510`) and the
+/// battle (`0x005EAF00`): `camera_bookmark_save<n>` keeps the view in slot `n`,
+/// `camera_bookmark_view<n>` goes back to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CameraBookmark {
+    Save(usize),
+    View(usize),
+}
+
+impl CameraBookmark {
+    /// The bookmark a func names (CONFIRMED, both handlers): the prefix is 20 characters, and the
+    /// slot is the one character after it (`0x004F47D0`: position 20, length 1) read as leading
+    /// digits (`0x004F37B0`), so a digit gives its value and anything else (nothing, a letter)
+    /// slot 0; `camera_bookmark_save12` is slot 1. Vanilla binds slots 0..3
+    /// (`text/default_keys.xml`: SHIFT + F9..F12 save, F9..F12 view).
+    pub(crate) fn from_binding(func: &str) -> Option<Self> {
+        let slot = |rest: &str| rest.chars().next().and_then(|c| c.to_digit(10)).map_or(0, |d| d as usize);
+        if let Some(rest) = func.strip_prefix("camera_bookmark_save") {
+            Some(Self::Save(slot(rest)))
+        } else {
+            func.strip_prefix("camera_bookmark_view").map(|rest| Self::View(slot(rest)))
+        }
+    }
+}
+
 /// The exe's name of a physical key (CONFIRMED: its key table `0x0139FEC8`, 143 entries of
 /// {code, DirectInput scan code, name}, which the keys file's parser `0x00E20290` searches by
 /// name, case-sensitive). Bevy's `KeyCode` is the physical key, as the exe's DirectInput scan

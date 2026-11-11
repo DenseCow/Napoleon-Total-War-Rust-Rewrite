@@ -6,7 +6,7 @@
 //! The family object (`0x0087D490` loads it) holds ten members of 0x84 bytes: 0 the leader, 1 the
 //! spouse, 2..=5 the leader's children, 6..=9 relatives who can inherit when no child does.
 
-use super::details::Portrait;
+use super::details::{GovernmentPost, Portrait};
 use super::ids::{CharacterId, FactionId};
 use super::portraits::CulturePortraits;
 use super::world::{CampaignModel, GovernmentType};
@@ -512,9 +512,31 @@ impl CampaignModel {
             .collect()
     }
 
-    /// The post a character holds: (faction, post index).
+    /// The post a character holds by the government's own record (`GovernmentPost::holder`), looked
+    /// up in his faction's government: (his faction, post index).
     fn post_of(&self, c: CharacterId) -> Option<(FactionId, usize)> {
-        self.world.faction_details.iter().find_map(|(f, d)| d.posts.iter().position(|p| p.holder == Some(c)).map(|i| (*f, i)))
+        let f = self.world.characters.get(&c)?.faction;
+        let i = self.world.faction_details.get(&f)?.posts.iter().position(|p| p.holder == Some(c))?;
+        Some((f, i))
+    }
+
+    /// The post a character holds by the government's own record ([`Self::post_of`]).
+    pub fn held_post(&self, c: CharacterId) -> Option<&GovernmentPost> {
+        let (f, i) = self.post_of(c)?;
+        self.world.faction_details.get(&f)?.posts.get(i)
+    }
+
+    /// The post a character's own record names (`CharacterDetails::post`, the post id; 0 for none),
+    /// looked up in his faction's government. [`Self::seat`] keeps it equal to [`Self::held_post`];
+    /// the script conditions and the scripted-gain exclusion read this one.
+    pub fn recorded_post(&self, c: CharacterId) -> Option<&GovernmentPost> {
+        let w = &self.world;
+        let f = w.characters.get(&c)?.faction;
+        let id = w.character_details.get(&c)?.post;
+        if id == 0 {
+            return None;
+        }
+        w.faction_details.get(&f)?.posts.iter().find(|p| p.id as u32 == id)
     }
 
     /// Puts `c` into post `post` of `faction` (`0x009CB1E0`).
@@ -826,6 +848,28 @@ mod tests {
         rules.characters.faction_subculture.insert("france".into(), "sc_european".into());
         rules.characters.subculture_culture.insert("sc_european".into(), "european".into());
         m
+    }
+
+    /// A character's post is looked up in his own faction's government, by its holder record
+    /// (`held_post`) or by his own record's post id (`recorded_post`); seating keeps the two equal.
+    #[test]
+    fn a_post_is_found_in_the_holders_own_government() {
+        use super::super::details::{FactionDetails, GovernmentPost};
+        let mut m = royal_model();
+        m.refill_post(FactionId(7), 1);
+        let id = m.world.faction_details[&FactionId(7)].posts[1].holder.expect("a finance minister");
+        assert_eq!(m.held_post(id).map(|p| p.key.as_str()), Some("finance"));
+        assert_eq!(m.recorded_post(id).map(|p| p.key.as_str()), Some("finance"));
+        assert!(!m.spare_ministers(FactionId(7)).contains(&id));
+        // Named holder of another faction's post only: not his post.
+        m.world.faction_details.get_mut(&FactionId(7)).unwrap().posts[1].holder = None;
+        let other = GovernmentPost { id: 2, key: "army".into(), holder: Some(id), governorship: None };
+        m.world.faction_details.insert(FactionId(8), FactionDetails { posts: vec![other], ..Default::default() });
+        assert_eq!(m.held_post(id), None);
+        assert!(m.spare_ministers(FactionId(7)).contains(&id));
+        // A post id of 0 in his record names none.
+        m.world.character_details.get_mut(&id).unwrap().post = 0;
+        assert_eq!(m.recorded_post(id), None);
     }
 
     /// The yearly pass's newborn is resolved at age 0 (`0x008BC9C0` at `0x008BCB31`).

@@ -413,6 +413,8 @@ fn load_campaign(vfs: &Loader) -> Result<crate::campaign::CampaignTables, DataEr
             ancillary: load(vfs)?,
             trait_attribute: load(vfs)?,
             ancillary_attribute: load(vfs)?,
+            trait_ability: load(vfs)?,
+            ancillary_ability: load(vfs)?,
             ministerial: load(vfs)?,
             ministerial_effectiveness: load(vfs)?,
             difficulty: load(vfs)?,

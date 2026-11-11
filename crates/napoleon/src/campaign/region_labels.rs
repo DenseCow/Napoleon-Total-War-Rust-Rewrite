@@ -363,7 +363,7 @@ mod tests {
     #[test]
     fn every_land_region_has_a_label_and_a_name() {
         let Ok(vfs) = Vfs::open_install(crate::config::game_data_dir()) else { return };
-        let files = ntw_formats::campaign_map::GameFiles { vfs: &vfs };
+        let files = ntw_formats::pack::GameFiles { vfs: &vfs };
         let Ok(map) = ntw_formats::campaign_map::CampaignMap::load(&files, "nap_europe") else { return };
         let map = ntw_campaign::source::original_display(&files, map);
         let Ok(loc) = Localisation::from_vfs(&vfs) else { return };

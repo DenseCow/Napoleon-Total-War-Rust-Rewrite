@@ -33,7 +33,9 @@
 //!
 //! Repairs (`0x00B66260`, cost `0x00B66410`, CONFIRMED): a damaged building (health < 100, nothing being built in
 //! its slot) is repaired for `round((100 + cost mod) × round((100 − health) × level cost × 0.01) × 0.01)` over
-//! max(1, floor((100 − health) × 0.01 × level turns)) turns; an AI faction pays at most its treasury.
+//! max(1, floor((100 − health) × 0.01 × level turns)) turns; an AI faction pays at most its treasury. The walls'
+//! base is `round(level cost × (1 − factor))` from their damage entry instead (0 with none; see
+//! [`CampaignModel::repair_cost_uncapped`]).
 
 use super::effects::Effects;
 use super::events::CampaignEvent;
@@ -232,14 +234,20 @@ impl CampaignModel {
         let mut preview = CapturePreview { region, faction, surrender, loot, occupy, liberate: self.liberation_target(region, faction), looter, held: false };
         if self.turn.humans.contains(&faction) {
             for o in [&mut preview.loot, &mut preview.occupy] {
-                let mut m = self.clone();
-                m.apply_outcome(region, faction, o, false);
+                // The option applied to the region alone (without pay, `apply_outcome` changes nothing else),
+                // then the region put back as it was.
+                let Some(kept) = self.world.regions.get(&region).cloned() else { break };
+                self.apply_outcome(region, faction, o, false);
                 // INFERRED: the exe recomputes the copy's classes with the region's effect set adjusted by
                 // `0x00B0D3B0(capturer, region, set)` (not traced) less the damaged buildings' effects; ours reads
-                // the option-applied model's `region_effect_set` (the governing faction's tax bundles), which already
-                // excludes the damaged buildings' effects (`Region::effect_buildings` keeps only full-health ones).
-                let po = super::economy::public_order(&m, region);
+                // the option-applied model's `region_effect_set` (its buildings' effects and the governing
+                // faction's tax bundles), which already excludes the damaged buildings' effects
+                // (`Region::effect_buildings` keeps only full-health ones).
+                let po = super::economy::public_order(self, region);
                 o.public_order_after = Some((po.lower, po.upper));
+                if let Some(r) = self.world.regions.get_mut(&region) {
+                    *r = kept;
+                }
             }
         }
         preview
@@ -253,10 +261,20 @@ impl CampaignModel {
                 b.health = h;
             }
         }
-        // The fortification goes through its damage object (vtable +0xC0 in `0x00B541E0`); the model sets its health
-        // to the rolled value (INFERRED equivalent).
+        // The walls go through their damage entry (loot `0x00B541E0` at `0x00B54214`–`0x00B542F2`, occupy
+        // `0x00B582E0` at `0x00B58316`–`0x00B583D0`; CONFIRMED by decompile): with an entry of kind 0
+        // (`0x00B42AA0`) its factor loses `(100 − rolled health)` hundredths (the u32 difference as f32, times
+        // the f32 0.01), clamped to [0, 1] and written back (`0x00B69AF0`), and the walls' health is
+        // `factor · 100`; with no entry the walls' health is 0.
         if let (Some(h), Some(b)) = (o.fortification, r.fortification.as_mut()) {
-            b.health = h;
+            b.health = match r.siege.walls_damage_mut() {
+                Some(e) => {
+                    let lost = 100u32.wrapping_sub(h) as f32 * 0.01f32;
+                    e.factor = super::siege::clamp_fortification_factor(e.factor - lost);
+                    e.walls_health()
+                }
+                None => 0,
+            };
         }
         r.town_wealth = o.town_wealth;
         if o.public_order_reduction != 0 {
@@ -400,7 +418,7 @@ impl CampaignModel {
                 // (0x008F9EE0 for this event) passes, and that returns 0 when the character getter (+0x1C,
                 // 0x0044A500) is null: no script ever sees a looter-less loot, so ours raises none (CONFIRMED).
                 if let Some(character) = p.looter {
-                    events.push(CampaignEvent::CharacterLootedSettlement { character });
+                    events.push(CampaignEvent::CharacterLootedSettlement { character, agent_type: self.world.agent_type(character) });
                 }
                 p.loot.money
             }
@@ -411,9 +429,13 @@ impl CampaignModel {
             CaptureChoice::Liberate => {
                 let target = p.liberate.expect("checked");
                 // 0x00B4F090 first posts FactionBecomesLiberationProtectorate (0x00B4F0FE / 0x00B5089D)
-                // with the region's owner at that moment, the liberator (CONFIRMED), then puts the
-                // liberator's armies out of the region (0x008D9DC0 at 0x00B508C5, unconditional,
-                // CONFIRMED), then calls 0x00B58A10(target, 0, 1): the liberated faction comes back if
+                // with the region's owner at that moment, the liberator (CONFIRMED). Ours reads that
+                // owner here, when the choice is applied, not `p.faction`: the exe's capture screen is
+                // modal, so there the owner is still the capturer, while ours lets a human's choice wait
+                // (`pending_capture`), so the owner is whoever holds the region when it is answered.
+                // Then it expels the liberator's armies from the region's settlement (0x008D9DC0 at
+                // 0x00B508C5, unconditional, CONFIRMED; the liberator still owns the region, so they
+                // may stay in it on the map), then calls 0x00B58A10(target, 0, 1): the liberated faction comes back if
                 // it was out of the game, then the region passes to it through the shared owner change
                 // (`liberate_region` → `transfer_region`), which expels the other factions' armies
                 // again (0x00A64AC0 with its fourth argument 0 → 0x008D9DC0,
@@ -466,15 +488,14 @@ impl CampaignModel {
         let Some(rules) = self.rules.buildings.get(&b.level_key) else { return 0 };
         use super::commands::{building_cost, fistp, unsigned_f32};
         // All f32 (SSE) with the ints read unsigned, each step rounded by FISTP (CONFIRMED, `0x00B66410`).
-        // A fortification (`0x00A8B580`): FISTP(cost × (1.0 − strength)) from its damage object; the model keeps its
-        // strength as the health (INFERRED equivalent: strength = health × 0.01, without the damage object's own
-        // percent rounding).
+        // The walls (`IsSettlementFortificationSlot` `0x00A8B580`): FISTP(cost × (1.0 − factor)) from the walls'
+        // damage entry (`0x00B42AA0`), and 0 with no entry, whatever the health (CONFIRMED, `0x00B66410`).
         // Health is unsigned in the exe (+0x18) as here. Above 100 the base goes negative and the last step reads it
         // unsigned (about 4.29e9): the result is 0x80000000 unless the modifier is about −50 or below, which brings
         // the product back into range (a large finite cost), as in the exe. No repair starts there (`0x00B1A6B0`:
         // health < 100).
         let base = if slot == SlotRef::Walls {
-            fistp(unsigned_f32(rules.cost) * (1.0 - b.health as f32 * 0.01))
+            r.siege.walls_damage().map_or(0, |e| fistp(unsigned_f32(rules.cost) * (1.0 - e.factor)))
         } else {
             fistp((100.0 - b.health as f32) * unsigned_f32(rules.cost) * 0.01)
         };

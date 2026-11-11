@@ -29,13 +29,14 @@ use ntw_sim::battle::victory;
 use super::{BattlePhase, BattleSim};
 use crate::GameMode;
 use crate::data::GameData;
-use crate::frontend::render::{UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_virtual_screen, window_to_ui};
+use crate::frontend::render::{DrawnFor, UiAssets, UiSprite, spawn_world, ui_rect_to_window, ui_scale, ui_virtual_screen, window_to_ui};
 
 /// The HUD's script host and pointer state. Non-`Send` (Lua).
 pub struct BattleHud {
     host: UiScriptHost,
     screen: Vec2,
-    drawn_generation: u64,
+    /// What the sprites were last drawn for.
+    drawn: DrawnFor,
     hovered: Option<NodeId>,
     pressed: Option<NodeId>,
     /// The UI frame clock (ms, [`advance_ui_clock`]): what the root's `OnUpdatePulse` gets and
@@ -166,7 +167,7 @@ pub fn enter(world: &mut World) {
     let mut hud = BattleHud {
         host,
         screen,
-        drawn_generation: u64::MAX,
+        drawn: DrawnFor::NOTHING,
         hovered: None,
         pressed: None,
         clock_ms: 0,
@@ -416,6 +417,7 @@ pub fn frame(
     mut sounds: MessageWriter<crate::audio::UiSound>,
     mut music: MessageWriter<crate::audio::SetMusic>,
     mut next: ResMut<NextState<GameMode>>,
+    mut cams: Query<&mut super::camera::BattleCamera>,
 ) {
     let (Some(mut hud), Some(mut sim), Ok(window)) = (hud, sim, window.single()) else { return };
     let size = Vec2::new(window.width(), window.height());
@@ -527,6 +529,15 @@ pub fn frame(
         Vec::new()
     });
     for r in requests {
+        if let BattleUiRequest::SelectionProxy { id, on } = r {
+            // The camera manager's track target (`SetTrackTarget` 0x005F9B70). Served only while
+            // the battle UI runs, as the exe's `+0x9CD` gate; the context camera's subject and
+            // the entity flag it also sets are not ported (`BattleCamera::set_track_target`).
+            for mut cam in &mut cams {
+                cam.set_track_target(id, on);
+            }
+            continue;
+        }
         apply(&mut hud, &mut sim, r, &mut next);
     }
 }
@@ -608,6 +619,8 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
             }
         }
         BattleUiRequest::ZoomTo(_) => {}
+        // Handled by `frame`, which has the camera.
+        BattleUiRequest::SelectionProxy { .. } => {}
     }
 }
 
@@ -683,7 +696,8 @@ fn order(sim: &mut BattleSim, name: &str, arg: Option<bool>) {
     }
 }
 
-/// Rebuilds the HUD sprites when the UI tree changed, and records the panel rectangles.
+/// Rebuilds the HUD sprites when the UI tree or the window size changed ([`DrawnFor`]), and
+/// records the panel rectangles.
 pub fn redraw(
     mut commands: Commands,
     hud: Option<NonSendMut<BattleHud>>,
@@ -697,7 +711,7 @@ pub fn redraw(
     }
     let (Some(mut hud), Some(mut assets)) = (hud, assets) else { return };
     let generation = hud.host.world().generation;
-    if generation == hud.drawn_generation {
+    if !hud.drawn.stale(generation, hud.screen) {
         return;
     }
     for e in &sprites {
@@ -715,7 +729,7 @@ pub fn redraw(
         drop(world);
         hud.panels = panels;
     }
-    hud.drawn_generation = generation;
+    hud.drawn = DrawnFor { generation, screen: hud.screen };
 }
 
 /// Leaving the battle: drop the HUD.

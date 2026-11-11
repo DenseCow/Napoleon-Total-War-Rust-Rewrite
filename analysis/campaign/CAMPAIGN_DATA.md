@@ -65,7 +65,10 @@ root v0
   polygons: this is the original's walkable map.
 - **Flags** (word 0): low 3 bits, by where they lie when rendered: 0 land, 1 water (sea; 17 too), 2 off-map, 3 river strips (PATHFINDING.md §5)
   (only with id 1023), 6 road (the ~0.3-unit strips along every road, and the octagon round every
-  settlement), 7 road over water (INFERRED bridge/ford). INFERRED. Bits 4..23 (incl. the high nibble of byte 0: 16 interior
+  settlement), 7 building footprints (settlements and ports; CONFIRMED by the data, PATHFINDING_PORTS.md §9.2: every
+  settlement lies on kind 7 and kind 7 never joins two land areas, so not the "road over water / bridge" first
+  read; the ports: §7's data check `embark_campaign.rs`, each port a kind 7 group of 2 to 4 polygons, and §8,
+  every port slot of the 4 maps within 0.8 units of its kind 7 polygon's point). The other kinds INFERRED. Bits 4..23 (incl. the high nibble of byte 0: 16 interior
   land, 32/64/128/0 next to roads): INFERRED per-side segment masks used by the adjacency test (PATHFINDING.md §3); bits 24..31 = a per-direction "reaches that neighbour" mask (CONFIRMED by the data, PATHFINDING.md §3). Rivers are not obstacles in this
   data (no blocking strips along the river splines).
 - **Cell header u8[8] = the per-direction movement cost bytes** (CONFIRMED in the path search, PATHFINDING.md §2: byte d is the cost of leaving the cell in direction d = 0 E, 1 NW, 2 N, 3 NE, 4 SW, 5 S, 6 SE, 7 W; multiplier = byte · 0.00995 + 0.796). Earlier notes (s1-open worker, see §11): the exe keeps it unchanged in the 16-byte run-time cell
@@ -365,7 +368,8 @@ Ghidra on the main project (read-only), tooling `analysis/graphics/run_ghidra.ps
   `HLP_DISTANCE_MULTIPLIER_*`) are a separate high-level region graph.
 - **Polygon kind = the low 4 bits of the boundary flags** (CONFIRMED: the getter `0x00B77EC0` returns `flags & 0xF`;
   every rule below compares that value). Kinds in the data (all 5 maps): 0 land, 1 sea, 2 and 3 off-map, 4 and 5 (rare:
-  73 / 71 polygons on Europe and the tutorial; meaning UNKNOWN), 6 road, 7 road over water (INFERRED bridge/ford). Kinds
+  73 / 71 polygons on Europe and the tutorial; meaning UNKNOWN), 6 road, 7 building footprints (PATHFINDING_PORTS.md
+  §9.2). Kinds
   8..11 appear only in the code (INFERRED run-time polygons). The high nibble (16..128) is not part of the kind.
 - **A cell flood search found** (`0x00B39FE0`, 7 callers incl. army code at `0x008ECAD0`/`0x008ECE20`; siblings
   `0x00B322F0`, `0x00B34010`, `0x00B35640`, `0x00B3B4B0`, `0x00B3D180` share its heap helpers `0x00AC1B50`/`0x00AF8620`):
@@ -373,15 +377,15 @@ Ghidra on the main project (read-only), tooling `analysis/graphics/run_ghidra.ps
   per-polygon reachable flags, mover type}; closed set = hash of the packed (col, row) xor 0x4A545EED; it expands the 8
   neighbours of each cell; a node's priority (`0x00AF0910`) is minus the smallest signed distance from the query point to
   the cell's four edges (so cells are visited nearest first). `0x00B39FE0` itself has no distance limit or early exit:
-  it starts from the kind-7 polygons (building footprints, PATHFINDING_PORTS.md §9.2, which supersedes the "road over
-  water" reading above) that hold the point, crosses to a neighbour cell only from a reached kind-7 polygon, and keeps
+  it starts from the kind-7 polygons (building footprints, PATHFINDING_PORTS.md §9.2) that hold the point, crosses to a neighbour cell only from a reached kind-7 polygon, and keeps
   the strictly nearest point of a reached land or road polygon (allygarrisonfix; the full trace and our port for mover 0
   are in CAMPAIGN_FIDELITY.md "The free spot"; the other callers and movers are not ported). It is not the action-point
   path itself.
 - **Which polygon kinds each mover type may enter** (CONFIRMED table in `0x00AF0910`; the mover type is the node's
-  +0x20 value, its meaning UNKNOWN): types 0, 3, 6, 9: kinds 0, 6, 7 (land, road, bridge); types 1, 4, 7, 10: kinds 0, 6, 7,
-  8; types 5, 8, 11 and the others: kinds 1, 4, 7 (sea, kind 4, bridge/ford). Kinds 10 and 11 pass for every type. A
-  polygon of an allowed kind counts as reachable only if it touches the current one (`0x00B16800`, edge test). INFERRED:
-  armies use the land set, fleets the sea set; kind 7 is shared, i.e. both can cross at bridges/fords.
+  +0x20 value, its meaning UNKNOWN): types 0, 3, 6, 9: kinds 0, 6, 7 (land, road, footprint); types 1, 4, 7, 10: kinds 0, 6,
+  7, 8; types 5, 8, 11 and the others: kinds 1, 4, 7 (sea, kind 4, footprint). Kinds 10 and 11 pass for every type. A
+  polygon of an allowed kind counts as reachable only if it touches the current one (`0x00B16800`, edge test). Armies
+  use the land set, fleets the sea set (CONFIRMED, PATHFINDING_PORTS.md §9.2); kind 7 is shared: both reach a
+  settlement's or port's footprint, which a family-A mover walks round (§9.2).
 - Our `ntw_campaign::pathing` already treats land + road + kind 7 as passable for armies and sea for fleets, so the kind
   rules agree; the cost along the path (roads, `road_level_*`) and the funnel are still UNKNOWN and stay PROVISIONAL.

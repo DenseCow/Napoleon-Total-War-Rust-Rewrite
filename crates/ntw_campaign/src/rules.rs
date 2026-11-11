@@ -57,6 +57,7 @@ pub fn rules_from_db(db: &GameDatabase, campaign: &str) -> CampaignRules {
                 flag_21: u.unknown_9c,
                 militia: stats.is_some_and(|s| s.unknown_205),
                 campaign_stealth: stats.is_some_and(|s| s.unknown_204),
+                siege_capable: stats.is_some_and(|s| s.unknown_20c),
                 unit_cap: u.unit_cap,
                 travel_speed: u.unknown_44,
                 unit_resource: u.recruitment_scope.clone().filter(|s| !s.is_empty()),
@@ -530,6 +531,16 @@ pub fn effect_rules_from_db(db: &GameDatabase) -> ntw_sim::campaign::effects::Ef
     for a in &t.ancillary_attribute {
         r.ancillary_attribute.entry(a.ancillary.clone()).or_default().push((a.attribute.clone(), a.value));
     }
+    for a in &t.trait_ability {
+        if ability_effect_applies(c, "trait_ability_effects", &a.level_key, &a.ability) {
+            r.trait_ability.entry(a.level_key.clone()).or_default().push((a.ability.clone(), a.value));
+        }
+    }
+    for a in &t.ancillary_ability {
+        if ability_effect_applies(c, "ancillary_to_ability_effects", &a.ancillary, &a.ability) {
+            r.ancillary_ability.entry(a.ancillary.clone()).or_default().push((a.ability.clone(), a.value));
+        }
+    }
     for l in &t.trait_levels {
         r.trait_levels.entry(l.trait_key.clone()).or_default().push((l.threshold, l.level, l.level_key.clone()));
     }
@@ -540,6 +551,25 @@ pub fn effect_rules_from_db(db: &GameDatabase) -> ntw_sim::campaign::effects::Ef
         r.ministerial_effectiveness.insert((m.government.clone(), m.value), m.modifier);
     }
     r
+}
+
+/// Whether an ability effect row of `table` (source `row`) can move an ability level: its ability must
+/// be a key of the merged `abilities` table and one of the 12 ability slots
+/// ([`ntw_sim::campaign::agents::ABILITIES`]). The trait rows' binder (`0x00F21510`, CONFIRMED) looks
+/// the key up in `abilities` (logging the invalid key) and then skips a row whose slot index
+/// (`0x00F9C230`) is 12, "none of the twelve". ORIGINAL BUG: on a key missing from `abilities` it then
+/// reads the null record's +0x14 and crashes at load; ours logs and drops the row. The ancillary rows'
+/// binder is not traced; ours drops the same rows there, since a 13th slot would be past the twelve.
+fn ability_effect_applies(c: &ntw_data::campaign::CampaignTables, table: &str, row: &str, ability: &str) -> bool {
+    if !c.abilities.iter().any(|a| a.key == ability) {
+        invalid_key(table, row, "abilities", ability);
+        return false;
+    }
+    if !ntw_sim::campaign::agents::ABILITIES.contains(&ability) {
+        log::warn!("{table}: the ability {ability:?} (row of {row}) has no ability slot; the row is not used");
+        return false;
+    }
+    true
 }
 
 /// Groups `rows` by their source `key` (each group in table order) and compiles each group into `r`

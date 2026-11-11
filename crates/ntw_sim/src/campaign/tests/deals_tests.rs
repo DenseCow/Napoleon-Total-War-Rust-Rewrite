@@ -144,6 +144,9 @@ fn tradeable_regions_leave_out_the_capital() {
     m.world.note_region_gain(listed[0]);
     listed.rotate_left(1);
     assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), listed, "a gain goes last");
+    // A settlement under siege is left out (settlement virtual +0x98, the region's siege state).
+    m.world.regions.get_mut(&listed[0]).unwrap().siege.besiegers.push(ForceId(1001));
+    assert_eq!(m.tradeable_regions(A).collect::<Vec<_>>(), listed[1..], "under siege");
 }
 
 /// The deal's region and technology records (UI_FIDELITY.md §4.9): `ProposeRegions` replaces the

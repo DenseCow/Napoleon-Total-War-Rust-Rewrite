@@ -166,8 +166,12 @@ db_record! {
         agent: String,
         /// #2 the starting level.
         level: i32,
-        /// #3 UNKNOWN (1 on most rows; 0 on `morale_land` / `movement_points_land` for General and on
-        /// every level-0 row, yet those characters still start at the row's level).
+        /// #3 a flag with no effect on the levels (CONFIRMED: the agent record builder `0x00F9CB80` keeps
+        /// it as the byte after the row's level, record +0x54 + 0xC·i, and neither the maker
+        /// `0x00992E60` nor the promotion `0x00A1A300` reads it, so a character starts at the row's
+        /// level either way). Its use, if any, is UNKNOWN: no reader found (CHARACTERS_FIDELITY §19).
+        /// 1 on most rows; 0 on `morale_land` / `movement_points_land` for General and on every
+        /// level-0 row.
         flag: bool,
     }
 }
