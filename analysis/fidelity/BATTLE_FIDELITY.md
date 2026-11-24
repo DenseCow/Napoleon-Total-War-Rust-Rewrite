@@ -1027,12 +1027,13 @@ index (`battle:buildings():item(2)` = the town hall). Now:
 - `battle:buildings()` = the map's near building list in file order (INFERRED, Lodi: item 2 `south_euro_townhall`,
   item 52 `south_euro_farmhouse` as the script names them); buildings have `name`, `position`, `health` (100,
   PROVISIONAL), `is_garrisoned` / `currently_garrisoned` (false). Probe: `ntw_formats --example building_order_probe`.
-- `camera:move_to(target, position, seconds)` moves our battle camera (applied at once; the argument order is INFERRED
-  from the scripts' variable names; `NAPOLEON_BATTLE_CAMERA` overrides). `camera:position()/target()` return the last
+- `camera:move_to(target, position, seconds)` glides our battle camera there (§59.7; argument order CONFIRMED;
+  `NAPOLEON_BATTLE_CAMERA` overrides). `camera:position()/target()` return the last
   view the scripts set, else the battle file's start view — the cutscenes save and restore it.
 - `battle:ui_component(name):set_visible(b)` shows/hides that HUD component (menu_bar, veneer_DY; the radar stays hidden).
 - `controller:guard_mode(b)` = hold position (PROVISIONAL meaning).
-- Input/escape-key capture, contextual advice, advisor window and camera locks are known no-ops (not logged).
+- Input and escape-key capture are done (§59.7); contextual advice, the advisor window and camera locks are known
+  no-ops (not logged).
 Result: no UNKNOWN stubs left in any shipped script; errors only in the tutorial (TUT_Land, it needs map markers).
 Orders the model still ignores (counts over all battles): `select_deployable_object` 44 (deployables),
 `perform_special_ability` 30 (formations, unlimber, …), `skirmish` 21, `defend_building` 2, `change_shot_type` 1,
@@ -2967,6 +2968,55 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   `+0x814` and the second camera `+0x81C`, never the kept one `+0x800`), zoom from tracking, the transition's
   ease and short turn, a bookmark ending the modes),
   `ui::battle::tests::selection_proxy_is_a_request`.
+
+### 59.7 Scripted cutscenes: ESC, the keyboard and the camera's glide (2026-11-24; static, CONFIRMED unless tagged)
+The historical battles' intros are the scripting library's `cutscene` class (`data/scripting_library.lua`, Lua that
+runs as is). It hides the radar and `veneer_DY`, calls `steal_input_focus`, `steal_escape_key` (again after every
+action) and `camera:disable_functionality("CAMERA_ALL_FUNCTIONS")`, runs its actions on the script clock, and
+`skip()` (from the global `Esc_Key_Pressed`) or `finish()` gives everything back and calls the end callback. Before
+this the engine calls were stubs, so ESC opened the menu instead of skipping, and every camera shot jumped.
+- **Binding table** (`0x014516A0`, name → stub → body): `steal_escape_key` `0x00612B90` → `0x00666960`,
+  `release_escape_key` `0x00612BA0` → `0x0065FF60`, `steal_input_focus` `0x00612BC0` → `0x00666990`,
+  `show_advisor_message` → `0x006646D0`, `advice_finished` → `0x0062A350`, `close_advisor` → `0x0063D670`.
+- **ESC.** `0x00666960` steals key 0 (ESCAPE, the first name of the key table `0x0139FEC8`) for the battle object's
+  key handler at `+1000` through `StealShortcutKey` `0x00EC3DE0`; `0x0065FF60` gives it back (`0x00EC3C40`). That
+  handler's vtable (`0x013347B4`) has `0x0064C5A0` at `+0x1C`, the slot the stealer walks call (key-down
+  `0x00EA5090` passes 1, key-up `0x00EB0900` passes 0). `0x0064C5A0` acts only when the flag is 0 (the key's
+  release) and the key is 0, and calls the Lua global named for key 0 in the table at `0x014D05C0`
+  (`Esc_Key_Pressed`; any other key: "unknown") through `0x0065D050`, with no arguments. The stolen key's bindings
+  (`escape_menu`) are not pressed meanwhile (stolen-key rule, UI_FIDELITY.md §5.1). As ESCAPE's binding does not
+  repeat, the walk sends the stolen key-up on the hold's second frame (or the release), and it decides "stolen" when it
+  sends it, so ESC held across the steal still skips. Note: both walks call **every**
+  stealer of the key that passes its `+0x38` / `+0x3C` tests, not only the newest (no break in the loop); ours gives
+  the script's key to the script and the UI's to its newest shown stealer (`UiScriptHost::stealer_of`, PROVISIONAL
+  there already).
+- **Keyboard.** `0x00666990` calls `0x00EB0870(func = none, on = 1)`, which sets flag bit3 of every binding the
+  shortcut manager has, except the funcs `quit` and `end_battle`; release passes 0. The walk `0x00ED76E0` tests bit3
+  at `0x00ED77F7` after the lock test and before the ready test: a binding with it is never pressed; stolen keys
+  still reach their stealers. Ours: `ShortcutMachine::steal_input`. Not traced: whether the mouse is locked too
+  (the cutscene also takes the player's army under script control, which our model already does).
+- **Camera.** `camera:move_to` (`0x00616510`) queues the battle command `BCQ_CAMERA_MOVE_TO` (registered at
+  `0x0040C800`, key `0x014A6814`), whose handler `0x005BEFD0` reads target, position and the number and posts them
+  to the battle's event `+0x94 → +0x1030`; the camera manager listens there (`0x00590787`, listener `+0x270`, vtable
+  `0x0132D6E0`, `0x005E65A0`) and calls its vfunc `+0x130` = `0x005FB020(target, position, number, 0)`: the zoom's
+  toggle off (`0x005CDD90`), the view on screen copied as the start (`0x005F7470`), the free camera `+0x800` set by
+  its vfunc `+0xBC` (`0x005FB320`: target, eye, height over the ground), then `0x005FB4D0(free camera, number > 0,
+  number, 0)`. The transition camera's constructor `0x00592410` stores the number at `+0x158`, the byte at `+0x15C`
+  and the flag at `+0x164`; with the byte 0 its length is the usual clamped length (§59.5) **times the number**
+  (`0x0059271C`); with the flag 0 the elapsed time starts at the length (the move is instant). So the script's
+  "seconds" is a speed factor: Austerlitz's shots (×3, ×4, a few hundred metres apart) glide for 9–12 s. The
+  argument order (target, then position) is CONFIRMED by the handler. Ours: `BattleCamera::script_move_to`.
+- **Not done (PROVISIONAL / UNKNOWN):** `disable_functionality` queues `BCQ_CAMERA_DISABLE_FUNCTIONALITY`
+  (`0x0040C700`, handler `0x005BEF30` → event `+0x1080` with the mask); where the mask is tested is not traced (the
+  keyboard camera is already off through `steal_input_focus`). The advisor: `show_advisor_message` (`0x006646D0` →
+  `0x00E1A970`) and `advice_finished` (`0x0062A350`: true when the battle UI's advisor `+0x28208` exists and its
+  speech object is gone or its vfunc `+0x64` says it is not playing) are still stubs (speech, window and the wait).
+- Tests: `ntw_script --test battle_script austerlitz_intro_takes_the_keys_and_escape_skips_it` (the shipped script:
+  keys taken, the first shot `move_to(..., 3)`, ESC skips back to the start view and starts the battle),
+  `ui::shortcuts::tests::stolen_input_presses_only_quit_and_end_battle`,
+  `ui::battle::tests::battle_keys_are_the_keys_files_bindings` (a script-held key), `napoleon`
+  `battle::camera::tests::a_script_move_glides_for_the_scaled_length`. In game (Austerlitz): the intro's camera glides
+  between its shots (screenshots 1.5 s apart show it moving).
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.

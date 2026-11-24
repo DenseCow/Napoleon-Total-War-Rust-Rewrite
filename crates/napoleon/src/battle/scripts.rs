@@ -18,6 +18,18 @@ use ntw_sim::battle::orders::MoveSpeed;
 use super::setup::BattleStart;
 use super::{BattlePhase, BattleSim, UnitInfo};
 
+/// The keyboard as the battle scripts set it, read by the HUD's key poll (`super::hud::keys`):
+/// while `escape` is set (`steal_escape_key` / `release_escape_key`) ESCAPE goes to the scripts
+/// ([`super::ScriptEvent::EscapeReleased`]) and not to its bindings (the ESC menu); while `input`
+/// is set (`steal_input_focus` / `release_input_focus`) the shortcuts but quit and end_battle are
+/// off. Kept here, not applied to the HUD at once, as a script may take the keys while it loads,
+/// before the HUD exists. Reset on entering a battle.
+#[derive(Resource, Default, Debug)]
+pub struct ScriptKeys {
+    pub escape: bool,
+    pub input: bool,
+}
+
 /// The running battle script (not `Send`: the Lua state stays on the main thread).
 pub struct BattleScripts {
     host: BattleScriptHost,
@@ -30,6 +42,7 @@ pub struct BattleScripts {
 /// Loads the battle script, if the battle has one. Exclusive system (the host is a non-send resource).
 pub fn enter(world: &mut World) {
     world.remove_non_send::<BattleScripts>();
+    world.insert_resource(ScriptKeys::default());
     if std::env::var("NAPOLEON_BATTLE_SCRIPTS").is_ok_and(|v| v == "off") {
         return;
     }
@@ -82,12 +95,14 @@ pub fn tick(world: &mut World) {
     world.insert_non_send(scripts);
     for r in deferred {
         match r {
-            BattleScriptRequest::Camera { target, position, .. } => {
+            BattleScriptRequest::Camera { target, position, seconds } => {
                 // The harness camera (NAPOLEON_BATTLE_CAMERA) wins over script cutscenes.
                 if std::env::var_os("NAPOLEON_BATTLE_CAMERA").is_none() {
-                    world.insert_resource(super::view::ScriptCamera(Some((position, target))));
+                    world.get_resource_or_insert_with(super::view::ScriptCamera::default).0.push((position, target, seconds));
                 }
             }
+            BattleScriptRequest::EscapeKey { stolen } => world.get_resource_or_insert_with(ScriptKeys::default).escape = stolen,
+            BattleScriptRequest::InputFocus { stolen } => world.get_resource_or_insert_with(ScriptKeys::default).input = stolen,
             BattleScriptRequest::UiVisible { name, visible } => super::hud::set_component_visible(world, &name, visible),
             BattleScriptRequest::Marker { id, name, position, rotation_deg, scale, visible } => {
                 let mut markers = world.get_resource_or_insert_with(super::markers::ScriptMarkers::default);
@@ -139,12 +154,17 @@ fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> 
         match e {
             super::ScriptEvent::Command { name, unit, bool1 } => s.host.command(name, unit, bool1, ""),
             super::ScriptEvent::Input(name) => s.host.input(name),
+            super::ScriptEvent::EscapeReleased => s.host.escape_key_released(),
         }
     }
     let mut deferred = Vec::new();
     for r in s.host.take_requests() {
         match r {
-            BattleScriptRequest::Camera { .. } | BattleScriptRequest::UiVisible { .. } | BattleScriptRequest::Marker { .. } => deferred.push(r),
+            BattleScriptRequest::Camera { .. }
+            | BattleScriptRequest::UiVisible { .. }
+            | BattleScriptRequest::Marker { .. }
+            | BattleScriptRequest::EscapeKey { .. }
+            | BattleScriptRequest::InputFocus { .. } => deferred.push(r),
             r => apply(&mut sim.battle, r),
         }
     }
@@ -294,7 +314,11 @@ pub fn apply(b: &mut Battle, r: BattleScriptRequest) {
                 b.order_invincible(id, on);
             }
         }
-        BattleScriptRequest::Camera { .. } | BattleScriptRequest::UiVisible { .. } | BattleScriptRequest::Marker { .. } => {}
+        BattleScriptRequest::Camera { .. }
+        | BattleScriptRequest::UiVisible { .. }
+        | BattleScriptRequest::Marker { .. }
+        | BattleScriptRequest::EscapeKey { .. }
+        | BattleScriptRequest::InputFocus { .. } => {}
         BattleScriptRequest::Other { order, .. } => debug!("Battle script order not modelled: {order}"),
     }
 }

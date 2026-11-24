@@ -125,6 +125,8 @@ pub enum ScriptEvent {
     Command { name: &'static str, unit: Option<u32>, bool1: bool },
     /// A camera input action (`ntw_script::battle_script::INPUT_EVENT_NAMES`).
     Input(&'static str),
+    /// ESCAPE went up while the scripts hold it ([`scripts::ScriptKeys`]).
+    EscapeReleased,
 }
 
 

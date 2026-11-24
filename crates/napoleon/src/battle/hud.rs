@@ -62,6 +62,8 @@ pub struct BattleHud {
     frame_errors: FrameErrors,
     /// The battle mode's bindings of `text/default_keys.xml` and their state ([`keys`]).
     shortcuts: ShortcutMachine,
+    /// The scripts' `steal_input_focus` as last applied to `shortcuts` ([`keys`]).
+    input_stolen: bool,
 }
 
 /// The per-frame HUD steps (model → HUD). A step that fails fails every frame, so each logs its
@@ -181,6 +183,7 @@ pub fn enter(world: &mut World) {
         loc,
         frame_errors: FrameErrors::default(),
         shortcuts,
+        input_stolen: false,
     };
     if let Some(sim) = world.get_resource::<BattleSim>()
         && let Err(e) = write_facts(&mut hud, sim, &world.resource::<GameData>().db)
@@ -379,13 +382,18 @@ fn write_facts(hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase
 /// `OnShortcut` (root.lua's `escape_menu`, P `toggle_pause`, CTRL+T `cycle_battle_speed`, T
 /// `fire_at_will_toggle`, R `battle_land_toggle_run`, ...), whose `BattleUI.*` requests [`frame`]
 /// applies the same frame; a camera binding goes to [`super::view::CameraKeys`]; a key a component
-/// stole goes to its `OnKey`. The press time is the real frame time capped at 0.3 s
-/// ([`crate::shortcut_keys::MAX_FRAME_TIME`]). Harness runs ignore the keyboard.
+/// stole goes to its `OnKey`; while the battle scripts hold ESCAPE ([`super::scripts::ScriptKeys`])
+/// its release goes to them ([`super::ScriptEvent::EscapeReleased`]). The press time is the real
+/// frame time capped at 0.3 s ([`crate::shortcut_keys::MAX_FRAME_TIME`]). Harness runs ignore the
+/// keyboard.
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     hud: Option<NonSendMut<BattleHud>>,
     held: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
     harness: Option<Res<crate::frontend::AutoScreenshot>>,
+    script_keys: Option<Res<super::scripts::ScriptKeys>>,
+    sim: Option<ResMut<BattleSim>>,
     mut camera: ResMut<super::view::CameraKeys>,
     mut buf: Local<(crate::shortcut_keys::KeysDown, Vec<&'static str>)>,
 ) {
@@ -397,10 +405,32 @@ pub fn keys(
     down.rewind(held.get_pressed().copied(), &[]);
     down.names_into(names);
     let keys = FrameKeys { down: names.as_slice(), held: down.modifiers(), time: time.delta_secs().min(crate::shortcut_keys::MAX_FRAME_TIME) };
+    let (escape, input) = script_keys.map_or((false, false), |k| (k.escape, k.input));
+    let script_held: &[&str] = if escape { &["ESCAPE"] } else { &[] };
     let hud = &mut *hud;
-    ui_battle::keys(&hud.host, &mut hud.shortcuts, keys, &mut |func, t| camera.press(func, t));
+    if hud.input_stolen != input {
+        hud.shortcuts.steal_input(input, STEAL_INPUT_KEEPS);
+        hud.input_stolen = input;
+    }
+    let mut sim = sim;
+    // The script object's handler acts on the stolen key-up only (`0x0064C5A0`). As in the exe,
+    // the walk sends that up on the hold's second frame (ESCAPE's binding does not repeat), or on
+    // the key's release, and it decides "stolen" when it sends it, so a key held across the steal
+    // goes up to the scripts (`0x00ED76E0`).
+    let mut script_key = |key: &str, down: bool| {
+        if key == "ESCAPE" && !down
+            && let Some(sim) = sim.as_mut()
+        {
+            sim.script_events.push(super::ScriptEvent::EscapeReleased);
+        }
+    };
+    ui_battle::keys(&hud.host, &mut hud.shortcuts, keys, script_held, &mut script_key, &mut |func, t| camera.press(func, t));
     log_errors(&hud.host);
 }
+
+/// The funcs the battle scripts' `steal_input_focus` leaves on (CONFIRMED, the names
+/// `0x00EB0870` compares: `quit` at `0x01314BFC` and `end_battle`).
+const STEAL_INPUT_KEEPS: &[&str] = &["quit", "end_battle"];
 
 /// Every frame: model → HUD, phase popups, pointer → HUD, HUD requests → model.
 #[allow(clippy::too_many_arguments)]

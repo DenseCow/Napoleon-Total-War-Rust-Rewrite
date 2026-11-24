@@ -1224,18 +1224,21 @@ impl CameraKeys {
     }
 }
 
-/// A camera position requested by a battle script (`camera:move_to`): (camera position, look-at
-/// target) in engine coordinates (x, height, map y). Applied at once (PROVISIONAL: the script's
-/// move time is not used).
+/// The camera moves the battle scripts requested since the last frame (`camera:move_to`), in
+/// order: (camera position, look-at target, seconds), the points in engine coordinates (x,
+/// height, map y). Several ticks can run in one frame, so every move is kept: a cut followed by a
+/// glide must glide from the cut.
 #[derive(Resource, Default)]
-pub struct ScriptCamera(pub Option<([f32; 3], [f32; 3])>);
+pub struct ScriptCamera(pub Vec<([f32; 3], [f32; 3], f32)>);
 
-/// Applies a pending [`ScriptCamera`] to the battle camera: placed at once at the position, looking
-/// at the target (same conversion as a battle file's start view).
+/// Applies the pending [`ScriptCamera`] moves to the battle camera in order
+/// ([`BattleCamera::script_move_to`]: it glides there; same conversion as a battle file's start
+/// view).
 pub fn apply_script_camera(mut pending: ResMut<ScriptCamera>, mut cams: Query<&mut BattleCamera>) {
-    let Some((s, t)) = pending.0.take() else { return };
-    for mut cam in &mut cams {
-        cam.place(Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]), &camera_ground);
+    for (s, t, seconds) in pending.0.drain(..) {
+        for mut cam in &mut cams {
+            cam.script_move_to(Vec3::new(s[0], s[1], -s[2]), Vec3::new(t[0], t[1], -t[2]), seconds, &camera_ground);
+        }
     }
 }
 

@@ -13,7 +13,7 @@
 use mlua::{Function, Lua, Table, Value};
 
 use super::UiScriptHost;
-use super::shortcuts::{EngineComponent, FrameKeys, ShortcutMachine};
+use super::shortcuts::{EngineComponent, EngineStealer, FrameKeys, ShortcutMachine};
 use crate::ScriptSource;
 
 const BATTLE_PRELUDE: &str = include_str!("battle_prelude.lua");
@@ -238,10 +238,22 @@ pub const CARD_MANAGER_COMPONENT: &str = "card_manager";
 /// The battle camera acts only while the input layer is 0 or less (CONFIRMED `0x005EAF00`'s
 /// first test of `0x01765944`). PROVISIONAL: the card manager's lock, taken as the same (its
 /// handler is not traced).
-pub fn keys(host: &UiScriptHost, machine: &mut ShortcutMachine, keys: FrameKeys, camera: &mut dyn FnMut(&str, f32)) {
+///
+/// `script_keys` are the keys the battle scripts hold (`steal_escape_key`, `0x00666960`, steals
+/// ESCAPE for the script object's key handler); their key events go to `script_key(key, down)`
+/// and the bindings on them (ESCAPE's `escape_menu`) are not pressed meanwhile.
+pub fn keys(
+    host: &UiScriptHost,
+    machine: &mut ShortcutMachine,
+    keys: FrameKeys,
+    script_keys: &[&str],
+    script_key: &mut dyn FnMut(&str, bool),
+    camera: &mut dyn FnMut(&str, f32),
+) {
     let engine =
         [EngineComponent { name: CAMERA_COMPONENT, locked_from: 1 }, EngineComponent { name: CARD_MANAGER_COMPONENT, locked_from: 1 }];
-    host.poll_shortcuts(machine, keys, &engine, &mut |component, func, time| {
+    let stealer = (!script_keys.is_empty()).then_some(EngineStealer { keys: script_keys, heard: script_key });
+    host.poll_shortcuts(machine, keys, &engine, stealer, &mut |component, func, time| {
         if component == CAMERA_COMPONENT {
             camera(func, time);
         } else if let Err(e) = host.lua().globals().get::<Function>("__ntw_battle_card_shortcut").and_then(|f| f.call::<()>(func)) {
@@ -763,7 +775,7 @@ mod tests {
         let mut steps: Vec<String> = Vec::new();
         let none = Held { ctrl: false, shift: false, alt: false };
         fn frame(host: &UiScriptHost, machine: &mut ShortcutMachine, down: &[&str], held: Held, steps: &mut Vec<String>) {
-            keys(host, machine, FrameKeys { down, held, time: 0.25 }, &mut |f, t| steps.push(format!("{f} {t}")));
+            keys(host, machine, FrameKeys { down, held, time: 0.25 }, &[], &mut |_, _| {}, &mut |f, t| steps.push(format!("{f} {t}")));
         }
         let mut frame = |down: &[&str], held: Held, steps: &mut Vec<String>| frame(&host, &mut machine, down, held, steps);
         macro_rules! tap {
@@ -809,6 +821,14 @@ mod tests {
         // A card manager func the model has no order for is logged once, not invented.
         tap!("PERIOD", none);
         tap!("PERIOD", none);
+        assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
+        // A key the battle scripts hold (steal_escape_key) goes to them, down then up, and its
+        // binding is not pressed meanwhile.
+        let mut heard: Vec<String> = Vec::new();
+        for down in [&["P"][..], &[]] {
+            keys(&host, &mut machine, FrameKeys { down, held: none, time: 0.25 }, &["P"], &mut |k, d| heard.push(format!("{k} {d}")), &mut |_, _| {});
+        }
+        assert_eq!(heard, ["P true", "P false"]);
         assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
         let log = host.take_log();
         assert_eq!(log.iter().filter(|l| l.contains("UNKNOWN card manager shortcut select_next")).count(), 1, "{log:#?}");

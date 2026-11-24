@@ -148,6 +148,67 @@ fn tutorial_script_follows_the_players_actions() {
     assert!(log.iter().all(|l| !l.starts_with("ERROR")), "script errors (see above)");
 }
 
+/// The Austerlitz intro cutscene (the scripting library's `cutscene` class): it takes the
+/// keyboard and ESCAPE, glides the camera (`move_to(target, position, 3)`), and ESCAPE's release
+/// (`Esc_Key_Pressed`, `0x0064C5A0`) skips the rest: the camera goes back to where it was,
+/// the keys are given back and the battle starts.
+#[test]
+fn austerlitz_intro_takes_the_keys_and_escape_skips_it() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let vfs = Vfs::open_install(&dir).unwrap();
+    let xml = "napoleon_historical_battles/austerlitz/austerlitz_battle.xml";
+    let spec = BattleSpec::parse(&vfs.read(xml).unwrap()).unwrap();
+    let script = vfs.read("napoleon_historical_battles/austerlitz/austerlitz_battle.battle_script").unwrap();
+    let mut f = facts(&spec);
+    f.camera = ([0.0, 50.0, -400.0], [0.0, 0.0, -300.0]);
+    let host = BattleScriptHost::new(ScriptSource::from_install(&dir).unwrap(), f.clone(), 1).unwrap();
+    host.load("@austerlitz_battle.battle_script", &script).expect("script runs");
+    host.phase("Deployment");
+    host.phase("Deployed");
+    let mut requests = host.take_requests();
+    for step in 1..=30u64 {
+        f.time_ms = step * 100;
+        host.set_facts(f.clone());
+        host.advance();
+        requests.extend(host.take_requests());
+    }
+    assert!(requests.contains(&BattleScriptRequest::EscapeKey { stolen: true }), "{requests:?}");
+    assert!(requests.contains(&BattleScriptRequest::InputFocus { stolen: true }), "{requests:?}");
+    let glide = requests.iter().find_map(|r| match r {
+        BattleScriptRequest::Camera { target, position, seconds } => Some((*target, *position, *seconds)),
+        _ => None,
+    });
+    assert_eq!(glide, Some(([-400.9, 27.7, 200.9], [-502.1, 43.2, 203.4], 3.0)), "the first shot, at 2 s");
+    host.escape_key_released();
+    let skipped = host.take_requests();
+    assert!(
+        skipped.contains(&BattleScriptRequest::Camera { target: f.camera.1, position: f.camera.0, seconds: 0.1 }),
+        "back to the view before the cutscene: {skipped:?}"
+    );
+    assert!(skipped.contains(&BattleScriptRequest::EscapeKey { stolen: false }), "{skipped:?}");
+    assert!(skipped.contains(&BattleScriptRequest::InputFocus { stolen: false }), "{skipped:?}");
+    let log = host.take_log();
+    assert!(log.iter().any(|l| l.contains("Skipping remainder of cutscene Cutscene_Intro")), "{log:#?}");
+    assert!(log.iter().any(|l| l.contains("Called Function: Start_Battle")), "{log:#?}");
+    assert!(log.iter().all(|l| !l.starts_with("ERROR")), "{log:#?}");
+}
+
+/// A script that steals ESCAPE without an `Esc_Key_Pressed` gets one error, not one per press.
+#[test]
+fn a_missing_escape_handler_is_logged_once() {
+    let host = BattleScriptHost::new(ScriptSource::empty(), BattleScriptFacts::default(), 1).unwrap();
+    host.load("@steal.lua", b"empire_battle:new():steal_escape_key()").expect("script runs");
+    assert_eq!(host.take_requests(), [BattleScriptRequest::EscapeKey { stolen: true }]);
+    host.escape_key_released();
+    host.escape_key_released();
+    let errors = host.take_log().into_iter().filter(|l| l.starts_with("ERROR")).count();
+    assert_eq!(errors, 1);
+}
+
 /// Survey (debug aid): runs every shipped land battle's script for 40 minutes of battle time with
 /// nobody hurt and counts the UNKNOWN stub calls and the orders the model does not carry out.
 /// `cargo test -p ntw_script --test battle_script survey -- --ignored --nocapture`.

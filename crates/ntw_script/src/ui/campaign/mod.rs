@@ -1343,7 +1343,7 @@ impl UiScriptHost {
     /// one the battle HUD shares ([`UiScriptHost::poll_shortcuts`]).
     pub fn campaign_keys(&self, machine: &mut ShortcutMachine, keys: CampaignKeys, camera: &mut dyn FnMut(&str, f32)) {
         let engine = [EngineComponent { name: CAMERA_COMPONENT, locked_from: 10 }];
-        self.poll_shortcuts(machine, keys, &engine, &mut |_, func, time| camera(func, time));
+        self.poll_shortcuts(machine, keys, &engine, None, &mut |_, func, time| camera(func, time));
     }
 
     /// The engine's HUD treasury and date update `0x009C1AD0` (CONFIRMED, UI_FIDELITY.md §5.1): with

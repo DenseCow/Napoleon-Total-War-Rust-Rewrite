@@ -258,7 +258,9 @@ local function cam_now()
 end
 function camera_class:position() cam_now() return battle_vector:new(cam_pos.x, cam_pos.y, cam_pos.z) end
 function camera_class:target() cam_now() return battle_vector:new(cam_target.x, cam_target.y, cam_target.z) end
--- INFERRED argument order (the scripts pass "Target" then "Camera" positions) and seconds.
+-- move_to(target, position, seconds): CONFIRMED argument order (0x00616510 queues
+-- BCQ_CAMERA_MOVE_TO, whose handler 0x005BEFD0 hands the camera manager 0x005FB020 the target,
+-- the position and the number); the camera glides there (BattleCamera::script_move_to).
 function camera_class:move_to(target, position, seconds)
     if type(target) ~= "table" or type(position) ~= "table" then return end
     -- A degenerate view (no start view known) is ignored.
@@ -318,12 +320,16 @@ function empire_battle:camera() return the_camera end
 function empire_battle:weather() return setmetatable({}, weather_class) end
 function empire_battle:subtitles() return setmetatable({}, subtitles_class) end
 function empire_battle:ui_component(name) return setmetatable({ name = tostring(name) }, ui_class) end
--- Known calls with no effect in our game yet (PROVISIONAL, not logged): input and escape-key
--- capture, contextual advice, the advisor window.
-function empire_battle:steal_input_focus() end
-function empire_battle:release_input_focus() end
-function empire_battle:steal_escape_key() end
-function empire_battle:release_escape_key() end
+-- steal_input_focus / release_input_focus (0x00612BC0 → 0x00666990): every keyboard shortcut but
+-- quit and end_battle off / on again (0x00EB0870). steal_escape_key / release_escape_key
+-- (0x00612B90 → 0x00666960 / 0x0065FF60): the script object holds ESCAPE; on its release the game
+-- calls the global Esc_Key_Pressed (0x0064C5A0), so the menu does not open meanwhile.
+function empire_battle:steal_input_focus() nb.request("input_focus", { units = {}, stolen = true }) end
+function empire_battle:release_input_focus() nb.request("input_focus", { units = {}, stolen = false }) end
+function empire_battle:steal_escape_key() nb.request("escape_key", { units = {}, stolen = true }) end
+function empire_battle:release_escape_key() nb.request("escape_key", { units = {}, stolen = false }) end
+-- Known calls with no effect in our game yet (PROVISIONAL, not logged): contextual advice, the
+-- advisor window.
 function empire_battle:suspend_contextual_advice() end
 function empire_battle:close_advisor() end
 function empire_battle:register_singleshot_timer(name, ms) nb.timer(name, ms or 0, false) end

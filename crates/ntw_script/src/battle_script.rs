@@ -100,9 +100,16 @@ pub enum BattleScriptRequest {
     /// `goto_location(pos, run)` and `goto_location_angle_width(pos, angle, width, run)`; the
     /// angle/width are carried but not used by the model yet (PROVISIONAL).
     Move { units: Vec<u32>, x: f32, z: f32, run: bool, angle: Option<f32>, width: Option<f32> },
-    /// `camera:move_to(target, position, seconds)` (argument order INFERRED from the scripts' variable
-    /// names): engine coordinates (x, height, z).
+    /// `camera:move_to(target, position, seconds)` (CONFIRMED argument order, `0x00616510` →
+    /// `0x005BEFD0` → `0x005FB020`): engine coordinates (x, height, z); `seconds` scales the
+    /// camera's transition, 0 or less places it at once.
     Camera { target: [f32; 3], position: [f32; 3], seconds: f32 },
+    /// `battle:steal_escape_key()` (true) / `release_escape_key()` (false): the script object
+    /// holds ESCAPE ([`BattleScriptHost::escape_key_released`]).
+    EscapeKey { stolen: bool },
+    /// `battle:steal_input_focus()` (true) / `release_input_focus()` (false): the keyboard
+    /// shortcuts but quit and end_battle off / on.
+    InputFocus { stolen: bool },
     /// `battle:ui_component(name):set_visible(b)`.
     UiVisible { name: String, visible: bool },
     /// `controller:guard_mode(b)`.
@@ -150,6 +157,8 @@ struct State {
     log: Vec<String>,
     rng: u32,
     version: u64,
+    /// A missing `Esc_Key_Pressed` was logged ([`BattleScriptHost::escape_key_released`]).
+    escape_missing_logged: bool,
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -345,6 +354,8 @@ impl BattleScriptHost {
                     BattleScriptRequest::Camera { target: v("target")?, position: v("position")?, seconds: args.get::<Option<f32>>("seconds")?.unwrap_or(0.0) }
                 }
                 "ui_visible" => BattleScriptRequest::UiVisible { name: args.get("name")?, visible: args.get("visible")? },
+                "escape_key" => BattleScriptRequest::EscapeKey { stolen: args.get("stolen")? },
+                "input_focus" => BattleScriptRequest::InputFocus { stolen: args.get("stolen")? },
                 "guard_mode" => BattleScriptRequest::GuardMode { units: ids(&args)?, on: args.get::<Option<bool>>("on")?.unwrap_or(true) },
                 "marker" => BattleScriptRequest::Marker {
                     id: args.get("id")?,
@@ -549,6 +560,25 @@ impl BattleScriptHost {
             Err(_) => return,
         };
         self.call_global(&h, MultiValue::from_vec(vec![Value::String(s)]));
+    }
+
+    /// ESCAPE went up while the script holds it (`steal_escape_key`): the script object's key
+    /// handler (CONFIRMED `0x0064C5A0`, vtable `0x013347B4` +0x1C) acts on the key-up of key 0
+    /// (ESCAPE, the first name of the key table `0x0139FEC8`) only, and calls the global named
+    /// for that key in the table at `0x014D05C0`, `Esc_Key_Pressed`, with no arguments
+    /// (`0x0065D050`). The scripting library's `Esc_Key_Pressed` skips the running cutscene. A
+    /// script that steals the key without defining it gets one error logged, not one per press.
+    pub fn escape_key_released(&self) {
+        const NAME: &str = "Esc_Key_Pressed";
+        if self.lua.globals().get::<Option<Function>>(NAME).ok().flatten().is_none() {
+            let mut st = self.state.borrow_mut();
+            if !st.escape_missing_logged {
+                st.escape_missing_logged = true;
+                st.log.push(format!("ERROR: no script function {NAME} (ESCAPE is stolen)"));
+            }
+            return;
+        }
+        self.call_global(NAME, MultiValue::new());
     }
 
     /// Requests made since the last call.
