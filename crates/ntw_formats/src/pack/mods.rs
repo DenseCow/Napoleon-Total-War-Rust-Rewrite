@@ -245,10 +245,15 @@ pub fn default_user_script_path() -> Option<PathBuf> {
     Some(crate::install::original_user_dir()?.join("scripts").join(USER_SCRIPT_NAME))
 }
 
-/// A path from `user.script.txt` (written with `\` or `/`) as a relative path for this platform's
-/// file system: `\` on Windows, as the original reads it, `/` elsewhere.
-fn native_rel_path(name: &str) -> PathBuf {
-    PathBuf::from(name.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR))
+/// A file or folder named in `user.script.txt`, found the way the original finds it on Windows:
+/// an absolute path as it is, else under `base`, with `\` or `/` and any letter case (on Linux
+/// through [`crate::install::find_case_insensitive`]). `None` if it is not there.
+fn find_script_path(base: &Path, name: &str) -> Option<PathBuf> {
+    let as_is = Path::new(name);
+    if as_is.is_absolute() {
+        return as_is.exists().then(|| as_is.to_path_buf());
+    }
+    crate::install::find_case_insensitive(base, name)
 }
 
 /// Which `user.script.txt` to read.
@@ -400,8 +405,7 @@ impl ModResolver<'_> {
         let pack = match self.inactive.remove(&file) {
             Some(p) => p,
             None => {
-                let rel = native_rel_path(name);
-                let found = self.work_dirs.iter().map(|d| d.join(&rel)).find(|p| p.is_file());
+                let found = self.work_dirs.iter().filter_map(|d| find_script_path(d, name)).find(|p| p.is_file());
                 match found.map(|p| (PackFile::open(&p), p)) {
                     Some((Ok(p), _)) => p,
                     // ORIGINAL BUG: a missing or unreadable mod pack throws "Could not load the
@@ -530,8 +534,7 @@ fn plan_layers(data_dir: &Path, language: &str, options: &ModOptions) -> Result<
                          stops reading the script here); ignored, the folder is still added"
                     ));
                 }
-                let p = root.join(native_rel_path(d));
-                if p.is_dir() {
+                if let Some(p) = find_script_path(root, d).filter(|p| p.is_dir()) {
                     add_dir(&mut work_dirs, p);
                 } else {
                     report.warnings.push(format!("add_working_directory {d:?}: no such folder; ignored"));
@@ -1056,11 +1059,12 @@ mod tests {
         assert_eq!(vanilla.list(""), vfs.list(""));
     }
 
-    /// A `mod` line written with Windows separators finds the pack on every platform.
+    /// A `mod` line written with Windows separators and another letter case finds the pack on
+    /// every platform, as the original does on Windows.
     #[test]
     fn backslash_mod_line_finds_a_nested_pack() {
         let data = fake_install("mods_backslash");
-        let (vfs, report) = Vfs::open_with_mods(&data, &opts("mod \"sub\\nested.pack\";")).unwrap();
+        let (vfs, report) = Vfs::open_with_mods(&data, &opts("mod \"SUB\\Nested.PACK\";")).unwrap();
         assert_eq!(vfs.read("h.txt").unwrap(), b"nested");
         assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
