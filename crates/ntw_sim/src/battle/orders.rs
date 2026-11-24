@@ -407,6 +407,45 @@ mod tests {
         assert_eq!(u.drag_width_limits(), None);
     }
 
+    /// A unit that turns (to walk off sideways, and to its formation's facing on arrival, with a
+    /// new width) keeps every man where he stands: no man moves farther in a tick than a run, and
+    /// all end in their new slots (`LandUnit::turn_to`).
+    #[test]
+    fn no_man_jumps_when_his_unit_turns() {
+        let mut b = battle();
+        let u = &mut b.units[0];
+        (u.men, u.max_men, u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (60, 60, 20, 20.0, 1.0, 0.3);
+        (u.walk_speed, u.run_speed, u.hold_position) = (1.5, 4.0, true);
+        b.units[1].hold_position = true;
+        for _ in 0..20 {
+            b.step();
+        }
+        // Each man where he stands, by who he is (a re-slot reorders the entries).
+        let men = |b: &Battle| {
+            let u = &b.units[0];
+            let mut by_figure: Vec<(u32, (f32, f32))> = u.men_standing().zip(&u.march.men).map(|(s, m)| (m.figure, s.pos)).collect();
+            by_figure.sort_by_key(|f| f.0);
+            by_figure.into_iter().map(|f| f.1).collect::<Vec<_>>()
+        };
+        assert!(b.order_move_formed(1, (2.0, 15.0), 0.0, MoveSpeed::Walk, Some(30.0)));
+        let mut last = men(&b);
+        let mut worst = 0.0f32;
+        for _ in 0..400 {
+            b.step();
+            let now = men(&b);
+            for (a, c) in last.iter().zip(&now) {
+                let d = (a.0 - c.0).hypot(a.1 - c.1);
+                worst = worst.max(d);
+            }
+            last = now;
+        }
+        assert!(worst <= 4.0 * super::super::TICK_SECONDS + 0.05, "a man moved {worst} m in one tick");
+        let u = &b.units[0];
+        assert_eq!((u.destination, u.facing, u.formation_files), (None, 0.0, 30));
+        let off = u.march.men.iter().map(|m| m.side.hypot(m.lag)).fold(0.0f32, f32::max);
+        assert!(off < 0.3, "the men stand in their new slots ({off} m off)");
+    }
+
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain
     /// move keeps the walking facing.
     #[test]

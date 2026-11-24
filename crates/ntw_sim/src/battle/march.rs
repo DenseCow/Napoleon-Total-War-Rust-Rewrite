@@ -1302,6 +1302,32 @@ impl LandUnit {
         self.lay_out(Some(full));
     }
 
+    /// Turns the unit to `facing` (radians, the model's facing) with every man staying where he
+    /// stands: his slot turns with the unit and his offset from it ([`ManMarch::side`],
+    /// [`ManMarch::lag`]) becomes what is left of his way there, which he then walks as any offset
+    /// (the march, or the reform's walk to his slot). As [`LandUnit::relay`] leaves the men where
+    /// they stand at a new lay-out (`0x00555CA0`, CONFIRMED static), no man moves at the turn
+    /// itself. PROVISIONAL: the unit's own facing still turns at once (the exe's comes from its
+    /// men's heading, the squad summary's vote, not ported for a moving unit); its men's figures
+    /// face it.
+    pub fn turn_to(&mut self, facing: f32) {
+        if facing == self.facing {
+            return;
+        }
+        let formation = self.formation();
+        let alive = (self.men as usize).min(self.march.men.len());
+        let old = self.facing;
+        for (k, m) in self.march.men[..alive].iter_mut().enumerate() {
+            let p = formation.place(k);
+            // Where he stands from the unit's point, then in the new frame (the frame offset is
+            // its own inverse).
+            let world = unit_frame_offset(old, (p.0 + m.side, p.1 + m.lag));
+            let (right, back) = unit_frame_offset(facing, world);
+            (m.side, m.lag) = (right - p.0, back - p.1);
+        }
+        self.facing = facing;
+    }
+
     /// Lays the formation out again over the living men as [`LandUnit::relay`] does, giving the men
     /// their slots by [`assign_slots`] (`Some(full)`) or keeping each man's slot (`None`: the
     /// reform state's lay-out without a re-slot, `0x005736B0`, which sends man `k` to slot `k`).

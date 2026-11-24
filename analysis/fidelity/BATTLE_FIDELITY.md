@@ -3057,7 +3057,13 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   (`LandUnit::formed_width`), they are sorted along the drag and laid side by
   side from its start, 5 m apart (INFERRED gap), each keeping its width (`input::formation_line`); all
   face the camera's far side and turn to it on arrival (`LandUnit::arrival_facing`,
-  `Battle::order_move_formed`; PROVISIONAL: the turn is made at once). PROVISIONAL: the drawn size
+  `Battle::order_move_formed`; PROVISIONAL: the unit's facing turns at once). **Turns keep the men where they
+  stand** (fix, 2026-11-24, user report "the facing jumps right after the release"): the unit's facing turned
+  at once (to walk off, on arrival, the HUD's rotate buttons) and its men, whose places are offsets in the
+  unit's frame, turned rigidly with it, up to 19 m in one tick for a wide line. `LandUnit::turn_to` turns
+  the frame and leaves each man where he stands, his offset from his turned slot what he then walks, as the
+  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static); test
+  `no_man_jumps_when_his_unit_turns`. PROVISIONAL: the drawn size
   `UnitInfo::size_m` (the selection outline, and the spread of the muzzle flashes, `fx_draw::muzzle_of`) is
   set once at the battle's start and does not follow a new width.
 - **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no

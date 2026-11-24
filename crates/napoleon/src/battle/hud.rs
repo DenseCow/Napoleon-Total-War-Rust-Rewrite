@@ -727,8 +727,9 @@ fn order_unit(sim: &mut BattleSim, id: u32, name: &str, arg: Option<bool>) -> bo
             let d = if name.ends_with("Forwards") { 10.0 } else { -10.0 };
             u.set_destination(Some((u.position.0 + u.facing.cos() * d, u.position.1 + u.facing.sin() * d)));
         }
-        "Current_Selection_Rotate_Left" => u.facing += 15f32.to_radians(),
-        "Current_Selection_Rotate_Right" => u.facing -= 15f32.to_radians(),
+        // The men stay where they stand and walk the turn (`LandUnit::turn_to`).
+        "Current_Selection_Rotate_Left" => u.turn_to(u.facing + 15f32.to_radians()),
+        "Current_Selection_Rotate_Right" => u.turn_to(u.facing - 15f32.to_radians()),
         // Not in the model yet: withdraw, formations, groups, special abilities.
         _ => return false,
     }

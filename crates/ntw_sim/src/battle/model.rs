@@ -1400,7 +1400,7 @@ impl Battle {
         if len > 0.0
             && let Some(d) = self.defence_in_the_way(idx, pos, next)
         {
-            self.units[idx].facing = dy.atan2(dx);
+            self.units[idx].turn_to(dy.atan2(dx));
             self.defence_contact(idx, &d);
             let u = &mut self.units[idx];
             u.speed = 0.0;
@@ -1431,12 +1431,10 @@ impl Battle {
             u.running = false;
         }
         if len > 0.0 && step > 0.0 {
-            u.facing = dy.atan2(dx);
+            // The men stay where they stand and walk the turn (`LandUnit::turn_to`).
+            u.turn_to(dy.atan2(dx));
             u.moved = true;
             u.gradient = gradient;
-        }
-        if let Some(f) = arrival_facing {
-            u.facing = f;
         }
         // Its men follow the same order, each at his own speed (`march`), laid out at the unit's
         // facing after the step (the drawn one).
@@ -1444,6 +1442,11 @@ impl Battle {
         let (facing, fatigue) = (self.units[idx].facing, self.units[idx].fatigue_effect().speed);
         let unit_step = super::march::UnitStep { pos, facing, dir, len, covered: len.min(step), is_order, fatigue };
         self.march_men(idx, Some(unit_step), Some(planned_order));
+        // On arrival the unit turns to its formation's facing after this tick's march, so the men
+        // walk the last step along the way they came, then the turn (`LandUnit::turn_to`).
+        if let Some(f) = arrival_facing {
+            self.units[idx].turn_to(f);
+        }
     }
 
     /// The enemy unit that unit `idx` is in melee contact with (nearest active enemy with men,
