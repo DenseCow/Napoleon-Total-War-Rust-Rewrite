@@ -3022,11 +3022,43 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   set it copies the selection's stored shape, else the line along the drag, its length clamped between the
   selection's minimum and maximum width, `0x006D9280` / `0x006D8E90`, `0x005C44C0` → `0x007FEEF0`; the
   line's places from `0x007FE9C0` / `0x007FECA0`; facing `0x005C43F0` → `0x007FE8F0`) and hands it to slot
-  12 (`0x005DB890` → `0x0059EFB0` / `0x0059F140`). None of the `0x007FE…` formation code is ported. Ours,
-  PROVISIONAL: a plain click moves the group keeping its shape (`input::order_group_move`); a drag lays the
-  units side by side along it in selection order, at least 2 m apart, facing the camera's far side, each
-  keeping its own width (`input::formation_line`), and each turns to that facing on arrival
-  (`LandUnit::arrival_facing`, `Battle::order_move_formed`).
+  12 (`0x005DB890` → `0x0059EFB0` / `0x0059F140`). Traced further (2026-11-24, static): the minimum /
+  maximum are `0x006879A0` / `0x00687390` (land; naval `0x00687690` / `0x00687080` with 80 m): one land unit →
+  its own `0x006D9210` / `0x006D8E20` (vfunc `+0x10` / `+0x14` of the selection entry's `+0x28`, object not
+  identified yet); several → the sum of each unit's value **plus 5 m per unit** (`0x40A00000`, CONFIRMED; ours
+  used 2 m). `0x005C4030`: a drag shorter than the minimum or longer than the maximum is laid at that length
+  along the drag (`0x007FE9C0`), else the drag's own points (`0x007FECA0`); both return a navigable point
+  (`0x007FD070`, 5 dwords), not a width. **The drag's order (debugger sitting 2026-11-24, Linux/Proton, gdb on
+  the running original, a custom battle in progress, one Austrian Landwehr unit dragged wide and narrow;
+  CONFIRMED):** the drag release runs order mode `0x0059F140` → `0x006A9DB0` → `0x00685BD0` → the order queue
+  `0x005EFCC0` (stack of the stops at `0x005EFCC0`: return addresses `0x00685C51`, `0x006A9E07`, `0x0059F254`,
+  `0x0060879A`, `0x005AE9EC`, `0x005C5D85`), not `0x006847A0` (the static guess above, no stop there during the
+  drags). In `0x00685BD0` **one selected unit** gets `0x0068E610(point, facing, dragged width)`: the move order
+  (same layout as `0x0068E5C0`'s: unit `+0`, the 5-dword point `+4`, facing `+0x18`) stores **the drag's
+  (clamped) length as the unit's new width at `+0x1C`**, where `0x0068E5C0` stores the unit's current width
+  (vfunc `[0]` = unit `+0x378` → `+0x24`). **Several units** are sorted along the drag (`0x00682BA0`, by their
+  position projected on the line) and laid side by side, each with `0x0068E5C0` (its own width kept): the next
+  unit's centre is the running offset plus half its width (`0x01318038`), the offset then grows by its width plus
+  the gap argument (`param_12`; that it is the 5 m of the minimum above is INFERRED). The group formation
+  `0x006A95A0` (stops returning to `0x006A9968`) is a separate path the game runs on its own every frame for a
+  unit already in a group, not the drag. Debugger note: under Wine the hardware breakpoints never fire on the
+  game's main thread (only on worker threads); software breakpoints do. The order's width reaches the men
+  through the move's lay-out, which re-forms them at the order's width (`0x00576B30`, §52); ours sets it
+  with the order (`LandUnit::set_frontage`: the files of `0x00642C90` at the unit's file spacing).
+  **One unit's limits** (`0x006879A0` / `0x00687390` with one selected unit → `0x00564530` /
+  `0x005640C0`, CONFIRMED static): the narrowest is `max(1, round(men × 0.04))` files (`0.04` at
+  `0x01325C84`; `0.1` at `0x0131A7B0` for a mounted unit, `0x0055ABF0`), the widest the files a width of
+  twice the man radius per man holds (`0x00642C60`), at most 80 m (`0x01325D70`); the men are the unit's
+  entity count `+0x2CC`. Artillery with guns, an unlimbered gun and state `0xE` keep their shape's width
+  (`0x00569410`; PROVISIONAL: ours keeps every artillery unit's width, `LandUnit::drag_width_limits`).
+  None of the `0x007FE…` formation code is ported. Ours: a plain click moves the group keeping its shape
+  (`input::order_group_move`, PROVISIONAL); a drag with one unit makes the drag's clamped length its width,
+  centred on the line from the drag's start; with several, they are sorted along the drag and laid side by
+  side from its start, 5 m apart (INFERRED gap), each keeping its width (`input::formation_line`); all
+  face the camera's far side and turn to it on arrival (`LandUnit::arrival_facing`,
+  `Battle::order_move_formed`; PROVISIONAL: the turn is made at once). PROVISIONAL: the drawn size
+  `UnitInfo::size_m` (the selection outline) is set once at the battle's start and does not follow a new
+  width.
 - **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no
   AI controls) also moved the player's units after every order, so a unit sent somewhere walked off on its
   own once it arrived. The setup now sets `hold_position` for every controllable unit.

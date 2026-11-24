@@ -299,39 +299,51 @@ fn group_destinations(sim: &BattleSim, ids: &[u32], point: Vec2) -> Vec<(u32, Ve
 }
 
 /// A right drag from `start` to `end` (battlefield metres): the selection forms up along that line
-/// ([`formation_line`]) and each unit walks to its place and turns to face the line's front.
+/// ([`formation_line`]) and each unit walks to its place and turns to face the line's front. One
+/// unit alone takes the drag's length as its new width (clamped to its limits,
+/// [`ntw_sim::battle::model::LandUnit::drag_width_limits`]); several keep their own widths.
 fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, camera_forward: Vec3) {
-    let widths: Vec<(u32, f32)> = ids
+    let units: Vec<LineUnit> = ids
         .iter()
-        .filter(|&&id| sim.battle.unit_index(id).is_some_and(|i| super::sim::on_field(&sim.battle.units[i])))
-        .filter_map(|&id| sim.info_of(id).map(|i| (id, i.size_m.x.max(1.0))))
+        .filter_map(|&id| sim.battle.unit_index(id).map(|i| (id, &sim.battle.units[i])))
+        .filter(|(id, u)| super::sim::on_field(u) && sim.info_of(*id).is_some())
+        // The width measured from the men now (`LandUnit::width`, the squad box).
+        .map(|(id, u)| LineUnit { id, width: u.width().max(1.0), position: Vec2::from(u.position), limits: u.drag_width_limits() })
         .collect();
     // The battlefield's y axis is the world's −z.
     let away = Vec2::new(camera_forward.x, -camera_forward.z);
-    for (id, place, facing) in formation_line(&widths, start, end, away) {
-        if sim.battle.order_move_formed(id, (place.x, place.y), facing, MoveSpeed::Walk) {
+    for (id, place, facing, width) in formation_line(&units, start, end, away) {
+        if sim.battle.order_move_formed(id, (place.x, place.y), facing, MoveSpeed::Walk, width) {
             sim.script_events.push(super::ScriptEvent::Command { name: "Move", unit: Some(id), bool1: false });
         }
     }
 }
 
-/// The gap in metres between two units of a dragged-out line when the drag is shorter than the
-/// units' fronts. PROVISIONAL (the original's spacing rules are in its formation code, `0x005C4030`
-/// → `0x007FE9C0` / `0x007FECA0`, with the selection's minimum and maximum width from `0x006D9280`
-/// / `0x006D8E90`; not ported).
-const LINE_GAP_M: f32 = 2.0;
+/// The metres between two units of a dragged-out line: the minimum width of several units adds
+/// 5 m per unit (`0x006879A0`, `0x40A00000`, CONFIRMED static), and the layout `0x00685BD0` adds its
+/// gap argument after each unit; that the two are the same 5 m is INFERRED.
+const LINE_GAP_M: f32 = 5.0;
 
-/// The places of a dragged-out line: the units side by side from `start` towards `end` in
-/// selection order, each `(id, front width)`, spread evenly along the drag (at least
-/// [`LINE_GAP_M`] apart), all facing the side of the line that `away` (the camera's view
-/// direction on the ground) points to. Returns `(id, centre, facing)` per unit, the facing in the
-/// model's radians. PROVISIONAL: the original's formation code also sets the units' width and depth
-/// from the drag (`0x005C44C0` clamps the drag length between the selection's minimum and maximum
-/// width); ours keeps each unit's own width and depth.
-pub fn formation_line(units: &[(u32, f32)], start: Vec2, end: Vec2, away: Vec2) -> Vec<(u32, Vec2, f32)> {
-    if units.is_empty() {
-        return Vec::new();
-    }
+/// A unit of a dragged-out line: its front width now, where it stands, and the widths it may be
+/// dragged out to (`None`: it keeps its width).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineUnit {
+    pub id: u32,
+    pub width: f32,
+    pub position: Vec2,
+    pub limits: Option<(f32, f32)>,
+}
+
+/// The places of a dragged-out line (the release's layout, `0x00685BD0`, CONFIRMED by debugger,
+/// BATTLE_FIDELITY.md §59.6), all facing the side of the line that `away` (the camera's view
+/// direction on the ground) points to. Returns `(id, centre, facing, new width)` per unit, the
+/// facing in the model's radians.
+/// - One unit: the drag's length clamped between its limits (`0x005C4030`: a drag shorter or
+///   longer is laid at that length along the drag) is its new width (`0x0068E610`), centred on
+///   the line from `start`.
+/// - Several: sorted by where they stand along the drag (`0x00682BA0`) and laid side by side
+///   from `start`, each keeping its width, [`LINE_GAP_M`] apart (`0x0068E5C0`).
+pub fn formation_line(units: &[LineUnit], start: Vec2, end: Vec2, away: Vec2) -> Vec<(u32, Vec2, f32, Option<f32>)> {
     let along = (end - start).try_normalize().unwrap_or(Vec2::X);
     // The front: the line's normal on the camera's far side.
     let mut front = along.perp();
@@ -339,16 +351,20 @@ pub fn formation_line(units: &[(u32, f32)], start: Vec2, end: Vec2, away: Vec2) 
         front = -front;
     }
     let facing = front.y.atan2(front.x);
-    let fronts: f32 = units.iter().map(|(_, w)| w).sum();
-    let gaps = (units.len() - 1) as f32;
-    let gap = if gaps > 0.0 { ((start.distance(end) - fronts) / gaps).max(LINE_GAP_M) } else { 0.0 };
+    if let [u] = units {
+        let width = u.limits.map(|(lo, hi)| start.distance(end).clamp(lo, hi));
+        let centre = start + along * (width.unwrap_or(u.width) * 0.5);
+        return vec![(u.id, centre, facing, width)];
+    }
+    let mut sorted: Vec<&LineUnit> = units.iter().collect();
+    sorted.sort_by(|a, b| (a.position - start).dot(along).total_cmp(&(b.position - start).dot(along)));
     let mut at = 0.0;
-    units
-        .iter()
-        .map(|&(id, w)| {
-            let centre = start + along * (at + w * 0.5);
-            at += w + gap;
-            (id, centre, facing)
+    sorted
+        .into_iter()
+        .map(|u| {
+            let centre = start + along * (at + u.width * 0.5);
+            at += u.width + LINE_GAP_M;
+            (u.id, centre, facing, None)
         })
         .collect()
 }
@@ -407,25 +423,41 @@ mod tests {
         assert!(!is_double_click(first, 10.2, Vec2::new(100.0, 100.0), 4));
     }
 
-    /// A drag longer than the fronts spreads the units evenly from its start; all face the far side.
+    fn unit(id: u32, width: f32, x: f32, limits: Option<(f32, f32)>) -> LineUnit {
+        LineUnit { id, width, position: Vec2::new(x, 0.0), limits }
+    }
+
+    /// Several units: side by side from the drag's start in the order they stand along it, each
+    /// keeping its width, [`LINE_GAP_M`] apart; all face the camera's far side.
     #[test]
-    fn a_dragged_line_spreads_the_units_along_the_drag() {
-        let units = [(1, 20.0), (2, 20.0), (3, 20.0)];
+    fn a_dragged_line_lays_the_units_side_by_side_in_their_order_along_it() {
+        let units = [unit(1, 20.0, 80.0, Some((5.0, 60.0))), unit(2, 10.0, 0.0, None), unit(3, 20.0, 40.0, None)];
         let line = formation_line(&units, Vec2::ZERO, Vec2::new(100.0, 0.0), Vec2::new(0.0, 1.0));
-        let centres: Vec<Vec2> = line.iter().map(|l| l.1).collect();
-        assert_eq!(centres, [Vec2::new(10.0, 0.0), Vec2::new(50.0, 0.0), Vec2::new(90.0, 0.0)]);
+        let placed: Vec<(u32, Vec2, Option<f32>)> = line.iter().map(|l| (l.0, l.1, l.3)).collect();
+        assert_eq!(
+            placed,
+            [
+                (2, Vec2::new(5.0, 0.0), None),
+                (3, Vec2::new(10.0 + LINE_GAP_M + 10.0, 0.0), None),
+                (1, Vec2::new(10.0 + LINE_GAP_M + 20.0 + LINE_GAP_M + 10.0, 0.0), None),
+            ],
+            "sorted along the drag, widths kept"
+        );
         assert!(line.iter().all(|l| (l.2 - std::f32::consts::FRAC_PI_2).abs() < 1e-6), "face +y, away from the camera");
         let towards = formation_line(&units, Vec2::ZERO, Vec2::new(100.0, 0.0), Vec2::new(0.0, -1.0));
         assert!((towards[0].2 + std::f32::consts::FRAC_PI_2).abs() < 1e-6, "the camera's far side is −y");
+        assert_eq!(formation_line(&[], Vec2::ZERO, Vec2::X, Vec2::Y), []);
     }
 
-    /// A drag shorter than the fronts keeps the units side by side, the minimum gap apart.
+    /// One unit: the drag's length, clamped to its limits, is its new width, centred on the line
+    /// from the drag's start; a unit without limits (artillery) keeps its width.
     #[test]
-    fn a_short_drag_keeps_the_units_side_by_side() {
-        let line = formation_line(&[(1, 10.0), (2, 30.0)], Vec2::ZERO, Vec2::new(0.0, 5.0), Vec2::X);
-        assert_eq!(line[0].1, Vec2::new(0.0, 5.0));
-        assert_eq!(line[1].1, Vec2::new(0.0, 10.0 + LINE_GAP_M + 15.0));
-        assert!((line[0].2 - 0.0).abs() < 1e-6, "faces +x");
-        assert_eq!(formation_line(&[], Vec2::ZERO, Vec2::X, Vec2::Y), []);
+    fn one_dragged_unit_takes_the_drags_length_as_its_width() {
+        let one = |len: f32, limits| formation_line(&[unit(7, 20.0, 0.0, limits)], Vec2::ZERO, Vec2::new(0.0, len), Vec2::X)[0];
+        assert_eq!((one(30.0, Some((8.0, 60.0))).1, one(30.0, Some((8.0, 60.0))).3), (Vec2::new(0.0, 15.0), Some(30.0)));
+        assert_eq!(one(3.0, Some((8.0, 60.0))).3, Some(8.0), "a short drag: the narrowest");
+        assert_eq!(one(90.0, Some((8.0, 60.0))).3, Some(60.0), "a long drag: the widest");
+        assert_eq!((one(90.0, None).1, one(90.0, None).3), (Vec2::new(0.0, 10.0), None), "artillery keeps its width");
+        assert!((one(30.0, None).2 - 0.0).abs() < 1e-6, "faces +x");
     }
 }

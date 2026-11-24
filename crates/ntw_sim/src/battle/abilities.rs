@@ -62,6 +62,9 @@ pub const SKIRMISH_EDGE_LOOKAHEAD_S: f32 = 3.0;
 pub const FORMATION_RANKS: f32 = 3.0;
 /// See [`FORMATION_RANKS`] (PROVISIONAL).
 pub const FILE_SPACING_M: f32 = 1.0;
+/// The widest line a single unit can be dragged out to, in metres (`0x005640C0`: `80.0` at
+/// `0x01325D70`, CONFIRMED static).
+pub const MAX_DRAG_WIDTH_M: f32 = 80.0;
 
 /// Ability enum values used here (`0x0131C3A0`, CONFIRMED; see [`super::attributes::ABILITY_NAMES`]).
 pub mod ability_ids {
@@ -263,6 +266,59 @@ impl super::model::LandUnit {
     /// PROVISIONAL [`FILE_SPACING_M`].
     pub fn rank_spacing(&self) -> f32 {
         if self.formation_rank_spacing > 0.0 { self.formation_rank_spacing } else { FILE_SPACING_M }
+    }
+
+    /// The metres between two files: the formation's width over its files (the battle setup lays
+    /// them `spacing_file_close` apart), else the PROVISIONAL [`FILE_SPACING_M`].
+    fn file_spacing(&self) -> f32 {
+        if self.formation_width > 0.0 && self.formation_files > 0 {
+            self.formation_width / self.formation_files as f32
+        } else {
+            FILE_SPACING_M
+        }
+    }
+
+    /// The files a line `width` metres wide holds: the line shape's `0x00642C90`,
+    /// `floor((width + 0.001 − 2r) / file spacing) + 1` (at least 1), capped at the living men as
+    /// its callers cap it (CONFIRMED static; r = [`super::model::LandUnit::man_radius`]).
+    pub fn files_for_width(&self, width: f32) -> u32 {
+        let room = (width + 0.001 - 2.0 * self.man_radius) / self.file_spacing();
+        let files = if room.is_finite() && room > 0.0 { room.floor() as u32 + 1 } else { 1 };
+        files.min(self.men.max(1))
+    }
+
+    /// The narrowest and widest line the player may drag the unit out to, in metres (one selected
+    /// land unit: `0x006879A0` / `0x00687390` → `0x00564530` / `0x005640C0`, CONFIRMED static; the
+    /// release clamps the drag's length between them, `0x005C4030`). The narrowest holds
+    /// `max(1, round(men × 0.04))` files, `× 0.1` for a mounted unit (`0x0055ABF0`,
+    /// [`super::strength::mounted`]); the widest is the line of the
+    /// files a width of twice the man radius per man holds (`0x00642C60`), at most 80 m. The men
+    /// are the unit's entity count `+0x2CC` (its men, for infantry). `None` for artillery, which keeps
+    /// its width (the exe's other branch, `0x0055CAA0` / `0x0055B060` / state `0xE`, asks the
+    /// current shape, `0x00569410`; PROVISIONAL: ours keeps every artillery unit's width).
+    pub fn drag_width_limits(&self) -> Option<(f32, f32)> {
+        if super::strength::category(self) == super::strength::Category::Artillery {
+            return None;
+        }
+        let men = self.men.max(1);
+        let share = if super::strength::mounted(self) { 0.1 } else { 0.04 };
+        let narrowest = ((men as f32 * share).round() as u32).max(1);
+        let widest = self.files_for_width(2.0 * self.man_radius * men as f32).max(narrowest);
+        let spacing = self.file_spacing();
+        let lo = narrowest as f32 * spacing;
+        Some((lo, (widest as f32 * spacing).min(MAX_DRAG_WIDTH_M).max(lo)))
+    }
+
+    /// Re-forms the line `width` metres wide: its files are [`Self::files_for_width`], its width
+    /// those files at the unit's file spacing (the model keeps width = files × spacing, as the
+    /// battle setup lays it). The player's dragged width reaches the unit through its move order
+    /// (`0x0068E610` stores it at the order's `+0x1C`; a move's lay-out, `0x00576B30`, re-forms
+    /// the men at the order's width), so ours sets it with the order ([`super::Battle::order_move_formed`]).
+    pub fn set_frontage(&mut self, width: f32) {
+        let spacing = self.file_spacing();
+        let files = self.files_for_width(width);
+        self.formation_files = files;
+        self.formation_width = files as f32 * spacing;
     }
 
     /// The formation's depth in metres: the squad summary's (`+0x654`), measured as

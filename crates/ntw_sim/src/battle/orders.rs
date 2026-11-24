@@ -115,13 +115,19 @@ impl Battle {
     }
 
     /// A move to `dest` that ends facing `facing` (radians, the model's facing): the player's
-    /// dragged-out formation ([`LandUnit::arrival_facing`], PROVISIONAL). Returns false if `id` is
-    /// unknown.
-    pub fn order_move_formed(&mut self, id: u32, dest: (f32, f32), facing: f32, speed: MoveSpeed) -> bool {
+    /// dragged-out formation ([`LandUnit::arrival_facing`], PROVISIONAL). With `width`, the order
+    /// carries a new frontage (one unit dragged out alone: `0x0068E610` stores the drag's length
+    /// at the order's `+0x1C`, CONFIRMED by debugger), which the unit takes with the order
+    /// ([`LandUnit::set_frontage`]). Returns false if `id` is unknown.
+    pub fn order_move_formed(&mut self, id: u32, dest: (f32, f32), facing: f32, speed: MoveSpeed, width: Option<f32>) -> bool {
+        let Some(i) = self.unit_index(id) else { return false };
+        // Before the move, whose lay-out re-forms the men (at the order's width, `0x00576B30`).
+        if let Some(w) = width {
+            self.units[i].set_frontage(w);
+        }
         if !self.order_move_at(id, dest, speed) {
             return false;
         }
-        let i = self.unit_index(id).expect("checked by order_move_at");
         self.units[i].arrival_facing = Some(facing);
         true
     }
@@ -372,6 +378,29 @@ mod tests {
         assert_eq!((u.fire_target, u.melee_target, u.destination), (None, None, None));
     }
 
+    /// One unit dragged out alone takes the drag's width with its move order (`0x0068E610`): its
+    /// files are the line shape's `floor((width + 0.001 − 2r) / spacing) + 1` (`0x00642C90`). Its
+    /// drag limits are `round(men × 0.04)` files (× 0.1 mounted) and the line of 2r per man, at
+    /// most 80 m (`0x00564530` / `0x005640C0`); artillery keeps its width.
+    #[test]
+    fn a_dragged_width_reforms_the_unit_within_its_limits() {
+        let mut b = battle();
+        let u = &mut b.units[0];
+        (u.men, u.formation_files, u.formation_width, u.man_radius) = (160, 40, 60.0, 0.25);
+        // 1.5 m between files; 6 files at the narrowest; the widest: 2r × 160 = 80 m holds
+        // floor((80.001 − 0.5) / 1.5) + 1 = 54 files = 81 m, capped at 80 m.
+        assert_eq!(u.drag_width_limits(), Some((9.0, 80.0)));
+        u.is_cavalry = true;
+        assert_eq!(u.drag_width_limits().map(|l| l.0), Some(24.0), "16 files mounted");
+        u.is_cavalry = false;
+        assert!(b.order_move_formed(1, (0.5, 0.0), 0.0, MoveSpeed::Walk, Some(30.0)));
+        // floor((30.001 − 0.5) / 1.5) + 1 = 20 files, 30 m.
+        assert_eq!((b.units[0].formation_files, b.units[0].formation_width), (20, 30.0));
+        assert_eq!(b.units[0].files_for_width(1000.0), 160, "capped at the men");
+        b.units[0].unit_category = "artillery".into();
+        assert_eq!(b.units[0].drag_width_limits(), None);
+    }
+
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain
     /// move keeps the walking facing.
     #[test]
@@ -379,7 +408,7 @@ mod tests {
         let mut b = battle();
         b.units[0].hold_position = true;
         b.units[1].hold_position = true;
-        assert!(b.order_move_formed(1, (0.5, 0.0), 1.25, MoveSpeed::Walk));
+        assert!(b.order_move_formed(1, (0.5, 0.0), 1.25, MoveSpeed::Walk, None));
         for _ in 0..50 {
             b.step();
         }
