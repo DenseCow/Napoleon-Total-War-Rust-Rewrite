@@ -1086,3 +1086,30 @@ db_record! {
         num_uses: i32,
     }
 }
+
+db_record! {
+    /// One row of `battle_script_strings` (row reader `0x00E548B0`, file v1, 296 rows): a line a
+    /// battle script hands the advisor by key (`battle:show_advisor_message`, `0x006646D0`, looks
+    /// the key up and takes #1 and #2; CONFIRMED).
+    pub struct BattleScriptString in "battle_script_strings", key = key {
+        /// #0 @0x00: the key, e.g. `CreativeAssembly.HB_Austerlitz_Intro_1`; also the speech file's
+        /// name (`advisor\<key>.mp3`, `0x0100BC80`).
+        key: String,
+        /// #1 @0x0C: the English text; the shown text is the localisation
+        /// `battle_script_strings_string_<key>`.
+        string: String,
+        /// #2 @0x18 {v>=1}: who speaks it, an `advisors` key (the portrait), e.g. `Napoleon`.
+        speaker: String => since 1,
+    }
+}
+
+db_record! {
+    /// One row of `advisors` (row reader `0xFA3C40`, file v1, 9 rows): an advisor's portrait. The
+    /// advice window shows the portrait of its message's speaker (`0x00E0E3E0` → `0x00E292C0`).
+    pub struct AdvisorRecord in "advisors", key = key {
+        /// #0 @0x00: the advisor key (`Napoleon`, `battle_advisor`, ...).
+        key: String,
+        /// #1 @0x0C {v>=1}: the portrait image, e.g. `data\UI\Common UI\Skins\advisor_napoleon_grownup.tga`.
+        icon_path: String => since 1,
+    }
+}

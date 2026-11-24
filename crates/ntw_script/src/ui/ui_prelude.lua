@@ -51,6 +51,12 @@ end
 function methods:TooltipTextSet(text, ...)
     return ui.SetTooltipText(rawget(self, "__addr"), text, ...)
 end
+-- SetOpacity(a) / PropagateOpacity(a) (CONFIRMED method names 0x013F17D4 / 0x013F17E0; the second
+-- for the component and its children, INFERRED from its name): the advice window's fade out
+-- (fading_panel.lua). PROVISIONAL: the UI is drawn without opacity yet, so a fading panel stays
+-- fully drawn until it is hidden.
+function methods:SetOpacity() end
+function methods:PropagateOpacity() end
 -- obj:SequentialFind("a", "b", ...) returns a component object (CONFIRMED usage:
 -- settlement_captured.lua calls SetState on the result directly; wrapping it again with
 -- UIComponent() returns the same object, so scripts that wrap it still work).
@@ -864,6 +870,22 @@ function UIPrefsInterface(core, mp, dropin)
         __index = function(t, key)
             return function(...)
                 log("UNKNOWN UIPrefsInterface:" .. tostring(key))
+                return nil
+            end
+        end,
+    })
+end
+
+-- MultiplayerPlayerInterface(base, core): the multiplayer players object (CONFIRMED class name
+-- 0x01395D80, method ChangeVoiceChatEnabled 0x01395E00). The menu bar's voice button makes one at
+-- its start; PROVISIONAL: no voice chat, so its calls do nothing (other methods are logged).
+function MultiplayerPlayerInterface(base, core)
+    local o = {}
+    function o:ChangeVoiceChatEnabled() end
+    return setmetatable(o, {
+        __index = function(t, key)
+            return function(...)
+                log("UNKNOWN MultiplayerPlayerInterface:" .. tostring(key))
                 return nil
             end
         end,

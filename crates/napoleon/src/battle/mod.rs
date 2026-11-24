@@ -21,6 +21,7 @@
 //! *virtual* clock, so a tick's RESULT never depends on speed or frame rate (determinism).
 
 mod actions;
+mod advisor;
 mod camera;
 pub(crate) mod flag;
 pub(crate) mod fx;
@@ -125,6 +126,8 @@ pub enum ScriptEvent {
     Command { name: &'static str, unit: Option<u32>, bool1: bool },
     /// A camera input action (`ntw_script::battle_script::INPUT_EVENT_NAMES`).
     Input(&'static str),
+    /// ESCAPE went up while the scripts hold it ([`scripts::ScriptKeys`]).
+    EscapeReleased,
 }
 
 

@@ -70,6 +70,9 @@ struct Slot {
     stealer: bool,
     /// Pressed and not released yet (flag bit2).
     pressed: bool,
+    /// Switched off (flag bit3, [`ShortcutMachine::steal_input`]): never pressed; a stolen key
+    /// still reaches its stealer.
+    disabled: bool,
 }
 
 /// The bindings of one game mode and the handler's state ([`Self::poll`]).
@@ -87,8 +90,20 @@ pub struct ShortcutMachine {
 impl ShortcutMachine {
     /// The machine for one mode's bindings (`Shortcuts::mode_bindings`).
     pub fn new(bindings: Bindings) -> Self {
-        let slots = bindings.0.into_iter().map(|binding| Slot { binding, stealer: false, pressed: false }).collect();
+        let slots = bindings.0.into_iter().map(|binding| Slot { binding, stealer: false, pressed: false, disabled: false }).collect();
         Self { slots, ..Self::default() }
+    }
+
+    /// Switches every binding off (`on`) or back on, except the funcs in `keep` (CONFIRMED
+    /// `0x00EB0870` with no func given, which sets or clears flag bit3 of each binding it has now
+    /// but the two funcs it names, which the battle passes as `keep`; the walk `0x00ED76E0`
+    /// presses no binding with bit3, tested at `0x00ED77F7` after the lock test and before the
+    /// ready test). The battle scripts' `steal_input_focus` (`0x00666990`) passes true and
+    /// `release_input_focus` false. A stealer's own binding made later starts on, as in the exe.
+    pub fn steal_input(&mut self, on: bool, keep: &[&str]) {
+        for s in self.slots.iter_mut().filter(|s| !keep.contains(&s.binding.func.as_str())) {
+            s.disabled = on;
+        }
     }
 
     /// One poll of the keys (once per frame): `is_down` says which keys (the exe's names) are down
@@ -120,7 +135,7 @@ impl ShortcutMachine {
                 }
             } else if (!k1 || !stolen[0]) && (!k2 || !stolen[1]) {
                 let b = &self.slots[i].binding;
-                if (target.unlocked(&b.component) || b.ignore_lock) && target.ready(&b.component) {
+                if (target.unlocked(&b.component) || b.ignore_lock) && !self.slots[i].disabled && target.ready(&b.component) {
                     target.press(&b.component, &b.func, time);
                     self.active = Some(i);
                     self.slots[i].pressed = true;
@@ -195,7 +210,7 @@ impl ShortcutMachine {
             let bound = slots.iter().any(|s| s.binding.keys.iter().any(|k| k.key == key) && (s.stealer || target.registered(&s.binding.component)));
             if !bound {
                 let binding = Binding { keys: vec![KeySlot { key: key.to_owned(), modifier: Modifier::None }], ..Binding::default() };
-                slots.push(Slot { binding, stealer: true, pressed: false });
+                slots.push(Slot { binding, stealer: true, pressed: false, disabled: false });
             }
         });
     }
@@ -226,13 +241,21 @@ pub struct EngineComponent<'a> {
     pub locked_from: i32,
 }
 
+/// Keys an engine object holds (`StealShortcutKey` from outside the UI: the battle scripts'
+/// `steal_escape_key`, `0x00666960`), and where their key events go: `heard(key, down)`.
+pub struct EngineStealer<'a> {
+    pub keys: &'a [&'a str],
+    pub heard: &'a mut dyn FnMut(&str, bool),
+}
+
 /// A HUD's script host as the shortcut handler's target ([`UiScriptHost::poll_shortcuts`]): the
-/// UI components by name, and the `engine` components whose presses go to `handler(component,
-/// func, time)`.
+/// UI components by name, the `engine` components whose presses go to `handler(component,
+/// func, time)`, and the keys an engine object stole (`stealer`).
 struct HostShortcuts<'a> {
     host: &'a UiScriptHost,
     engine: &'a [EngineComponent<'a>],
     handler: &'a mut dyn FnMut(&str, &str, f32),
+    stealer: Option<EngineStealer<'a>>,
 }
 
 impl HostShortcuts<'_> {
@@ -310,15 +333,34 @@ impl ShortcutTarget for HostShortcuts<'_> {
     }
 
     fn stolen(&self, key: &str) -> bool {
-        self.host.stealer_of(key).is_some()
+        self.stealer.as_ref().is_some_and(|s| s.keys.contains(&key)) || self.host.stealer_of(key).is_some()
     }
 
     fn each_stolen_key(&self, f: &mut dyn FnMut(&str)) {
-        self.host.each_stolen_key(f);
+        let engine = self.stealer.as_ref().map_or(&[][..], |s| s.keys);
+        for (i, k) in engine.iter().enumerate() {
+            if !engine[..i].contains(k) {
+                f(k);
+            }
+        }
+        self.host.each_stolen_key(&mut |k| {
+            if !engine.contains(&k) {
+                f(k);
+            }
+        });
     }
 
+    /// Every stealer of the keys hears them (`0x00EA5090` / `0x00EB0900` walk the key's whole
+    /// stealer list): the engine object first (its steal is the newest, as the battle scripts
+    /// steal ESCAPE after the HUD is built), then the UI's.
     fn send_stolen(&mut self, keys: &[&str], down: bool) -> bool {
         let mut heard = false;
+        if let Some(s) = self.stealer.as_mut() {
+            for &k in keys.iter().filter(|k| s.keys.contains(k)) {
+                (s.heard)(k, down);
+                heard = true;
+            }
+        }
         for k in self.host.stolen_key_names() {
             if keys.contains(&k.as_str()) {
                 heard |= self.host.send_stolen_key(&k, !down).is_some();
@@ -339,13 +381,21 @@ impl UiScriptHost {
     /// component's `OnShortcut(func, false)` when pressed and `OnShortcut(func, true)` when
     /// released; a binding of one of the `engine` components calls `handler(component, func,
     /// time)` on each press (a repeating one every frame it is held, with the frame's time); a
-    /// stolen key (`StealShortcutKey`) goes to its stealer's `OnKey`.
-    pub(super) fn poll_shortcuts(&self, machine: &mut ShortcutMachine, keys: FrameKeys, engine: &[EngineComponent], handler: &mut dyn FnMut(&str, &str, f32)) {
+    /// stolen key (`StealShortcutKey`) goes to its stealer's `OnKey`, and a key an engine object
+    /// holds (`stealer`) to its `heard`.
+    pub(super) fn poll_shortcuts<'a>(
+        &'a self,
+        machine: &mut ShortcutMachine,
+        keys: FrameKeys,
+        engine: &'a [EngineComponent<'a>],
+        stealer: Option<EngineStealer<'a>>,
+        handler: &'a mut dyn FnMut(&str, &str, f32),
+    ) {
         if self.input_focus_held() || !self.inner().shortcuts_enabled.get() {
             return;
         }
         let is_down = |k: &str| keys.down.contains(&k);
-        machine.poll(&is_down, keys.held, keys.time, &mut HostShortcuts { host: self, engine, handler });
+        machine.poll(&is_down, keys.held, keys.time, &mut HostShortcuts { host: self, engine, handler, stealer });
     }
 }
 
@@ -497,5 +547,51 @@ mod tests {
         assert_eq!(poll(&mut m, &mut t, &["RETURN"], NONE), ["press button_end_turn end_turn 0.5"]);
         assert_eq!(poll(&mut m, &mut t, &["ESCAPE"], NONE), ["release button_end_turn end_turn"]);
         assert_eq!(m.slots.len(), 4);
+    }
+
+    /// `steal_input_focus` (`0x00EB0870`): every binding but quit and end_battle is off, a stolen
+    /// key still reaches its stealer, and `release_input_focus` turns them on again.
+    #[test]
+    fn stolen_input_presses_only_quit_and_end_battle() {
+        const BATTLE: &str = r#"<shortcuts version="32">
+  <mode>battle</mode>
+  <keyset name="fps">
+    <category name="c">
+      <group name="g">
+        <func name="toggle_pause"><key>P</key></func>
+        <func name="quit"><key modifier="ALT">Q</key></func>
+        <func name="end_battle"><key>E</key></func>
+        <func name="escape_menu"><key>ESCAPE</key></func>
+      </group>
+    </category>
+  </keyset>
+  <mappings>
+    <mode name="battle">
+      <func name="toggle_pause" component="root"/>
+      <func name="quit" component="root"/>
+      <func name="end_battle" component="root"/>
+      <func name="escape_menu" component="root"/>
+    </mode>
+  </mappings>
+</shortcuts>"#;
+        let mut m = ShortcutMachine::new(Shortcuts::parse(BATTLE.as_bytes()).unwrap().mode_bindings("battle"));
+        let mut t = Target::default();
+        m.steal_input(true, &["quit", "end_battle"]);
+        assert!(poll(&mut m, &mut t, &["P"], NONE).is_empty());
+        assert!(poll(&mut m, &mut t, &[], NONE).is_empty());
+        let alt = Held { alt: true, ..NONE };
+        assert_eq!(poll(&mut m, &mut t, &["Q"], alt), ["press root quit 0.5"]);
+        assert_eq!(poll(&mut m, &mut t, &[], NONE), ["release root quit"]);
+        assert_eq!(poll(&mut m, &mut t, &["E"], NONE), ["press root end_battle 0.5"]);
+        assert_eq!(poll(&mut m, &mut t, &[], NONE), ["release root end_battle"]);
+        // The scripts hold ESCAPE: the stealer hears it, the menu binding stays off.
+        t.stolen.push("ESCAPE".into());
+        assert_eq!(poll(&mut m, &mut t, &["ESCAPE"], NONE), ["stolen ESCAPE down"]);
+        assert_eq!(poll(&mut m, &mut t, &[], NONE), ["stolen ESCAPE up"]);
+        t.stolen.clear();
+        assert!(poll(&mut m, &mut t, &["ESCAPE"], NONE).is_empty());
+        assert!(poll(&mut m, &mut t, &[], NONE).is_empty());
+        m.steal_input(false, &["quit", "end_battle"]);
+        assert_eq!(poll(&mut m, &mut t, &["P"], NONE), ["press root toggle_pause 0.5"]);
     }
 }

@@ -258,7 +258,9 @@ local function cam_now()
 end
 function camera_class:position() cam_now() return battle_vector:new(cam_pos.x, cam_pos.y, cam_pos.z) end
 function camera_class:target() cam_now() return battle_vector:new(cam_target.x, cam_target.y, cam_target.z) end
--- INFERRED argument order (the scripts pass "Target" then "Camera" positions) and seconds.
+-- move_to(target, position, seconds): CONFIRMED argument order (0x00616510 queues
+-- BCQ_CAMERA_MOVE_TO, whose handler 0x005BEFD0 hands the camera manager 0x005FB020 the target,
+-- the position and the number); the camera glides there (BattleCamera::script_move_to).
 function camera_class:move_to(target, position, seconds)
     if type(target) ~= "table" or type(position) ~= "table" then return end
     -- A degenerate view (no start view known) is ignored.
@@ -318,14 +320,28 @@ function empire_battle:camera() return the_camera end
 function empire_battle:weather() return setmetatable({}, weather_class) end
 function empire_battle:subtitles() return setmetatable({}, subtitles_class) end
 function empire_battle:ui_component(name) return setmetatable({ name = tostring(name) }, ui_class) end
--- Known calls with no effect in our game yet (PROVISIONAL, not logged): input and escape-key
--- capture, contextual advice, the advisor window.
-function empire_battle:steal_input_focus() end
-function empire_battle:release_input_focus() end
-function empire_battle:steal_escape_key() end
-function empire_battle:release_escape_key() end
+-- steal_input_focus / release_input_focus (0x00612BC0 → 0x00666990): every keyboard shortcut but
+-- quit and end_battle off / on again (0x00EB0870). steal_escape_key / release_escape_key
+-- (0x00612B90 → 0x00666960 / 0x0065FF60): the script object holds ESCAPE; on its release the game
+-- calls the global Esc_Key_Pressed (0x0064C5A0), so the menu does not open meanwhile.
+function empire_battle:steal_input_focus() nb.request("input_focus", { units = {}, stolen = true }) end
+function empire_battle:release_input_focus() nb.request("input_focus", { units = {}, stolen = false }) end
+function empire_battle:steal_escape_key() nb.request("escape_key", { units = {}, stolen = true }) end
+function empire_battle:release_escape_key() nb.request("escape_key", { units = {}, stolen = false }) end
+-- Known call with no effect in our game yet (PROVISIONAL, not logged): contextual advice.
 function empire_battle:suspend_contextual_advice() end
-function empire_battle:close_advisor() end
+-- The advisor (BATTLE_FIDELITY.md §59.8). show_advisor_message(key, message) (0x006646D0): both
+-- must be strings or numbers (the exe reads them with lua_tolstring, 0x00FE9C40, which converts a number),
+-- else the call fails with the exe's own message; the game shows the
+-- battle_script_strings row named by key (or message when there is none) and plays its speech.
+-- advice_finished() (0x0062A350): the speech has ended. close_advisor() (0x0063D670): dismissed.
+function empire_battle:show_advisor_message(key, message)
+    if type(key) ~= "string" and type(key) ~= "number" then error("bad argument #1 (invalid key (string) argument)", 2) end
+    if type(message) ~= "string" and type(message) ~= "number" then error("bad argument #2 (invalid message (string) argument)", 2) end
+    nb.request("advisor", { units = {}, key = tostring(key), message = tostring(message) })
+end
+function empire_battle:advice_finished() return nb.advice_finished() end
+function empire_battle:close_advisor() nb.request("close_advisor", { units = {} }) end
 function empire_battle:register_singleshot_timer(name, ms) nb.timer(name, ms or 0, false) end
 function empire_battle:register_repeating_timer(name, ms) nb.timer(name, ms or 0, true) end
 function empire_battle:unregister_timer(name) nb.untimer(name) end
@@ -342,8 +358,7 @@ function empire_battle:unregister_input_handler() nb.input_handler(nil) end
 -- suppress_unit_voices(b) (0x00612DF0 → 0x006670F0): the units' speech. PROVISIONAL no-op: the
 -- game plays no unit voices yet.
 function empire_battle:suppress_unit_voices() end
-function empire_battle:advice_finished() return true end
-function empire_battle:show_advisor_message(s) log("advisor: " .. tostring(s)) end
+-- PROVISIONAL: the locatable advice (its own binding, a position to zoom to) is not traced yet.
 function empire_battle:show_locatable_advisor_message(s) log("advisor: " .. tostring(s)) end
 function empire_battle:end_battle_to_frontend() nb.request("end_battle", { units = {} }) end
 -- Markers (battle:marker(name), binding 0x00612C30 → 0x0064BC10, CONFIRMED object layout: position

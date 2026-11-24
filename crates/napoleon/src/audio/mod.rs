@@ -183,6 +183,46 @@ pub struct PlayMovieAudio {
     pub movie: String,
 }
 
+/// The advisor's speech (driven by `crate::battle::advisor`): [`AdviceSpeech::play`] plays
+/// `advisor\<name>.mp3` (CONFIRMED path, `0x0100BC80`; the file is looked for first, a missing one
+/// plays nothing), [`AdviceSpeech::stop`] stops it. One at a time: a new one stops the last.
+/// PROVISIONAL: 2D in the speech group at volume 1; the advisor's own volume settings
+/// (`SS_<LANG>_LAND_BATTLE_ADVISOR_VOLUME`) are not applied yet.
+#[derive(Resource, Debug, Default)]
+pub struct AdviceSpeech {
+    /// What was asked since the audio last looked ([`advice_speech`]): play this file, or stop.
+    asked: Option<Option<String>>,
+    /// The speech has started and not ended (or been stopped).
+    playing: bool,
+    voice: Option<(Entity, Arc<VoiceControl>)>,
+    /// Frames since the voice was made, until the output takes it ([`advice_speech`]).
+    frames_unheard: u8,
+    /// "No audio output" was logged.
+    unheard_logged: bool,
+}
+
+impl AdviceSpeech {
+    /// Plays `advisor\<name>.mp3`, replacing the speech playing.
+    pub fn play(&mut self, name: &str) {
+        self.asked = Some(Some(name.to_owned()));
+    }
+
+    /// Stops the speech.
+    pub fn stop(&mut self) {
+        self.asked = Some(None);
+    }
+
+    /// The speech plays. A speech just asked for counts as playing until the audio has tried it
+    /// (a missing file or no audio output ends it then), so a caller that asks and then checks in
+    /// the same frame never sees it finished before it started.
+    pub fn playing(&self) -> bool {
+        match &self.asked {
+            Some(asked) => asked.is_some(),
+            None => self.playing,
+        }
+    }
+}
+
 /// Marks the entity whose transform is the 3D listener.
 #[derive(Component, Debug, Default)]
 pub struct AudioListener;
@@ -926,6 +966,7 @@ impl Plugin for GameAudioPlugin {
             .add_message::<SetMusic>()
             .add_message::<CampaignAmbience>()
             .add_message::<PlayMovieAudio>()
+            .init_resource::<AdviceSpeech>()
             .init_resource::<ClipCache>()
             .init_resource::<EventHistory>()
             .init_resource::<Music>()
@@ -957,6 +998,7 @@ impl Plugin for GameAudioPlugin {
                     projectile_sounds,
                     play_sounds,
                     movie_audio,
+                    advice_speech,
                     campaign_ambience,
                     music,
                     update_voices,
@@ -1528,6 +1570,81 @@ fn movie_audio(mut msgs: MessageReader<PlayMovieAudio>, mut player: Player) {
         };
         player.commands.spawn((AudioPlayer::<VoiceClip>(handle), PlaybackSettings::ONCE, voice));
     }
+}
+
+/// Frames a new advice voice may go without an audio sink before it counts as unheard (the sink
+/// is made in the frame the voice is, when there is an audio output).
+const ADVICE_UNHEARD_FRAMES: u8 = 3;
+
+/// Starts or stops the advisor's speech as [`AdviceSpeech`] asks, and keeps its state. A voice the
+/// audio output never takes (no device) is stopped, so a script waiting for the advice to end
+/// (`battle:advice_finished()`) is not held forever; that is logged once.
+fn advice_speech(mut player: Player, mut speech: ResMut<AdviceSpeech>, sinks: Query<(), With<AudioSink>>) {
+    if let Some(asked) = speech.asked.take() {
+        if let Some((e, c)) = speech.voice.take() {
+            c.stop();
+            // A voice no sink took never finishes, so `update_voices` would keep it.
+            if !sinks.contains(e) {
+                player.commands.entity(e).despawn();
+            }
+        }
+        if let Some(name) = asked {
+            speech.voice = start_advice(&mut player, &name);
+            speech.frames_unheard = 0;
+        }
+    }
+    if let Some((entity, c)) = speech.voice.clone() {
+        if sinks.contains(entity) {
+            speech.frames_unheard = 0;
+        } else if !c.is_finished() {
+            speech.frames_unheard = speech.frames_unheard.saturating_add(1);
+            if speech.frames_unheard > ADVICE_UNHEARD_FRAMES {
+                // No sink pulls its samples, so it never reports finished: removed here, not
+                // left to `update_voices`.
+                c.stop();
+                player.commands.entity(entity).despawn();
+                speech.voice = None;
+                if !std::mem::replace(&mut speech.unheard_logged, true) {
+                    warn!("advice speech: the audio output did not take it (no audio device?); the advice counts as finished");
+                }
+            }
+        }
+    }
+    let playing = speech.voice.as_ref().is_some_and(|(_, c)| !c.is_finished() && !c.is_stopped());
+    if !playing {
+        speech.voice = None;
+    }
+    speech.playing = playing;
+}
+
+/// The advisor's speech `advisor\<name>.mp3` as a 2D speech voice, streamed; `None` when the file
+/// is missing or fails.
+fn start_advice(player: &mut Player, name: &str) -> Option<(Entity, Arc<VoiceControl>)> {
+    let vfs = player.data.as_ref().map(|d| d.vfs.clone())?;
+    let path = normalize_sound_path(&format!("advisor\\{name}.mp3"));
+    if !player.cache.playable(&path) || !vfs.contains(&path) {
+        debug!("advice speech: no file {path}");
+        return None;
+    }
+    let data = player.clip_data(&vfs, &path, true)?;
+    let control = VoiceControl::new(0.0, 0.0);
+    let handle = player.clips.add(VoiceClip { data, control: control.clone(), speed: 1.0, delay: 0.0, looped: false, loop_start: 0, loop_end: 0 });
+    let voice = Voice {
+        control: control.clone(),
+        event: usize::MAX,
+        position: None,
+        min_dist: 0.0,
+        max_dist: 0.0,
+        falloff: 0.0,
+        volume: 1.0,
+        group: VolumeGroup::Speech,
+        looped: false,
+        fade: 1.0,
+        fade_rate: 0.0,
+        equal_power: false,
+    };
+    let entity = player.commands.spawn((AudioPlayer::<VoiceClip>(handle), PlaybackSettings::ONCE, voice)).id();
+    Some((entity, control))
 }
 
 fn play_sounds(mut msgs: MessageReader<PlaySound>, mut player: Player) {

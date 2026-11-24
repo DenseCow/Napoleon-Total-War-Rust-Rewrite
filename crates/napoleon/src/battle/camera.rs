@@ -61,7 +61,8 @@ const ZOOM_FOV_MAX: f32 = 1.483_529_8;
 const TRACK_TILT_RISE: f32 = 10.0;
 /// A transition's length (CONFIRMED, the transition camera's constructor `0x00592410`, called by
 /// `0x005FB4D0`): the larger of 0.025 s per metre the eye moves and 3/π s per radian the view
-/// turns, held in [0.5, 3] s, times the speed 1.0 every caller here passes.
+/// turns, held in [0.5, 3] s, times the caller's number: 1.0, or a script `move_to`'s
+/// ([`BattleCamera::script_move_to`]).
 const TRANSITION_PER_METRE: f32 = 0.025;
 const TRANSITION_MIN: f32 = 0.5;
 const TRANSITION_MAX: f32 = 3.0;
@@ -635,6 +636,30 @@ impl BattleCamera {
         (self.mode, self.fov, self.transition) = (Mode::Free, FOV, None);
     }
 
+    /// A battle script's `camera:move_to(target, position, seconds)` (CONFIRMED, the camera
+    /// manager's `0x005FB020`, reached from the script through `BCQ_CAMERA_MOVE_TO`,
+    /// `0x005BEFD0`): the zoom's toggle off first (`0x005CDD90`), the view on screen copied as the
+    /// transition's start (`0x005F7470`), then the free camera (`+0x800`) set to `eye` looking at
+    /// `target` with its height over the ground there (its vfunc `+0xBC`, `0x005FB320`) and made
+    /// current through a transition (`0x005FB4D0`) whose length is the usual one times `seconds`
+    /// ([`Self::start_scaled_transition`]); with `seconds` 0 or less the transition is over from
+    /// the start (`0x00592410` sets its elapsed time to its length), so the camera is there at
+    /// once. A tracking camera ends with it. The free camera keeps its own rate.
+    pub fn script_move_to(&mut self, eye: Vec3, target: Vec3, seconds: f32, ground: Ground) {
+        if self.current_is_zoom() {
+            self.leave_zoom();
+        }
+        let from = self.view();
+        let free = self.free_camera();
+        (self.mode, self.fov, self.rate) = (Mode::Free, FOV, free.rate);
+        self.place(eye, target, ground);
+        if seconds > 0.0 {
+            self.start_scaled_transition(from, seconds);
+        } else {
+            self.transition = None;
+        }
+    }
+
     fn current_is_tracking(&self) -> bool {
         matches!(self.mode, Mode::Tracking { .. }) && self.transition.is_none()
     }
@@ -654,12 +679,19 @@ impl BattleCamera {
     /// (CONFIRMED `0x005FB4D0` → the transition camera's constructor `0x00592410`, which sets the
     /// length; `0x005FFB00` runs it): the length from how far the eye moves and how far
     /// the view turns (the angle between the two directions, its cosine held in [0, 1], so a turn
-    /// of more than 90° counts as 90°).
-    fn start_transition(&mut self, (from_eye, from_target, from_fov): (Vec3, Vec3, f32)) {
+    /// of more than 90° counts as 90°), times the speed 1.0.
+    fn start_transition(&mut self, from: (Vec3, Vec3, f32)) {
+        self.start_scaled_transition(from, 1.0);
+    }
+
+    /// [`Self::start_transition`] with the length times `scale` (CONFIRMED `0x00592410`: the
+    /// clamped length times the float its caller passes, `0x0059271C`, when its "length given"
+    /// byte `+0x15C` is 0, as for every start here).
+    fn start_scaled_transition(&mut self, (from_eye, from_target, from_fov): (Vec3, Vec3, f32), scale: f32) {
         let from_dir = from_target - from_eye;
         let cos = from_dir.normalize_or_zero().dot((self.target - self.eye).normalize_or_zero());
         let turn = cos.clamp(0.0, 1.0).acos() * 3.0 / std::f32::consts::PI;
-        let duration = (from_eye.distance(self.eye) * TRANSITION_PER_METRE).max(turn).clamp(TRANSITION_MIN, TRANSITION_MAX);
+        let duration = (from_eye.distance(self.eye) * TRANSITION_PER_METRE).max(turn).clamp(TRANSITION_MIN, TRANSITION_MAX) * scale;
         self.transition = Some(Transition {
             from_eye,
             from_dir,
@@ -1144,8 +1176,40 @@ mod tests {
         assert!(c.transition.is_none());
     }
 
+    /// Runs frames at the rate 0.1 for `seconds` and a little more; then no transition shows.
+    fn settle_for(c: &mut BattleCamera, seconds: f32) {
+        for _ in 0..(seconds * 10.0) as usize + 20 {
+            c.end_frame(0.1, &flat);
+        }
+        assert!(c.transition.is_none());
+    }
+
     fn close(a: Vec3, b: Vec3) -> bool {
         a.distance(b) < 1e-4
+    }
+
+    /// A script's `move_to` (`0x005FB020`): the free camera is placed and reached through a
+    /// transition whose length is the usual one times the script's number; 0 places it at once;
+    /// a tracking camera ends with it.
+    #[test]
+    fn a_script_move_glides_for_the_scaled_length() {
+        let mut c = cam(10.0);
+        let (eye, target) = (Vec3::new(100.0, 10.0, 0.0), Vec3::new(100.0, 10.0, -1.0));
+        c.script_move_to(eye, target, 3.0, &flat);
+        assert_eq!((c.eye, c.mode), (eye, Mode::Free));
+        assert!((c.transition.unwrap().duration - 2.5 * 3.0).abs() < 1e-5, "100 m: 2.5 s, times 3");
+        assert_eq!(c.view().0, Vec3::new(0.0, 10.0, 0.0), "it starts from the view on screen");
+        settle_for(&mut c, 7.5);
+        assert_eq!(c.view().0, eye);
+        c.script_move_to(Vec3::ZERO + Vec3::Y * 10.0, Vec3::new(0.0, 10.0, -1.0), 0.0, &flat);
+        assert!(c.transition.is_none(), "0: there at once");
+        assert_eq!(c.view().0, Vec3::new(0.0, 10.0, 0.0));
+        c.set_track_target(4, true);
+        c.key(CameraFunc::ToggleTracking, 0.0, &flat);
+        settle(&mut c);
+        assert_eq!(c.tracked_unit(), Some(4));
+        c.script_move_to(eye, target, 1.0, &flat);
+        assert_eq!(c.mode, Mode::Free, "the move ends the tracking");
     }
 
     #[test]

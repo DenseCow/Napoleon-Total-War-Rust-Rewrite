@@ -13,7 +13,7 @@
 use mlua::{Function, Lua, Table, Value};
 
 use super::UiScriptHost;
-use super::shortcuts::{EngineComponent, FrameKeys, ShortcutMachine};
+use super::shortcuts::{EngineComponent, EngineStealer, FrameKeys, ShortcutMachine};
 use crate::ScriptSource;
 
 const BATTLE_PRELUDE: &str = include_str!("battle_prelude.lua");
@@ -163,6 +163,29 @@ pub enum BattleUiRequest {
     /// target set (`on`) or let go, `SetTrackTarget` `0x005F9B70`; the rest of what it does is in
     /// `napoleon::battle::camera::BattleCamera::set_track_target` (BATTLE_FIDELITY.md §59.5).
     SelectionProxy { id: u32, on: bool },
+    /// `BattleUI.DismissCurrentAdvice()` (`0x007910B0`): the advice window's close button.
+    DismissAdvice,
+    /// `BattleUI.RepeatAdvice()` (`0x007911A0`): play the current advice again.
+    RepeatAdvice,
+    /// `BattleUI.ChangeAdviceAudioMode(on)` (`0x0075C370`): the advisor speaks (`on`) or not.
+    AdviceAudioMode(bool),
+    /// `BattleUI.ChangeAdviceTextMode(on)` (`0x0075C380`): the advice window shows its text or not.
+    AdviceTextMode(bool),
+}
+
+/// One advice as the advice window's `UpdateWithNewAdvice` reads it (the table `0x005AB820`
+/// builds; CONFIRMED field names and which are left out).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdviceView {
+    pub title: String,
+    /// Set only when not empty.
+    pub subtitle: String,
+    pub text: String,
+    pub locatable: bool,
+    /// The advice names a speech file (whether or not it plays).
+    pub has_audio: bool,
+    /// The speaker's portrait, when it has one.
+    pub icon_path: Option<String>,
 }
 
 /// Installs the battle UI's engine side into a UI host. Call before loading
@@ -238,10 +261,22 @@ pub const CARD_MANAGER_COMPONENT: &str = "card_manager";
 /// The battle camera acts only while the input layer is 0 or less (CONFIRMED `0x005EAF00`'s
 /// first test of `0x01765944`). PROVISIONAL: the card manager's lock, taken as the same (its
 /// handler is not traced).
-pub fn keys(host: &UiScriptHost, machine: &mut ShortcutMachine, keys: FrameKeys, camera: &mut dyn FnMut(&str, f32)) {
+///
+/// `script_keys` are the keys the battle scripts hold (`steal_escape_key`, `0x00666960`, steals
+/// ESCAPE for the script object's key handler); their key events go to `script_key(key, down)`
+/// and the bindings on them (ESCAPE's `escape_menu`) are not pressed meanwhile.
+pub fn keys(
+    host: &UiScriptHost,
+    machine: &mut ShortcutMachine,
+    keys: FrameKeys,
+    script_keys: &[&str],
+    script_key: &mut dyn FnMut(&str, bool),
+    camera: &mut dyn FnMut(&str, f32),
+) {
     let engine =
         [EngineComponent { name: CAMERA_COMPONENT, locked_from: 1 }, EngineComponent { name: CARD_MANAGER_COMPONENT, locked_from: 1 }];
-    host.poll_shortcuts(machine, keys, &engine, &mut |component, func, time| {
+    let stealer = (!script_keys.is_empty()).then_some(EngineStealer { keys: script_keys, heard: script_key });
+    host.poll_shortcuts(machine, keys, &engine, stealer, &mut |component, func, time| {
         if component == CAMERA_COMPONENT {
             camera(func, time);
         } else if let Err(e) = host.lua().globals().get::<Function>("__ntw_battle_card_shortcut").and_then(|f| f.call::<()>(func)) {
@@ -420,11 +455,57 @@ pub fn take_requests(host: &UiScriptHost) -> mlua::Result<Vec<BattleUiRequest>> 
             "summary_dismissed" => BattleUiRequest::SummaryDismissed,
             "zoom" => BattleUiRequest::ZoomTo(r.get("id")?),
             "selection_proxy" => BattleUiRequest::SelectionProxy { id: r.get("id")?, on: r.get("on")? },
+            "dismiss_advice" => BattleUiRequest::DismissAdvice,
+            "repeat_advice" => BattleUiRequest::RepeatAdvice,
+            "advice_audio_mode" => BattleUiRequest::AdviceAudioMode(r.get("on")?),
+            "advice_text_mode" => BattleUiRequest::AdviceTextMode(r.get("on")?),
             _ => continue,
         });
     }
     lua.globals().set("__battle_requests", lua.create_table()?)?;
     Ok(out)
+}
+
+/// The engine's `ShowPersistentPanels(false)` at the HUD's start (`0x005F2660`): the menu bar and
+/// its advice window. True when the window gave its text panel, which the advice calls below go to.
+pub fn show_persistent_panels(host: &UiScriptHost) -> mlua::Result<bool> {
+    let f: Function = host.lua().globals().get("__ntw_battle_show_persistent_panels")?;
+    f.call::<bool>(())
+}
+
+/// Shows `advice` in the advice window (`UpdateWithNewAdvice(advice, show_text)`, `0x0075C260`).
+pub fn show_advice(host: &UiScriptHost, advice: &AdviceView, show_text: bool) -> mlua::Result<()> {
+    let lua = host.lua();
+    let t = lua.create_table()?;
+    t.set("advisory_title", advice.title.as_str())?;
+    if !advice.subtitle.is_empty() {
+        t.set("advisory_subtitle", advice.subtitle.as_str())?;
+    }
+    t.set("advisory_text", advice.text.as_str())?;
+    t.set("advisory_is_locatable", advice.locatable)?;
+    t.set("advisory_has_audio", advice.has_audio)?;
+    if let Some(icon) = &advice.icon_path {
+        t.set("advisory_icon_path", icon.as_str())?;
+    }
+    let f: Function = lua.globals().get("__ntw_battle_show_advice")?;
+    f.call::<()>((t, show_text))
+}
+
+/// The current advice was dismissed (`CurrentAdviceDismissed()`, `0x0076DB70`).
+pub fn advice_dismissed(host: &UiScriptHost) -> mlua::Result<()> {
+    step(host, "__ntw_battle_advice_dismissed")
+}
+
+/// The advice text setting changed (`AdviceTextSettingChanged(on)`, `0x0075C380`).
+pub fn advice_text_setting(host: &UiScriptHost, on: bool) -> mlua::Result<()> {
+    let f: Function = host.lua().globals().get("__ntw_battle_advice_text_setting")?;
+    f.call::<()>(on)
+}
+
+/// Whether the advisor's speech plays, as `BattleUI.IsAudioPlaying()` answers (`0x00791110`).
+pub fn set_advice_audio_playing(host: &UiScriptHost, playing: bool) -> mlua::Result<()> {
+    let battle: Table = host.lua().globals().get("__battle")?;
+    battle.set("advice_audio_playing", playing)
 }
 
 /// Calls one of the prelude's engine steps (a global Lua function without arguments).
@@ -763,7 +844,7 @@ mod tests {
         let mut steps: Vec<String> = Vec::new();
         let none = Held { ctrl: false, shift: false, alt: false };
         fn frame(host: &UiScriptHost, machine: &mut ShortcutMachine, down: &[&str], held: Held, steps: &mut Vec<String>) {
-            keys(host, machine, FrameKeys { down, held, time: 0.25 }, &mut |f, t| steps.push(format!("{f} {t}")));
+            keys(host, machine, FrameKeys { down, held, time: 0.25 }, &[], &mut |_, _| {}, &mut |f, t| steps.push(format!("{f} {t}")));
         }
         let mut frame = |down: &[&str], held: Held, steps: &mut Vec<String>| frame(&host, &mut machine, down, held, steps);
         macro_rules! tap {
@@ -809,6 +890,14 @@ mod tests {
         // A card manager func the model has no order for is logged once, not invented.
         tap!("PERIOD", none);
         tap!("PERIOD", none);
+        assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
+        // A key the battle scripts hold (steal_escape_key) goes to them, down then up, and its
+        // binding is not pressed meanwhile.
+        let mut heard: Vec<String> = Vec::new();
+        for down in [&["P"][..], &[]] {
+            keys(&host, &mut machine, FrameKeys { down, held: none, time: 0.25 }, &["P"], &mut |k, d| heard.push(format!("{k} {d}")), &mut |_, _| {});
+        }
+        assert_eq!(heard, ["P true", "P false"]);
         assert_eq!(take_requests(&host).unwrap(), Vec::<BattleUiRequest>::new());
         let log = host.take_log();
         assert_eq!(log.iter().filter(|l| l.contains("UNKNOWN card manager shortcut select_next")).count(), 1, "{log:#?}");

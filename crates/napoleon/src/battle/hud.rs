@@ -62,6 +62,12 @@ pub struct BattleHud {
     frame_errors: FrameErrors,
     /// The battle mode's bindings of `text/default_keys.xml` and their state ([`keys`]).
     shortcuts: ShortcutMachine,
+    /// The scripts' `steal_input_focus` as last applied to `shortcuts` ([`keys`]).
+    input_stolen: bool,
+    /// The advice window gave its text panel at the start (`ui_battle::show_persistent_panels`).
+    advice_window: bool,
+    /// What `BattleUI.IsAudioPlaying()` was last told (`None`: nothing yet).
+    advice_audio_told: Option<bool>,
 }
 
 /// The per-frame HUD steps (model → HUD). A step that fails fails every frame, so each logs its
@@ -181,6 +187,9 @@ pub fn enter(world: &mut World) {
         loc,
         frame_errors: FrameErrors::default(),
         shortcuts,
+        input_stolen: false,
+        advice_window: false,
+        advice_audio_told: None,
     };
     if let Some(sim) = world.get_resource::<BattleSim>()
         && let Err(e) = write_facts(&mut hud, sim, &world.resource::<GameData>().db)
@@ -190,6 +199,13 @@ pub fn enter(world: &mut World) {
     if let Err(e) = ui_battle::load_hud(&hud.host) {
         warn!("Battle HUD: layout not loaded: {e}");
         return;
+    }
+    // root.lua's ShowPersistentPanels: the menu bar and the advice window, before the deployment
+    // popup as in the exe (`0x005EA360` → `0x005F2660`).
+    match ui_battle::show_persistent_panels(&hud.host) {
+        Ok(true) => hud.advice_window = true,
+        Ok(false) => warn!("Battle HUD: the menu bar gave no advice window; the advisor's advice is not shown"),
+        Err(e) => warn!("Battle HUD: menu bar and advice window: {e}"),
     }
     if let Err(e) = ui_battle::create_cards(&hud.host) {
         warn!("Battle HUD: unit cards: {e}");
@@ -379,13 +395,18 @@ fn write_facts(hud: &mut BattleHud, sim: &BattleSim, db: &ntw_data::GameDatabase
 /// `OnShortcut` (root.lua's `escape_menu`, P `toggle_pause`, CTRL+T `cycle_battle_speed`, T
 /// `fire_at_will_toggle`, R `battle_land_toggle_run`, ...), whose `BattleUI.*` requests [`frame`]
 /// applies the same frame; a camera binding goes to [`super::view::CameraKeys`]; a key a component
-/// stole goes to its `OnKey`. The press time is the real frame time capped at 0.3 s
-/// ([`crate::shortcut_keys::MAX_FRAME_TIME`]). Harness runs ignore the keyboard.
+/// stole goes to its `OnKey`; while the battle scripts hold ESCAPE ([`super::scripts::ScriptKeys`])
+/// its release goes to them ([`super::ScriptEvent::EscapeReleased`]). The press time is the real
+/// frame time capped at 0.3 s ([`crate::shortcut_keys::MAX_FRAME_TIME`]). Harness runs ignore the
+/// keyboard.
+#[allow(clippy::too_many_arguments)]
 pub fn keys(
     hud: Option<NonSendMut<BattleHud>>,
     held: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
     harness: Option<Res<crate::frontend::AutoScreenshot>>,
+    script_keys: Option<Res<super::scripts::ScriptKeys>>,
+    sim: Option<ResMut<BattleSim>>,
     mut camera: ResMut<super::view::CameraKeys>,
     mut buf: Local<(crate::shortcut_keys::KeysDown, Vec<&'static str>)>,
 ) {
@@ -397,10 +418,32 @@ pub fn keys(
     down.rewind(held.get_pressed().copied(), &[]);
     down.names_into(names);
     let keys = FrameKeys { down: names.as_slice(), held: down.modifiers(), time: time.delta_secs().min(crate::shortcut_keys::MAX_FRAME_TIME) };
+    let (escape, input) = script_keys.map_or((false, false), |k| (k.escape, k.input));
+    let script_held: &[&str] = if escape { &["ESCAPE"] } else { &[] };
     let hud = &mut *hud;
-    ui_battle::keys(&hud.host, &mut hud.shortcuts, keys, &mut |func, t| camera.press(func, t));
+    if hud.input_stolen != input {
+        hud.shortcuts.steal_input(input, STEAL_INPUT_KEEPS);
+        hud.input_stolen = input;
+    }
+    let mut sim = sim;
+    // The script object's handler acts on the stolen key-up only (`0x0064C5A0`). As in the exe,
+    // the walk sends that up on the hold's second frame (ESCAPE's binding does not repeat), or on
+    // the key's release, and it decides "stolen" when it sends it, so a key held across the steal
+    // goes up to the scripts (`0x00ED76E0`).
+    let mut script_key = |key: &str, down: bool| {
+        if key == "ESCAPE" && !down
+            && let Some(sim) = sim.as_mut()
+        {
+            sim.script_events.push(super::ScriptEvent::EscapeReleased);
+        }
+    };
+    ui_battle::keys(&hud.host, &mut hud.shortcuts, keys, script_held, &mut script_key, &mut |func, t| camera.press(func, t));
     log_errors(&hud.host);
 }
+
+/// The funcs the battle scripts' `steal_input_focus` leaves on (CONFIRMED, the names
+/// `0x00EB0870` compares: `quit` at `0x01314BFC` and `end_battle`).
+const STEAL_INPUT_KEEPS: &[&str] = &["quit", "end_battle"];
 
 /// Every frame: model → HUD, phase popups, pointer → HUD, HUD requests → model.
 #[allow(clippy::too_many_arguments)]
@@ -418,7 +461,14 @@ pub fn frame(
     mut music: MessageWriter<crate::audio::SetMusic>,
     mut next: ResMut<NextState<GameMode>>,
     mut cams: Query<&mut super::camera::BattleCamera>,
+    (mut advisor, mut speech): (Option<ResMut<super::advisor::Advisor>>, Option<ResMut<crate::audio::AdviceSpeech>>),
 ) {
+    // Without a HUD (its layout failed to load) nothing shows the advice: it is not kept.
+    if hud.is_none()
+        && let Some(a) = advisor.as_deref_mut()
+    {
+        a.take_for_hud();
+    }
     let (Some(mut hud), Some(mut sim), Ok(window)) = (hud, sim, window.single()) else { return };
     let size = Vec2::new(window.width(), window.height());
     if hud.screen != size {
@@ -453,6 +503,17 @@ pub fn frame(
         }
         hud.written_facts.as_ref().or(hud.spare_facts.as_ref()).and_then(|f| f.player_won)
     };
+    // The advisor → its window (BATTLE_FIDELITY.md §59.8).
+    if let Some(a) = advisor.as_deref_mut() {
+        tell_advice_window(&mut hud, a, &data.db);
+    }
+    let playing = speech.as_deref().is_some_and(crate::audio::AdviceSpeech::playing);
+    if hud.advice_audio_told != Some(playing) {
+        hud.advice_audio_told = Some(playing);
+        if let Err(e) = ui_battle::set_advice_audio_playing(&hud.host, playing) {
+            warn!("Battle HUD: advice audio state: {e}");
+        }
+    }
     hud.host.pulse(f64::from(t));
     // Phase popups (the engine's calls into root.lua) and the music of each phase.
     if hud.shown != Some(sim.phase()) {
@@ -529,6 +590,19 @@ pub fn frame(
         Vec::new()
     });
     for r in requests {
+        // The advice window's buttons, on the battle's advisor (made by `scripts::enter` for every
+        // battle); the modes need no speech, so they hold without the audio too.
+        if let Some(a) = advisor.as_deref_mut() {
+            let mut no_audio = crate::audio::AdviceSpeech::default();
+            let s = speech.as_deref_mut().unwrap_or(&mut no_audio);
+            match r {
+                BattleUiRequest::DismissAdvice => a.close(s),
+                BattleUiRequest::RepeatAdvice => a.repeat(s),
+                BattleUiRequest::AdviceAudioMode(on) => a.set_audio_mode(on),
+                BattleUiRequest::AdviceTextMode(on) => a.set_text_mode(on),
+                _ => {}
+            }
+        }
         if let BattleUiRequest::SelectionProxy { id, on } = r {
             // The camera manager's track target (`SetTrackTarget` 0x005F9B70). Served only while
             // the battle UI runs, as the exe's `+0x9CD` gate; the context camera's subject and
@@ -618,8 +692,31 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
             }
         }
         BattleUiRequest::ZoomTo(_) => {}
+        // Handled by `frame`, which has the advisor.
+        BattleUiRequest::DismissAdvice | BattleUiRequest::RepeatAdvice | BattleUiRequest::AdviceAudioMode(_) | BattleUiRequest::AdviceTextMode(_) => {}
         // Handled by `frame`, which has the camera.
         BattleUiRequest::SelectionProxy { .. } => {}
+    }
+}
+
+/// Tells the advice window what the advisor did since the last frame, in order. A failed call is
+/// logged (each is one advice, not a frame).
+fn tell_advice_window(hud: &mut BattleHud, advisor: &mut super::advisor::Advisor, db: &ntw_data::GameDatabase) {
+    for step in advisor.take_for_hud() {
+        if !hud.advice_window {
+            continue;
+        }
+        let told = match step {
+            super::advisor::ToHud::Show { key, message, show_text } => {
+                let view = super::advisor::advice_view(db, &hud.loc, &key, &message);
+                ui_battle::show_advice(&hud.host, &view, show_text)
+            }
+            super::advisor::ToHud::Dismissed => ui_battle::advice_dismissed(&hud.host),
+            super::advisor::ToHud::TextSetting(on) => ui_battle::advice_text_setting(&hud.host, on),
+        };
+        if let Err(e) = told {
+            warn!("Battle HUD: advice window: {e}");
+        }
     }
 }
 
