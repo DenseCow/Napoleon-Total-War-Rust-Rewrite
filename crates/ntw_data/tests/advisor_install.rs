@@ -31,3 +31,20 @@ fn advisor_tables_decode() {
         db.battle_script_strings.iter().map(|l| l.speaker.as_str()).filter(|s| !s.is_empty() && db.advisors.get(s).is_none()).collect();
     assert!(missing.is_empty(), "speakers without a portrait row: {missing:?}");
 }
+
+/// The advisor's speech is found where the game looks for it (`advisor\<key>.mp3`, `0x0100BC80`;
+/// `napoleon::audio::start_advice` builds the same path): every Austerlitz intro line has its file.
+#[test]
+#[ignore]
+fn advisor_speech_files_are_where_the_game_looks() {
+    use ntw_formats::sound::names::normalize_sound_path;
+    let vfs = ntw_formats::pack::Vfs::open_install(data_dir()).expect("install");
+    for n in 1..=5 {
+        let path = normalize_sound_path(&format!("advisor\\CreativeAssembly.HB_Austerlitz_Intro_{n}.mp3"));
+        assert!(vfs.contains(&path), "{path}");
+    }
+    let db = GameDatabase::from_install(data_dir()).expect("database");
+    let with_file = db.battle_script_strings.iter().filter(|l| vfs.contains(&normalize_sound_path(&format!("advisor\\{}.mp3", l.key)))).count();
+    println!("{with_file} of {} lines have a speech file", db.battle_script_strings.len());
+    assert!(with_file > 100, "{with_file}");
+}

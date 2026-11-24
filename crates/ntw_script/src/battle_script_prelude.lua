@@ -331,7 +331,8 @@ function empire_battle:release_escape_key() nb.request("escape_key", { units = {
 -- Known call with no effect in our game yet (PROVISIONAL, not logged): contextual advice.
 function empire_battle:suspend_contextual_advice() end
 -- The advisor (BATTLE_FIDELITY.md §59.8). show_advisor_message(key, message) (0x006646D0): both
--- must be strings, else the call fails with the exe's own message; the game shows the
+-- must be strings or numbers (the exe reads them with lua_tolstring, 0x00FE9C40, which converts a number),
+-- else the call fails with the exe's own message; the game shows the
 -- battle_script_strings row named by key (or message when there is none) and plays its speech.
 -- advice_finished() (0x0062A350): the speech has ended. close_advisor() (0x0063D670): dismissed.
 function empire_battle:show_advisor_message(key, message)

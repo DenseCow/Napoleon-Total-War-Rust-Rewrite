@@ -463,6 +463,12 @@ pub fn frame(
     mut cams: Query<&mut super::camera::BattleCamera>,
     (mut advisor, mut speech): (Option<ResMut<super::advisor::Advisor>>, Option<ResMut<crate::audio::AdviceSpeech>>),
 ) {
+    // Without a HUD (its layout failed to load) nothing shows the advice: it is not kept.
+    if hud.is_none()
+        && let Some(a) = advisor.as_deref_mut()
+    {
+        a.take_for_hud();
+    }
     let (Some(mut hud), Some(mut sim), Ok(window)) = (hud, sim, window.single()) else { return };
     let size = Vec2::new(window.width(), window.height());
     if hud.screen != size {
@@ -584,8 +590,11 @@ pub fn frame(
         Vec::new()
     });
     for r in requests {
-        // The advice window's buttons, on the battle's advisor.
-        if let (Some(a), Some(s)) = (advisor.as_deref_mut(), speech.as_deref_mut()) {
+        // The advice window's buttons, on the battle's advisor (made by `scripts::enter` for every
+        // battle); the modes need no speech, so they hold without the audio too.
+        if let Some(a) = advisor.as_deref_mut() {
+            let mut no_audio = crate::audio::AdviceSpeech::default();
+            let s = speech.as_deref_mut().unwrap_or(&mut no_audio);
             match r {
                 BattleUiRequest::DismissAdvice => a.close(s),
                 BattleUiRequest::RepeatAdvice => a.repeat(s),
@@ -683,9 +692,9 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
             }
         }
         BattleUiRequest::ZoomTo(_) => {}
-        // Handled by `frame`, which has the camera.
         // Handled by `frame`, which has the advisor.
         BattleUiRequest::DismissAdvice | BattleUiRequest::RepeatAdvice | BattleUiRequest::AdviceAudioMode(_) | BattleUiRequest::AdviceTextMode(_) => {}
+        // Handled by `frame`, which has the camera.
         BattleUiRequest::SelectionProxy { .. } => {}
     }
 }

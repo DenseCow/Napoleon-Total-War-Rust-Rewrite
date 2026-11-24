@@ -1581,8 +1581,12 @@ const ADVICE_UNHEARD_FRAMES: u8 = 3;
 /// (`battle:advice_finished()`) is not held forever; that is logged once.
 fn advice_speech(mut player: Player, mut speech: ResMut<AdviceSpeech>, sinks: Query<(), With<AudioSink>>) {
     if let Some(asked) = speech.asked.take() {
-        if let Some((_, c)) = speech.voice.take() {
+        if let Some((e, c)) = speech.voice.take() {
             c.stop();
+            // A voice no sink took never finishes, so `update_voices` would keep it.
+            if !sinks.contains(e) {
+                player.commands.entity(e).despawn();
+            }
         }
         if let Some(name) = asked {
             speech.voice = start_advice(&mut player, &name);
@@ -1595,7 +1599,11 @@ fn advice_speech(mut player: Player, mut speech: ResMut<AdviceSpeech>, sinks: Qu
         } else if !c.is_finished() {
             speech.frames_unheard = speech.frames_unheard.saturating_add(1);
             if speech.frames_unheard > ADVICE_UNHEARD_FRAMES {
+                // No sink pulls its samples, so it never reports finished: removed here, not
+                // left to `update_voices`.
                 c.stop();
+                player.commands.entity(entity).despawn();
+                speech.voice = None;
                 if !std::mem::replace(&mut speech.unheard_logged, true) {
                     warn!("advice speech: the audio output did not take it (no audio device?); the advice counts as finished");
                 }

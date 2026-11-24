@@ -3018,7 +3018,8 @@ this the engine calls were stubs, so ESC opened the menu instead of skipping, an
 
 ### 59.8 The battle advisor: script advice, its speech and the advice window (2026-11-24; static, CONFIRMED unless tagged)
 
-- **`battle:show_advisor_message(key, message)`** (`0x006646D0`): both arguments must be strings (else the exe's
+- **`battle:show_advisor_message(key, message)`** (`0x006646D0`): both arguments must be strings or numbers (Lua's
+  `lua_tolstring`, `0x00FE9C40`, which converts a number; else the exe's
   "invalid key (string) argument" / "invalid message (string) argument"). A non-empty key is looked up in
   `battle_script_strings` (`0x0065ED60`; row reader `0x00E548B0`: #0 key, #1 text `+0x0C`, #2 speaker `+0x18`,
   version ≥ 1); a row replaces the message by its text and gives its speaker. The message is built by `0x00E1A970` →
@@ -3032,7 +3033,7 @@ this the engine calls were stubs, so ESC opened the menu instead of skipping, an
   (`+0x10` → `0x00E0E3E0`: the speaker's `advisors` row, #1 the portrait). `advisors` (row reader `0x00FA3C40`,
   9 rows, version ≥ 1 for #1).
 - **The speech** is `advisor\<key>.mp3` (`0x0100BC80`, format `advisor\%S.mp3`; the file is checked first, so a
-  key without a file is text only). **`battle:advice_finished()`** (`0x0062A350`): true when the UI's advisor
+  key without a file is text only: 10 of the 296 shipped lines). **`battle:advice_finished()`** (`0x0062A350`): true when the UI's advisor
   (`+0x28208`) exists and its current sound (`+0x28050`) is gone or not playing (vfunc `+0x64`). Ours: the
   script host counts an advice as playing from the call until the game has taken it and reported its speech
   (`BattleScriptHost::advice_finished`); the speech is `crate::audio::AdviceSpeech`, which counts a speech just
@@ -3065,7 +3066,7 @@ this the engine calls were stubs, so ESC opened the menu instead of skipping, an
 - Tests: `ntw_script --test battle_script austerlitz_intro_waits_for_the_advisors_speech` (the shipped script
   holds its second advice while the first speech plays), `an_advice_is_unfinished_until_the_game_has_taken_it`;
   `ntw_script --test battle_advisor` (the original menu bar and advice window show an advice; its close button
-  asks to dismiss it); `ntw_data --test advisor_install -- --ignored` (both tables); `napoleon battle::advisor`
+  asks to dismiss it); `ntw_data --test advisor_install -- --ignored` (both tables; the speech files at the path the game uses); `napoleon battle::advisor`
   tests. In game (Austerlitz): the window shows Napoleon's portrait and each intro line in step with its
   speech.
 
