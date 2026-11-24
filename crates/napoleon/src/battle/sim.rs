@@ -8,6 +8,20 @@ use ntw_sim::battle::speed::BattleSpeed;
 use ntw_sim::battle::victory::{Outcome, VictoryRules};
 
 /// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
+/// How a selection change combines with the current selection ([`BattleSim::select`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    /// The units become the selection (a plain click, a plain box).
+    Replace,
+    /// The units join the selection (a box with CTRL held).
+    Add,
+    /// A click with CTRL held: one unit joins the selection, or leaves it if it was selected. CTRL
+    /// adds: "press and hold the Ctrl key to select multiple units" (advice
+    /// `advice_levels_onscreen_text_1152775702`, CONFIRMED from the shipped text). PROVISIONAL: that
+    /// a CTRL click on a selected unit deselects it (the card manager's rule is not traced).
+    Toggle,
+}
+
 #[derive(Resource)]
 pub struct BattleSim {
     /// The model. Only `tick_battle` advances it; `input` only sets orders.
@@ -24,8 +38,10 @@ pub struct BattleSim {
     pub side_names: [String; 2],
     /// RNG seed this battle started from (shown in the HUD; the test key F8 restarts with seed + 1).
     pub seed: u32,
-    /// The currently selected player (side 0) unit id, if any.
-    pub selected: Option<u32>,
+    /// The player's selected units, in the order they were selected (the original keeps the
+    /// selection as lists that every `BCQ_MULTIPLE_SELECTION_ORDER_*` executor walks, e.g.
+    /// `0x006D1280`; CONFIRMED). Changed only through [`Self::select`].
+    selection: Vec<u32>,
     /// Faction key of each side's first army (e.g. `france`), for uniforms and music.
     pub side_factions: [String; 2],
     /// The `battles` key of the historical battle being fought (None = the test slice).
@@ -80,7 +96,7 @@ impl BattleSim {
             info: Vec::new(),
             side_names: [String::new(), String::new()],
             seed,
-            selected: None,
+            selection: Vec::new(),
             side_factions: [String::new(), String::new()],
             battle_key: None,
             camera_start: None,
@@ -164,6 +180,38 @@ impl BattleSim {
         self.info.binary_search_by_key(&id, |i| i.id).ok().map(|i| &self.info[i])
     }
 
+    /// The selected units, first selected first.
+    pub fn selection(&self) -> &[u32] {
+        &self.selection
+    }
+
+    /// Whether unit `id` is selected.
+    pub fn is_selected(&self, id: u32) -> bool {
+        self.selection.contains(&id)
+    }
+
+    /// Changes the selection (the one writer). Units the player does not control are dropped;
+    /// each unit is kept once.
+    pub fn select(&mut self, ids: &[u32], mode: SelectMode) {
+        match mode {
+            SelectMode::Replace => self.selection.clear(),
+            SelectMode::Add => {}
+            SelectMode::Toggle => {
+                if let [id] = ids
+                    && let Some(at) = self.selection.iter().position(|s| s == id)
+                {
+                    self.selection.remove(at);
+                    return;
+                }
+            }
+        }
+        for &id in ids {
+            if self.info_of(id).is_some_and(|i| i.controllable) && !self.selection.contains(&id) {
+                self.selection.push(id);
+            }
+        }
+    }
+
     /// Adds a unit and its display info: `info` goes to the index the model's
     /// [`Battle::add_unit`] gives the unit (sorted by id), so `info` keeps `battle.units`' order
     /// whatever order units are added in (a reinforcement with a lower id included).
@@ -199,5 +247,40 @@ impl BattleSim {
     pub fn unit_with_info(&self, id: u32) -> Option<(&LandUnit, &UnitInfo)> {
         let i = self.battle.unit_index(id)?;
         Some((&self.battle.units[i], self.info_at(i, id)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntw_sim::battle::fatigue::KvFatigue;
+    use ntw_sim::battle::morale::KvMorale;
+
+    /// Units 1–3 are the player's, unit 4 the enemy's.
+    fn sim() -> BattleSim {
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        for id in 1..=4 {
+            let side = u8::from(id == 4);
+            sim.add_unit(LandUnit::new(id, side, 100, (id as f32 * 30.0, 0.0)), UnitInfo { id, controllable: side == 0, ..UnitInfo::default() });
+        }
+        sim
+    }
+
+    /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
+    /// the enemy's units and repeats are never selected.
+    #[test]
+    fn selection_modes() {
+        let mut sim = sim();
+        sim.select(&[2, 4, 2], SelectMode::Replace);
+        assert_eq!(sim.selection(), [2]);
+        sim.select(&[3, 1], SelectMode::Add);
+        assert_eq!(sim.selection(), [2, 3, 1]);
+        sim.select(&[3], SelectMode::Toggle);
+        assert_eq!(sim.selection(), [2, 1], "a CTRL click on a selected unit deselects it");
+        sim.select(&[3], SelectMode::Toggle);
+        assert_eq!(sim.selection(), [2, 1, 3]);
+        assert!(sim.is_selected(3) && !sim.is_selected(4));
+        sim.select(&[], SelectMode::Replace);
+        assert!(sim.selection().is_empty());
     }
 }

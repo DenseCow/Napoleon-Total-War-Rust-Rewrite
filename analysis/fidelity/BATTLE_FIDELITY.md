@@ -2968,6 +2968,71 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   ease and short turn, a bookmark ending the modes),
   `ui::battle::tests::selection_proxy_is_a_request`.
 
+### 59.6 Mouse orders: selection, attack, melee mode, dragged lines (contributor, 2026-11-24; static)
+- **The controls, from the shipped help texts (CONFIRMED data):** CTRL + left click selects several units
+  (`advice_levels_onscreen_text_1152775702`); a left drag draws a box around units
+  (`battle_script_strings_string_CreativeAssembly.Naval_Tut_30`); a right drag sets "the width, depth and
+  orientation" of the line (`..._BT_Rich_right_click_drag`); CTRL+A selects the whole army
+  (`advice_levels_onscreen_text_-405343219`). Ours had shift for "add" (PROVISIONAL guess): now CTRL.
+- **Selection (CONFIRMED structure):** every `BCQ_MULTIPLE_SELECTION_ORDER_*` executor walks the selection's
+  lists (groups at `+0xC`/`+0x10`, land units at `+0x1C`/`+0x20`; e.g. `0x006D1280`, `0x006D2EB0`) and gives
+  each unit the order. A left click on a unit in the 3D view formats its id with `"%d"` (`0x0131530C`) and
+  hands it to the card manager (`0x005D7220`, interface at `+0x450`, slot `+0x10`); the box hands its unit
+  list to slot `+0x18` (`0x005D7220` → `0x005E0750`). So the cards and the battlefield share one selection.
+  The card manager (`card_manager`, `0x01024E20`; shortcut handler `0x0103C1D0`: `deselect_all`,
+  `select_all`, `select_next`, `select_prev`, `toggle_group`, `usegroup0..9`) holds the add/replace rule;
+  it was not traced (mouse modifiers travel in the UI event, no `GetAsyncKeyState` call on this path).
+  PROVISIONAL: a CTRL click on a selected unit deselects it (`SelectMode::Toggle`); a CTRL box adds.
+- **Selection box (CONFIRMED):** each frame of a left drag `0x005C5BB0` calls root.lua's
+  `ShowSelectionBox(x1, y1, x2, y2)` (start corner from `+0xF4`/`+0xF8` × viewport, current corner from
+  `+0x10C`/`+0x110` in −1..1, viewport size `0x00611A70` `+0xC`/`+0x10`), else `HideSelectionBox()`;
+  `0x005D7220` hides it on release. root.lua (line 509) creates `box_selection` from its template once
+  and moves / resizes it over the two corners. Ours: `hud::selection_box`. UNKNOWN: the drag threshold
+  (ours 4 px, PROVISIONAL) and which units the box takes (ours: unit centre on screen, PROVISIONAL).
+- **Right click on an enemy (CONFIRMED structure):** the order-mode object's slot 11 (`0x005DEAB0`; this
+  build's database had no function there, created) with the cursor over an enemy unit builds
+  `BCQ_MULTIPLE_SELECTION_ORDER_ATTACK_UNIT` (`0x00599190`: the selection, the target, `!isMeleePressed`,
+  0, the click's byte `+2`; registrar `0x0040D280`, executor `0x005BFF70` → `0x006D1280`). `isMeleePressed`
+  (`0x005AE920`) calls root.lua's `isMeleePressed()`, which returns `button_melee`'s `Selected` state
+  (root.lua line 871, `luac_dump`). Per land unit `0x006D1280` calls `0x0055FBE0` with the attack's missile
+  byte = unit `+0xD98 == 0`. `0x0055FBE0`: refused unless `0x0055CBD0` and not `0x0055C780`; then a missile
+  attack needs `0x0053EFE0` (can fire: a projectile; grenades always; else bayonets not plugged, not riding
+  unless column 65, rounds left) and a melee attack `0x0053EFD0` (= not `0x0055C230`, limbered artillery);
+  a unit that fails does nothing (no move). Then it skips a repeat of the unit's current order, and queues
+  the attack (up to 10 when the click's byte is set) and posts event 7 / 8 (missile) or 9 / 10 (melee) on
+  battle `+0x3D8`. The `!isMeleePressed` field's reader was not followed (the per-unit byte comes from
+  `+0xD98`). Ours: `Battle::order_attack` (melee chases `LandUnit::melee_target`, PROVISIONAL straight
+  path; `charging` set as the AI's attack sets it, PROVISIONAL). Before: a unit that could not fire walked
+  to the clicked point instead (wrong).
+- **Melee mode (CONFIRMED structure):** unit `+0xD98`. The state-byte reset `0x005357B0` sets it to
+  `!0x0053EFE0` (so cavalry and unarmed units start in melee mode); callers `0x0051B7D0` (constructor),
+  `0x00578860` (ability toggle), `0x0054E8E0` / `0x0054DB50` (bayonets), `0x005445A0`, `0x00544620`,
+  `0x005446F0`, `0x005447A0`, `0x0057E9E0` (from `0x0054DD70`, `0x005748A0`; not followed: whether running
+  out of rounds resets it). The melee button: `BCQ_MULTIPLE_SELECTION_ORDER_CHANGE_MELEE_MODE` (registrar
+  `0x0040D600`, executor `0x005C0480` → `0x006D2EB0` → per unit `0x0055FFF0`): refused by `0x0055C780`, and
+  refused leaving melee mode when the unit cannot fire; posts event 0x2A / 0x2B and writes `+0xD98`
+  (which argument is the value: INFERRED from the decompiler). Ours: `Battle::reset_state_bytes`,
+  `Battle::order_melee_mode`, the HUD's `Current_Selection_Enable_Melee`, `button_melee` shows it.
+- **Right click and drag on the ground (structure only):** with no unit under the cursor `0x005DEAB0`
+  builds the formation from the drag (`0x005C4030`: start / end from `0x005B70E0`; with its byte argument
+  set it copies the selection's stored shape, else the line along the drag, its length clamped between the
+  selection's minimum and maximum width, `0x006D9280` / `0x006D8E90`, `0x005C44C0` → `0x007FEEF0`; the
+  line's places from `0x007FE9C0` / `0x007FECA0`; facing `0x005C43F0` → `0x007FE8F0`) and hands it to slot
+  12 (`0x005DB890` → `0x0059EFB0` / `0x0059F140`). None of the `0x007FE…` formation code is ported. Ours,
+  PROVISIONAL: a plain click moves the group keeping its shape (`input::order_group_move`); a drag lays the
+  units side by side along it in selection order, at least 2 m apart, facing the camera's far side, each
+  keeping its own width (`input::formation_line`), and each turns to that facing on arrival
+  (`LandUnit::arrival_facing`, `Battle::order_move_formed`).
+- **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no
+  AI controls) also moved the player's units after every order, so a unit sent somewhere walked off on its
+  own once it arrived. The setup now sets `hold_position` for every controllable unit.
+- Next: trace the card manager's click handler for the CTRL rule and the box's unit test (`0x005E0750`),
+  then port the `0x007FE…` formation code (width, depth, the units' order along the line).
+- Tests: `orders::tests::{units_that_cannot_fire_start_in_melee_mode, a_melee_attack_chases_the_target_until_another_order,
+  a_missile_attack_fires_and_a_unit_that_cannot_fire_does_nothing, only_a_unit_that_can_fire_leaves_melee_mode,
+  a_formed_move_turns_to_its_facing_on_arrival}`, `input::tests::{a_dragged_line_spreads_the_units_along_the_drag,
+  a_short_drag_keeps_the_units_side_by_side}`, `sim::tests` (selection modes).
+
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.
 

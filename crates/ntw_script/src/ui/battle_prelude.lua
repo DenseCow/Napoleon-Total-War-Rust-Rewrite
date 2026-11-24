@@ -495,13 +495,14 @@ end
 -- the special abilities stay inactive (not done).
 local order_state_cache = {}
 function __ntw_battle_update_orders()
-    local sel, running, faw, ammo = 0, true, true, false
+    local sel, running, faw, ammo, melee = 0, true, true, false, true
     for _, u in ipairs(__battle.units or {}) do
         if u.selected then
             sel = sel + 1
             running = running and u.running
             faw = faw and u.fire_at_will
             ammo = ammo or u.has_ammo
+            melee = melee and u.melee_mode
         end
     end
     local function st(on, selected)
@@ -511,7 +512,7 @@ function __ntw_battle_update_orders()
     end
     local any = sel > 0
     local wanted = {
-        button_halt = st(any), button_movespeed = st(any, running), button_melee = st(any, false),
+        button_halt = st(any), button_movespeed = st(any, running), button_melee = st(any, melee),
         button_fire_at_will = st(any and ammo, faw), button_withdraw = st(any, false),
         button_group = "Inactive", button_groupforms = "Inactive",
         button_ability2_DY = "Inactive", button_ability3_DY = "Inactive",
@@ -531,20 +532,15 @@ function __ntw_battle_update_orders()
 end
 
 -- A left click that ended on component `addr`: a click on a unit card (or inside one) selects
--- its unit; with `add`, adds it to the selection (PROVISIONAL engine side of the card manager).
+-- its unit; with `add` (CTRL held) the card joins the selection or leaves it (the engine's
+-- SelectMode::Toggle; PROVISIONAL engine side of the card manager).
 function __ntw_battle_click(addr, add)
     local a = addr
     while a ~= nil do
         local c = UIComponent(a)
         local id = tonumber(string.match(c:Id() or "", "^card_(%d+)$"))
         if id ~= nil then
-            local ids = { id }
-            if add then
-                for _, s in ipairs(selected_ids()) do
-                    if s ~= id then ids[#ids + 1] = s end
-                end
-            end
-            request({ kind = "select", ids = ids })
+            request({ kind = "select", ids = { id }, add = add == true })
             return true
         end
         a = c:Parent()

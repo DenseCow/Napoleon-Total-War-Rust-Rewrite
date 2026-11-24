@@ -355,9 +355,16 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
         || std::env::args().any(|a| a == "--skip-deployment")
         || std::env::var_os("NAPOLEON_FPS_LOG").is_some();
     sim.battle.buildings = setup.buildings.clone();
-    // The skirmish default of the unit constructor (`abilities::skirmish_default`, CONFIRMED).
+    // The state bytes of the unit constructor (`0x005357B0` from `0x0051B7D0`: skirmish default and
+    // melee mode, `Battle::reset_state_bytes`, CONFIRMED).
     for i in 0..sim.battle.units.len() {
-        sim.battle.units[i].skirmish = sim.battle.skirmish_default(i);
+        sim.battle.reset_state_bytes(i);
+        // The player's units wait for orders: in the original a unit never walks off on its own
+        // (the model's advance on the nearest enemy is the PLACEHOLDER for units no AI controls),
+        // so after a move they stay where they were sent.
+        if sim.infos()[i].controllable {
+            sim.battle.units[i].hold_position = true;
+        }
     }
     // The model's own deployment flag, the one source of the deployment phase (`BattleSim::phase`;
     // the special-ability gate reads it too). A battle with no deployment ends it at once, which

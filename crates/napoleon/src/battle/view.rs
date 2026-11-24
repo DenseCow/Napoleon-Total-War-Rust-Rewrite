@@ -1703,7 +1703,7 @@ pub fn sync_views(
                     let p = transform.transform_point(Vec3::new(x, 0.0, z));
                     Vec3::new(p.x, ground(Vec2::new(p.x, -p.z)) + 0.15, p.z)
                 });
-            let color = unit_color(unit, sim.selected == Some(unit.id));
+            let color = unit_color(unit, sim.is_selected(unit.id));
             for k in 0..4 {
                 gizmos.line(corners[k], corners[(k + 1) % 4], color);
             }
@@ -2067,8 +2067,9 @@ fn unit_color(unit: &LandUnit, selected: bool) -> Color {
 /// - A volley is a pale-yellow line from the shooter to the target plus a "flash" circle at the
 ///   shooter; both fade out over `VOLLEY_FX_SECONDS`. The more men it killed, the bigger the
 ///   flash at the target.
-/// - The selected unit, if it can shoot, gets a faint ring showing its missile range, and a red
-///   line to the enemy it was ordered to shoot at.
+/// - Each selected unit that can shoot gets a faint ring showing its missile range; a selected
+///   unit has a red line to the enemy it was ordered to shoot at, an orange one to the enemy it
+///   was ordered to attack in melee.
 pub fn draw_volleys(sim: Res<BattleSim>, fx: Res<VolleyFx>, mut gizmos: Gizmos) {
     let now = sim.battle.time_seconds();
     let at = |id: u32| find(&sim, id).map(|u| world_of(Vec2::new(u.position.0, u.position.1)) + Vec3::Y * 1.4);
@@ -2083,14 +2084,18 @@ pub fn draw_volleys(sim: Res<BattleSim>, fx: Res<VolleyFx>, mut gizmos: Gizmos) 
             gizmos.circle(flat(to), r, Color::srgba(1.0, 0.3, 0.2, fade));
         }
     }
-    if let Some(unit) = sim.selected.and_then(|id| find(&sim, id))
-        && unit.missile.is_some()
-    {
+    for unit in sim.selection().iter().filter_map(|&id| find(&sim, id)) {
         let pos = world_of(Vec2::new(unit.position.0, unit.position.1)) + Vec3::Y * 0.2;
-        let range = unit.missile_range(sim.battle.kv_rules.fire_on_walls_range_modifier);
-        gizmos.circle(flat(pos), range, Color::srgba(1.0, 1.0, 1.0, 0.25)).resolution(64);
+        if unit.missile.is_some() {
+            let range = unit.missile_range(sim.battle.kv_rules.fire_on_walls_range_modifier);
+            gizmos.circle(flat(pos), range, Color::srgba(1.0, 1.0, 1.0, 0.25)).resolution(64);
+        }
+        // The ordered target: red for a fire order, orange for a melee attack.
         if let Some(target) = unit.fire_target.and_then(at) {
             gizmos.line(pos, target, Color::srgba(1.0, 0.2, 0.2, 0.7));
+        }
+        if let Some(target) = unit.melee_target.and_then(at) {
+            gizmos.line(pos, target, Color::srgba(1.0, 0.6, 0.1, 0.7));
         }
     }
 }

@@ -26,6 +26,7 @@ use ntw_sim::battle::orders::MoveSpeed;
 use ntw_sim::battle::speed::BattleSpeed;
 use ntw_sim::battle::victory;
 
+use super::sim::SelectMode;
 use super::{BattlePhase, BattleSim};
 use crate::GameMode;
 use crate::data::GameData;
@@ -297,6 +298,7 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
             selected,
             category,
             fire_at_will,
+            melee_mode,
         } = &mut units[n];
         n += 1;
         let stats = db.unit_stats(&info.key);
@@ -324,9 +326,10 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
         *firing = u.fired_this_tick || (u.reload_ticks_left > 0 && u.fire_target.is_some());
         *melee = u.in_melee;
         *under_fire = u.under_fire_ticks > 0;
-        *selected = sim.selected == Some(u.id);
+        *selected = sim.is_selected(u.id);
         set_str(category, &info.category);
         *fire_at_will = u.fire_at_will;
+        *melee_mode = u.melee_mode;
     }
     units.truncate(n);
     results.resize_with(2, HudSideResult::default);
@@ -514,7 +517,7 @@ pub fn frame(
             && let Some(p) = hud.pressed.take()
         {
             if hit == Some(p) {
-                click(&hud.host, p, keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight), &mut sounds);
+                click(&hud.host, p, keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight]), &mut sounds);
             } else {
                 hud.host.pointer(p, PointerEvent::LeftUpElsewhere);
             }
@@ -580,10 +583,8 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
                 sim.end_deployment();
             }
         }
-        BattleUiRequest::Select { ids, add: _ } => {
-            // PROVISIONAL: the model's player selection holds one unit; the first card wins.
-            sim.selected = ids.into_iter().find(|id| sim.info_of(*id).is_some_and(|i| i.controllable));
-        }
+        // A card click (with CTRL: toggle that card, `SelectMode::Toggle`) or a selection key.
+        BattleUiRequest::Select { ids, add } => sim.select(&ids, if add { SelectMode::Toggle } else { SelectMode::Replace }),
         BattleUiRequest::Order { name, arg } => order(sim, &name, arg),
         BattleUiRequest::ExitBattle => {
             info!("Battle: exit to the front end");
@@ -649,27 +650,65 @@ fn summary_text(hud: &BattleHud, sim: &BattleSim) -> String {
     hud.loc.get(&format!("random_localisation_strings_string_{key}")).unwrap_or_default().to_owned()
 }
 
-/// An order button for the selected unit, by its `BattleUI` binding name. Implemented with the
-/// existing model orders; PROVISIONAL where noted.
+/// An order button for the selection, by its `BattleUI` binding name: every
+/// `BCQ_MULTIPLE_SELECTION_ORDER_*` executor applies its order to each selected unit (e.g.
+/// `0x006D1280`, `0x006D2EB0`; CONFIRMED). A toggle with no argument switches the whole selection
+/// one way: on unless every selected unit is on already (PROVISIONAL: the button passes its own
+/// state in the original). Implemented with the model's orders; PROVISIONAL where noted.
 fn order(sim: &mut BattleSim, name: &str, arg: Option<bool>) {
-    let Some(id) = sim.selected else { return };
-    let Some(i) = sim.battle.unit_index(id) else { return };
+    let ids = sim.selection().to_vec();
+    let all = |sim: &BattleSim, f: fn(&ntw_sim::battle::model::LandUnit) -> bool| {
+        ids.iter().filter_map(|&id| sim.battle.unit_index(id)).all(|i| f(&sim.battle.units[i]))
+    };
+    let toggle = |on_already: bool| arg.unwrap_or(!on_already);
+    match name {
+        "Fire_At_Will" | "Current_Selection_Enable_Fire_At_Will" => {
+            let on = toggle(all(sim, |u| u.fire_at_will));
+            for &id in &ids {
+                order_unit(sim, id, "Current_Selection_Enable_Fire_At_Will", Some(on));
+            }
+        }
+        // The melee button (`BCQ_MULTIPLE_SELECTION_ORDER_CHANGE_MELEE_MODE`, `Battle::order_melee_mode`).
+        "Current_Selection_Enable_Melee" => {
+            let on = toggle(all(sim, |u| u.melee_mode));
+            for &id in &ids {
+                if sim.battle.order_melee_mode(id, on) {
+                    sim.script_events.push(super::ScriptEvent::Command { name: "Change Melee", unit: Some(id), bool1: on });
+                }
+            }
+        }
+        _ => {
+            let mut done = true;
+            for &id in &ids {
+                done &= order_unit(sim, id, name, arg);
+            }
+            if !done {
+                info!("Battle HUD: order {name} is not done yet (PROVISIONAL)");
+            }
+        }
+    }
+}
+
+/// One selected unit's part of an order button ([`order`]). Returns false for an order the model
+/// does not have yet.
+fn order_unit(sim: &mut BattleSim, id: u32, name: &str, arg: Option<bool>) -> bool {
+    let Some(i) = sim.battle.unit_index(id) else { return true };
     match name {
         "Current_Selection_Halt" | "CurrentSelectionHalt" | "CancelOrderForSelection" => {
             sim.battle.order_halt(id);
             sim.script_events.push(super::ScriptEvent::Command { name: "Halt", unit: Some(id), bool1: false });
-            return;
+            return true;
         }
-        "Fire_At_Will" | "Current_Selection_Enable_Fire_At_Will" => {
+        "Current_Selection_Enable_Fire_At_Will" => {
             let on = arg.unwrap_or(!sim.battle.units[i].fire_at_will);
             sim.battle.order_fire_at_will(id, on);
             sim.script_events.push(super::ScriptEvent::Command { name: "Fire At Will", unit: Some(id), bool1: on });
-            return;
+            return true;
         }
         "Current_Selection_Start_Firing_At_Will" | "Current_Selection_Stop_Firing_At_Will" => {
             sim.battle.order_fire_at_will(id, name.contains("Start"));
             sim.script_events.push(super::ScriptEvent::Command { name: "Fire At Will", unit: Some(id), bool1: name.contains("Start") });
-            return;
+            return true;
         }
         // The run/walk toggle (land_hud_move_speed.lua: Walks when the button is selected, else
         // Runs): a change of speed of the unit's current move (`Battle::order_move_speed`).
@@ -677,7 +716,7 @@ fn order(sim: &mut BattleSim, name: &str, arg: Option<bool>) {
             let run = name.ends_with("Runs");
             sim.battle.order_move_speed(id, if run { MoveSpeed::Run } else { MoveSpeed::Walk });
             sim.script_events.push(super::ScriptEvent::Command { name: "Change Speed", unit: Some(id), bool1: run });
-            return;
+            return true;
         }
         _ => {}
     }
@@ -690,9 +729,35 @@ fn order(sim: &mut BattleSim, name: &str, arg: Option<bool>) {
         }
         "Current_Selection_Rotate_Left" => u.facing += 15f32.to_radians(),
         "Current_Selection_Rotate_Right" => u.facing -= 15f32.to_radians(),
-        // Not in the model yet: melee mode, withdraw, formations, groups, special abilities.
-        other => info!("Battle HUD: order {other} is not done yet (PROVISIONAL)"),
+        // Not in the model yet: withdraw, formations, groups, special abilities.
+        _ => return false,
     }
+    true
+}
+
+/// The selection box while the left button is dragged on the battlefield: root.lua's
+/// `ShowSelectionBox(x1, y1, x2, y2)` with the two corners and `HideSelectionBox()` when it ends,
+/// as the exe calls them (`0x005C5BB0` each frame of the drag, `0x005D7220` on release; CONFIRMED;
+/// the script lays its `box_selection` component over the corners). The corners are in the HUD's
+/// frame (the exe passes window pixels from its viewport, `0x00611A70`; ours scales them to the
+/// frame the scripts see, as every pointer position, PROVISIONAL). Called only when the box changes.
+pub fn selection_box(hud: Option<NonSendMut<BattleHud>>, drag: Res<super::input::MouseDrag>, mut shown: Local<Option<(Vec2, Vec2)>>) {
+    let Some(hud) = hud else { return };
+    let corners = drag.box_corners().map(|(a, b)| (window_to_ui(a, hud.screen), window_to_ui(b, hud.screen)));
+    if corners == *shown {
+        return;
+    }
+    let result = match corners {
+        Some((a, b)) => ui_battle::call_global(&hud.host, "ShowSelectionBox", |lua| {
+            mlua::IntoLuaMulti::into_lua_multi((a.x.round() as i32, a.y.round() as i32, b.x.round() as i32, b.y.round() as i32), lua)
+        }),
+        None => ui_battle::call_event(&hud.host, "HideSelectionBox"),
+    };
+    // A failure is logged with the scripts' other errors (`log_errors`); the next change retries.
+    if let Err(e) = result {
+        warn!("Battle HUD: selection box: {e}");
+    }
+    *shown = corners;
 }
 
 /// Rebuilds the HUD sprites when the UI tree or the window size changed ([`DrawnFor`]), and
@@ -870,7 +935,7 @@ mod harness_tests {
 
 #[cfg(test)]
 mod order_tests {
-    use super::{BattleSim, order};
+    use super::{BattleSim, SelectMode, order};
     use ntw_sim::battle::TICK_SECONDS;
     use ntw_sim::battle::fatigue::KvFatigue;
     use ntw_sim::battle::model::{Battle, LandUnit};
@@ -881,11 +946,11 @@ mod order_tests {
         let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
         let mut me = LandUnit::new(1, 0, 100, (0.0, 0.0));
         (me.walk_speed, me.run_speed) = (1.4, 3.6);
-        sim.add_unit(me, UnitInfo { id: 1, ..UnitInfo::default() });
+        sim.add_unit(me, UnitInfo { id: 1, controllable: true, ..UnitInfo::default() });
         let mut enemy = LandUnit::new(2, 1, 100, (500.0, 0.0));
         enemy.hold_position = true;
         sim.add_unit(enemy, UnitInfo { id: 2, ..UnitInfo::default() });
-        sim.selected = Some(1);
+        sim.select(&[1], SelectMode::Replace);
         sim
     }
 

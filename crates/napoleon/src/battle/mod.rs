@@ -155,6 +155,7 @@ impl Plugin for BattlePlugin {
             .init_resource::<fx_draw::FxMeshes>()
             .init_resource::<view::ScriptCamera>()
             .init_resource::<view::CameraKeys>()
+            .init_resource::<input::MouseDrag>()
             .add_systems(
                 OnEnter(GameMode::Battle),
                 (
@@ -173,7 +174,7 @@ impl Plugin for BattlePlugin {
             .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave))
             .add_systems(
                 Update,
-                (hud::harness, hud::keys, hud::frame, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
+                (hud::harness, hud::keys, hud::frame, hud::selection_box, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
             )
             .add_systems(FixedUpdate, (tick_battle, fx_draw::tick_fx, scripts::tick, trace_battle, view::observe_ticks).chain().run_if(in_state(GameMode::Battle)))
             .add_systems(

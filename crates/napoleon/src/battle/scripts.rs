@@ -23,8 +23,8 @@ pub struct BattleScripts {
     host: BattleScriptHost,
     shown: Option<BattlePhase>,
     last_tick: Option<u32>,
-    /// The selection the scripts last heard about (`None` = not told yet).
-    selected: Option<Option<u32>>,
+    /// The selection the scripts last heard about.
+    selected: Vec<u32>,
 }
 
 /// Loads the battle script, if the battle has one. Exclusive system (the host is a non-send resource).
@@ -69,7 +69,7 @@ pub fn enter(world: &mut World) {
     }
     flush_log(&host);
     info!("Battle script {path} loaded");
-    world.insert_non_send(BattleScripts { host, shown: None, last_tick: None, selected: None });
+    world.insert_non_send(BattleScripts { host, shown: None, last_tick: None, selected: Vec::new() });
 }
 
 /// One script step per model tick. Exclusive system.
@@ -123,15 +123,16 @@ fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> 
         s.host.advance();
         s.last_tick = Some(sim.battle.tick);
     }
-    // The player's actions: selection changes (INFERRED order: the old unit deselected, then the
-    // new one selected), commands and camera inputs.
-    if s.selected != Some(sim.selected) {
-        let old = s.selected.flatten();
-        s.selected = Some(sim.selected);
-        if old.is_some() {
-            s.host.selection(old, false);
+    // The player's actions: selection changes (INFERRED order: the units that left the selection
+    // deselected first, then the new ones selected, each in selection order), commands and
+    // camera inputs.
+    if s.selected.as_slice() != sim.selection() {
+        let new = sim.selection();
+        let old = std::mem::replace(&mut s.selected, new.to_vec());
+        for &id in old.iter().filter(|id| !new.contains(id)) {
+            s.host.selection(Some(id), false);
         }
-        if let Some(id) = sim.selected {
+        for &id in new.iter().filter(|id| !old.contains(id)) {
             s.host.selection(Some(id), true);
         }
     }

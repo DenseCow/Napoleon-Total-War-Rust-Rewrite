@@ -661,6 +661,17 @@ impl Battle {
             && u.unit_class == "artillery_horse"
     }
 
+    /// The state-byte reset `0x005357B0` (CONFIRMED static; run by the unit constructor `0x0051B7D0`,
+    /// the ability toggle `0x00578860`, the bayonet plug and unplug and the deployable and
+    /// formation changes): skirmish mode = [`Battle::skirmish_default`] (`+0xD9C`) and melee mode =
+    /// "cannot fire" (`+0xD98` = `!0x0053EFE0`, [`Battle::can_fire_and_advance`]). The bytes
+    /// `+0xD9A` / `+0xD9B` it also sets are not modelled. Whether the exe runs it when a unit's
+    /// ammunition runs out is not traced (callers `0x0054DD70`, `0x005748A0` via `0x0057E9E0`).
+    pub fn reset_state_bytes(&mut self, idx: usize) {
+        self.units[idx].skirmish = self.skirmish_default(idx);
+        self.units[idx].melee_mode = !self.can_fire_and_advance(idx);
+    }
+
     /// `skirmish(on)`: the unit's skirmish mode (`0x005602A0`: unit `+0xD9C`, CONFIRMED).
     /// Returns false if `id` is unknown.
     pub fn order_skirmish(&mut self, id: u32, on: bool) -> bool {
