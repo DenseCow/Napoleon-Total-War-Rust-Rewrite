@@ -1015,6 +1015,15 @@ impl Formation {
     }
 }
 
+/// The files a line `width` metres wide holds at `spacing` metres between files, its men of
+/// radius `man_radius`: the line shape's vfunc `+0x10`, `0x00642C90`:
+/// `floor((width + 0.001 − 2r) / spacing) + 1`, at least 1 (CONFIRMED static). Its callers cap
+/// it at the men they are passed. The inverse span is [`LandUnit::span_of_files`].
+pub fn line_files(width: f32, man_radius: f32, spacing: f32) -> u32 {
+    let room = (width + 0.001 - 2.0 * man_radius) / spacing;
+    if room.is_finite() && room > 0.0 { room.floor() as u32 + 1 } else { 1 }
+}
+
 impl LandUnit {
     /// The formation's files and ranks over its living men: for the line the files are the front
     /// rank ([`LandUnit::files`], the men who fire with the default drill, capped at the living men
@@ -1072,8 +1081,7 @@ impl LandUnit {
             2 | 4 => (files, SQUARE_SPACING_M, SQUARE_SPACING_M),
             3 => {
                 let width = if self.formation_width > 0.0 { self.formation_width } else { self.fresh_width() };
-                let room = width + 0.001 - 2.0 * self.man_radius;
-                let wall = (room / SQUARE_SPACING_M).floor().max(0.0) as usize + 1;
+                let wall = line_files(width, self.man_radius, SQUARE_SPACING_M) as usize;
                 (wall.min(men).max(1), SQUARE_SPACING_M, SQUARE_SPACING_M)
             }
             _ => (files, self.fresh_width() / files as f32, self.rank_spacing()),

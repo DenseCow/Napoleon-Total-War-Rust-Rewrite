@@ -3050,15 +3050,16 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   `0x01325C84`; `0.1` at `0x0131A7B0` for a mounted unit, `0x0055ABF0`), the widest the files a width of
   twice the man radius per man holds (`0x00642C60`), at most 80 m (`0x01325D70`); the men are the unit's
   entity count `+0x2CC`. Artillery with guns, an unlimbered gun and state `0xE` keep their shape's width
-  (`0x00569410`; PROVISIONAL: ours keeps every artillery unit's width, `LandUnit::drag_width_limits`).
+  (`0x00569410`; PROVISIONAL: ours keeps every artillery unit's width, and a unit not in line, in square or skirmish order, keeps its shape's files, `LandUnit::drag_width_limits`). Widths here are spans, `(files − 1) × spacing + 2r` (`LandUnit::span_of_files`, INFERRED inverse of `0x00642C90`), the same as the squad box measured from such a line.
   None of the `0x007FE…` formation code is ported. Ours: a plain click moves the group keeping its shape
   (`input::order_group_move`, PROVISIONAL); a drag with one unit makes the drag's clamped length its width,
-  centred on the line from the drag's start; with several, they are sorted along the drag and laid side by
+  centred on the line from the drag's start; with several (decided by the selection, as `0x00685BD0` does), each at the width it forms to on arrival
+  (`LandUnit::formed_width`), they are sorted along the drag and laid side by
   side from its start, 5 m apart (INFERRED gap), each keeping its width (`input::formation_line`); all
   face the camera's far side and turn to it on arrival (`LandUnit::arrival_facing`,
   `Battle::order_move_formed`; PROVISIONAL: the turn is made at once). PROVISIONAL: the drawn size
-  `UnitInfo::size_m` (the selection outline) is set once at the battle's start and does not follow a new
-  width.
+  `UnitInfo::size_m` (the selection outline, and the spread of the muzzle flashes, `fx_draw::muzzle_of`) is
+  set once at the battle's start and does not follow a new width.
 - **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no
   AI controls) also moved the player's units after every order, so a unit sent somewhere walked off on its
   own once it arrived. The setup now sets `hold_position` for every controllable unit.

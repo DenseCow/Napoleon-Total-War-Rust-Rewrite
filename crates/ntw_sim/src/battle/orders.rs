@@ -386,19 +386,25 @@ mod tests {
     fn a_dragged_width_reforms_the_unit_within_its_limits() {
         let mut b = battle();
         let u = &mut b.units[0];
-        (u.men, u.formation_files, u.formation_width, u.man_radius) = (160, 40, 60.0, 0.25);
-        // 1.5 m between files; 6 files at the narrowest; the widest: 2r × 160 = 80 m holds
-        // floor((80.001 − 0.5) / 1.5) + 1 = 54 files = 81 m, capped at 80 m.
-        assert_eq!(u.drag_width_limits(), Some((9.0, 80.0)));
+        (u.men, u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (160, 40, 60.0, 1.5, 0.25);
+        // Spans (files − 1) × 1.5 + 0.5: 6 files at the narrowest = 8 m; the widest: 2r × 160 =
+        // 80 m holds floor((80.001 − 0.5) / 1.5) + 1 = 54 files = 80 m, the cap.
+        assert_eq!(u.drag_width_limits(), Some((8.0, 80.0)));
         u.is_cavalry = true;
-        assert_eq!(u.drag_width_limits().map(|l| l.0), Some(24.0), "16 files mounted");
+        assert_eq!(u.drag_width_limits().map(|l| l.0), Some(23.0), "16 files mounted");
         u.is_cavalry = false;
         assert!(b.order_move_formed(1, (0.5, 0.0), 0.0, MoveSpeed::Walk, Some(30.0)));
-        // floor((30.001 − 0.5) / 1.5) + 1 = 20 files, 30 m.
-        assert_eq!((b.units[0].formation_files, b.units[0].formation_width), (20, 30.0));
-        assert_eq!(b.units[0].files_for_width(1000.0), 160, "capped at the men");
-        b.units[0].unit_category = "artillery".into();
-        assert_eq!(b.units[0].drag_width_limits(), None);
+        // floor((30.001 − 0.5) / 1.5) + 1 = 20 files, a 29 m span; the layout keeps 1.5 m files.
+        let u = &mut b.units[0];
+        assert_eq!((u.formation_files, u.formation_width, u.formed_width()), (20, 30.0, 29.0));
+        assert_eq!(u.set_frontage(80.0), 80.0, "the widest stays within the cap");
+        assert_eq!(u.set_frontage(8.0), 8.0, "the narrowest gives its own files back");
+        assert_eq!(u.files_for_width(1000.0), 160, "capped at the men");
+        u.active_abilities |= 1; // in square
+        assert_eq!(u.drag_width_limits(), None, "a square keeps its files");
+        u.active_abilities = 0;
+        u.unit_category = "artillery".into();
+        assert_eq!(u.drag_width_limits(), None);
     }
 
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain

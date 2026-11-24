@@ -324,6 +324,10 @@ pub struct LandUnit {
     /// men's places always come from the one grid. 0 = unknown:
     /// [`super::abilities::FILE_SPACING_M`] stands in.
     pub formation_rank_spacing: f32,
+    /// Metres between the formation's files (close order, `spacing_file_close`), set by the battle
+    /// setup. 0 = unknown: the width over the files, else [`super::abilities::FILE_SPACING_M`]
+    /// ([`LandUnit::file_spacing`]).
+    pub formation_file_spacing: f32,
     /// Men in one rank of the formation (its files): the line shape's vfunc `+0x10`, `0x00642D00` →
     /// `0x00642C90`: `floor((width + 0.001 − 2r) / file spacing) + 1`, which its callers (`0x0061CAB0`,
     /// `0x00646B00`, `0x00646C70`, `0x00646D40`, `0x0065A410`, `0x0065A6D0`) cap at the men they are
@@ -461,6 +465,7 @@ impl LandUnit {
             invincible: false,
             formation_width: 0.0,
             formation_rank_spacing: 0.0,
+            formation_file_spacing: 0.0,
             formation_files: 0,
             garrison: None,
             garrison_target: None,

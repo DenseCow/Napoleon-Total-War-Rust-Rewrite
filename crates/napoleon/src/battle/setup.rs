@@ -510,6 +510,7 @@ fn apply_spec_unit(db: &GameDatabase, key: &str, su: &SpecUnit, unit: &mut LandU
         unit.formation_files = (width / stats.spacing_file_close.max(0.1)).round().max(1.0) as u32;
         unit.formation_width = width;
         unit.formation_rank_spacing = stats.spacing_rank_close;
+        unit.formation_file_spacing = stats.spacing_file_close;
     }
     // The drawn block: the model's one grid (`LandUnit::formation`), with or without a width; the
     // model caps the files, and the width with them, at the men (`LandUnit::files`).
@@ -1076,6 +1077,7 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8,
     // (skirmish strips, defence pieces, the drawn block): files by the file spacing, ranks by the rank spacing.
     u.formation_width = (files * stats.spacing_file_close).max(5.0);
     u.formation_rank_spacing = stats.spacing_rank_close;
+    u.formation_file_spacing = stats.spacing_file_close;
     let size_m = drawn_size(&u);
     let info = UnitInfo { id, name: record.dev_name.clone(), size_m, key: key.to_owned(), category: record.category.clone(), ..Default::default() };
     (u, info)
