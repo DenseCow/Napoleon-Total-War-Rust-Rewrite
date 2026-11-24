@@ -22,7 +22,7 @@ fn pairs(esf: &EsfFile) -> BTreeSet<(String, String)> {
 }
 
 fn main() {
-    let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(dir).expect("vfs");
     let b = vfs.read(r"db\units_to_exclusive_faction_permissions_tables\units_to_exclusive_faction_permissions").unwrap();
     let t = DbTable::read(&b, &Schema::from_codes("s,s,b").unwrap()).unwrap();

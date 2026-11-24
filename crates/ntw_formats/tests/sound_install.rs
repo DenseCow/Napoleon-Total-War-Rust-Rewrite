@@ -15,10 +15,9 @@ use ntw_formats::sound::names::normalize_sound_path;
 use ntw_formats::sound::slots::SLOT_NAMES;
 use ntw_formats::sound::{decode, SoundBankDatabase, SoundEvents, SoundLibrary};
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    ntw_formats::install::data_dir()
 }
 
 fn vfs() -> Vfs {

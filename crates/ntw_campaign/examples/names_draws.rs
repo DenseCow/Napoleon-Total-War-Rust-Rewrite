@@ -3,7 +3,6 @@
 //! and where they turn up in the later save: a new character's names (`CHARACTER_DETAILS` #1/#2)
 //! or a unit's officer names (`UNIT/COMMANDER_DETAILS` #0/#1).
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use ntw_campaign::names::{self, read_allocator, Allocator};
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
@@ -73,7 +72,7 @@ fn drawn(a: &Allocator, b: &Allocator) -> Option<Vec<u32>> {
 }
 
 fn main() {
-    let dir = PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data");
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let vfs = Vfs::open_install(&dir).expect("vfs");
     let rows = names::read_names(&vfs).expect("names");

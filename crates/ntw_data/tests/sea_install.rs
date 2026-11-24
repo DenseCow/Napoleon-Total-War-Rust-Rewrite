@@ -8,10 +8,9 @@ use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    ntw_formats::install::data_dir()
 }
 
 /// The five wind levels decode with the values the per-draw setter `0x0119E830` hands to

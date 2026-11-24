@@ -65,6 +65,7 @@ pub mod esf;
 pub mod effects;
 pub mod font;
 pub mod grass;
+pub mod install;
 pub mod group_formation;
 pub mod loc;
 pub mod material;

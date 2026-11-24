@@ -3,15 +3,13 @@
 //! cargo test -p ntw_formats --test sea_waves_install -- --ignored --nocapture
 //! ```
 
-use std::path::PathBuf;
 
 use ntw_formats::pack::Vfs;
 use ntw_formats::sea_waves::SeaWaves;
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 

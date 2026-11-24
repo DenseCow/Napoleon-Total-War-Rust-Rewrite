@@ -5,7 +5,6 @@
 //! cargo run --release -p ntw_campaign --example names_check -- FILE...
 //! ```
 
-use std::path::PathBuf;
 
 use ntw_campaign::names::{self, read_allocator, Allocator};
 use ntw_data::GameDatabase;
@@ -13,9 +12,7 @@ use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_formats::pack::Vfs;
 
 fn main() {
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let vfs = Vfs::open_install(&dir).expect("vfs");
     let rows = names::read_names(&vfs).expect("names");

@@ -1,7 +1,7 @@
 //! Research helper: the `factions` rows with their three UNKNOWN flags (#9..#11), category and
 //! flag folders (custom battle faction lists, analysis/frontend/FRONTEND_PAGES.md). Read-only.
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
     for f in db.factions.rows() {
         if f.unknown_64 || f.unknown_65 || f.unknown_66 {

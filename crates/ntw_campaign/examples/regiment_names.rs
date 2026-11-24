@@ -82,8 +82,8 @@ fn main() {
         return;
     }
     if a[0] == "growth" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let db = ntw_data::GameDatabase::from_install(std::path::Path::new(dir)).expect("db");
+        let dir = ntw_formats::install::data_dir();
+        let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
         for w in a[1..].windows(2) {
             println!("== {} -> {}", w[0], w[1]);
             growth(&EsfFile::open(&w[0]).unwrap(), &EsfFile::open(&w[1]).unwrap(), &db);
@@ -91,21 +91,21 @@ fn main() {
         return;
     }
     if a[0] == "layout" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let vfs = ntw_formats::pack::Vfs::open_install(dir).expect("vfs");
-        let db = ntw_data::GameDatabase::from_install(std::path::Path::new(dir)).expect("db");
+        let dir = ntw_formats::install::data_dir();
+        let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
+        let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
         layout(&EsfFile::open(&a[1]).unwrap(), &db, &vfs);
         return;
     }
     if a[0] == "extract" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let vfs = ntw_formats::pack::Vfs::open_install(dir).expect("vfs");
+        let dir = ntw_formats::install::data_dir();
+        let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
         std::fs::write(&a[2], vfs.read(&a[1]).unwrap()).unwrap();
         return;
     }
     if a[0] == "table" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let vfs = ntw_formats::pack::Vfs::open_install(dir).expect("vfs");
+        let dir = ntw_formats::install::data_dir();
+        let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
         let b = vfs.read(r"db\unit_regiment_names_tables\unit_regiment_names").unwrap();
         let t = ntw_formats::db::DbTable::read(&b, &ntw_formats::db::Schema::from_codes("s,s,s,i").unwrap()).unwrap();
         let mut g: BTreeMap<(String, String), Vec<(String, i32)>> = BTreeMap::new();
@@ -122,8 +122,8 @@ fn main() {
         return;
     }
     if a[0] == "has" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let vfs = ntw_formats::pack::Vfs::open_install(dir).expect("vfs");
+        let dir = ntw_formats::install::data_dir();
+        let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
         let b = vfs.read(&a[1]).unwrap();
         for s in &a[2..] {
             let w: Vec<u8> = s.encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
@@ -131,13 +131,13 @@ fn main() {
             let n8 = b.windows(s.len()).filter(|x| *x == s.as_bytes()).count();
             println!("{s}: utf16 {n}, utf8 {n8}");
         }
-        let db = ntw_data::GameDatabase::from_install(std::path::Path::new(dir)).expect("db");
+        let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
         println!("db units rows {}", db.units.len());
         return;
     }
     if a[0] == "vfs" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let vfs = ntw_formats::pack::Vfs::open_install(dir).expect("vfs");
+        let dir = ntw_formats::install::data_dir();
+        let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
         for p in &a[1..] {
             for f in vfs.list(p) {
                 let (pack, e) = vfs.find(f).unwrap();
@@ -154,8 +154,8 @@ fn main() {
         return;
     }
     if a[0] == "classes" {
-        let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-        let db = ntw_data::GameDatabase::from_install(std::path::Path::new(dir)).expect("db");
+        let dir = ntw_formats::install::data_dir();
+        let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
         for p in &a[1..] {
             class_map(&EsfFile::open(p).unwrap(), &db);
             odd_units(&EsfFile::open(p).unwrap(), &db);

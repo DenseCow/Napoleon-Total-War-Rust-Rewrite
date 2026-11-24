@@ -7,7 +7,7 @@ use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_formats::pack::Vfs;
 
 fn main() {
-    let dir = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(dir).expect("vfs");
     let mut warnings = Vec::new();
     let units = load_table::<UnitRecord>(&vfs, &mut warnings).expect("units");

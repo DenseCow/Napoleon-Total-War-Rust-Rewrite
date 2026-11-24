@@ -14,10 +14,9 @@ use ntw_formats::bink::audio::{CRITICAL_FREQS, QUANT_BITS, RUN_LENGTHS};
 use ntw_formats::bink::{split_packet, AudioDecoder, BinkHeader};
 use ntw_formats::pack::Vfs;
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    ntw_formats::install::data_dir()
 }
 
 fn header(vfs: &Vfs, path: &str) -> BinkHeader {

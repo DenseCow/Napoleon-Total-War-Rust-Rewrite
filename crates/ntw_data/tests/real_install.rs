@@ -9,9 +9,7 @@ use ntw_data::{GameDatabase, Table};
 use ntw_formats::pack::Vfs;
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-    })
+    ntw_formats::install::data_dir()
 }
 
 /// Every implemented table loads with no leftover bytes (`DbTable::read` rejects any),

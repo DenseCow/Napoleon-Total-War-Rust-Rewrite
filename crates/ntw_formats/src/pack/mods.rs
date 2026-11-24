@@ -239,10 +239,16 @@ impl UserScript {
 /// Where the original keeps `user.script.txt`:
 /// `%APPDATA%\The Creative Assembly\Napoleon\scripts\user.script.txt` (CONFIRMED: the exe
 /// builds it from `The Creative Assembly\`, `scripts\` and `.script.txt`, and the game writes
-/// `preferences.script.txt` in the same folder).
+/// `preferences.script.txt` in the same folder). On Linux the same folder in the game's Proton
+/// prefix ([`crate::install::original_user_dir`]).
 pub fn default_user_script_path() -> Option<PathBuf> {
-    let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("The Creative Assembly").join("Napoleon").join("scripts").join(USER_SCRIPT_NAME))
+    Some(crate::install::original_user_dir()?.join("scripts").join(USER_SCRIPT_NAME))
+}
+
+/// A path from `user.script.txt` (written with `\` or `/`) as a relative path for this platform's
+/// file system: `\` on Windows, as the original reads it, `/` elsewhere.
+fn native_rel_path(name: &str) -> PathBuf {
+    PathBuf::from(name.replace(['/', '\\'], std::path::MAIN_SEPARATOR_STR))
 }
 
 /// Which `user.script.txt` to read.
@@ -394,7 +400,7 @@ impl ModResolver<'_> {
         let pack = match self.inactive.remove(&file) {
             Some(p) => p,
             None => {
-                let rel = name.replace('/', "\\");
+                let rel = native_rel_path(name);
                 let found = self.work_dirs.iter().map(|d| d.join(&rel)).find(|p| p.is_file());
                 match found.map(|p| (PackFile::open(&p), p)) {
                     Some((Ok(p), _)) => p,
@@ -524,7 +530,7 @@ fn plan_layers(data_dir: &Path, language: &str, options: &ModOptions) -> Result<
                          stops reading the script here); ignored, the folder is still added"
                     ));
                 }
-                let p = root.join(d.replace('/', "\\"));
+                let p = root.join(native_rel_path(d));
                 if p.is_dir() {
                     add_dir(&mut work_dirs, p);
                 } else {
@@ -1048,6 +1054,15 @@ mod tests {
         assert_eq!(report.notes.iter().filter(|n| n.contains("no `mod` line")).count(), 2);
         let vanilla = Vfs::open_install(&data).unwrap();
         assert_eq!(vanilla.list(""), vfs.list(""));
+    }
+
+    /// A `mod` line written with Windows separators finds the pack on every platform.
+    #[test]
+    fn backslash_mod_line_finds_a_nested_pack() {
+        let data = fake_install("mods_backslash");
+        let (vfs, report) = Vfs::open_with_mods(&data, &opts("mod \"sub\\nested.pack\";")).unwrap();
+        assert_eq!(vfs.read("h.txt").unwrap(), b"nested");
+        assert!(report.warnings.is_empty(), "{:?}", report.warnings);
     }
 
     /// Rule: among mod packs the first `mod` line wins; a mod beats release and patch packs.

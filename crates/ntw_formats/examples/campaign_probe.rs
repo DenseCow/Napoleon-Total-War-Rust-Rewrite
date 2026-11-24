@@ -8,7 +8,6 @@ use ntw_formats::esf::{EsfFile, EsfNode};
 use std::collections::BTreeMap;
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn short(n: &EsfNode) -> String {
     let s = format!("{n:?}");
@@ -45,7 +44,7 @@ fn dump(nodes: &[EsfNode], depth: usize, max_depth: usize, max_items: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let files = GameFiles { vfs: &vfs };
     match args[0].as_str() {

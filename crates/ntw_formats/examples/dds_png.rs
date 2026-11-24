@@ -5,7 +5,7 @@ use ntw_formats::pack::Vfs;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data").unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     // A loose file path also works, and TGA pictures (e.g. the campaign maps' radar pictures).
     let b = std::fs::read(&a[0]).or_else(|_| vfs.read(&a[0])).unwrap();
     let (w, h, px) = if a[0].to_ascii_lowercase().ends_with(".tga") {

@@ -11,9 +11,7 @@ use ntw_script::{CampaignOpening, ScriptContext, ScriptHost, ScriptSource};
 use ntw_sim::campaign::{CampaignCommand, Stance};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-    })
+    ntw_formats::install::data_dir()
 }
 
 #[test]
@@ -127,7 +125,7 @@ fn spa_napoleon_load_books_the_saved_boosts_again_at_model_created() {
     let dir = data_dir();
     let ev = std::env::var_os("NTW_EVIDENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from).unwrap_or_default().join(r"Documents\ntw-evidence\saves"));
+        .unwrap_or_else(|| std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default().join("Documents").join("ntw-evidence").join("saves"));
     let save = ev.join("orig_fr_t1.save");
     if !dir.join("campaigns").join("spa_napoleon").join("scripting.lua").is_file() || !save.is_file() {
         eprintln!("skipped: no install at {} or no {}", dir.display(), save.display());

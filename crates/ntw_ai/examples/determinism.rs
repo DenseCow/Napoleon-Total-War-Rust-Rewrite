@@ -28,9 +28,7 @@ use ntw_sim::battle::shooting::MissileWeapon;
 use ntw_sim::campaign::Terrain;
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 /// One unit from its DB rows (as `tests/real_battle.rs`; speeds PLACEHOLDER as there).
@@ -102,7 +100,7 @@ fn battle(ticks: u32, seed: u32) -> Option<()> {
 /// `turn hash` after each turn.
 fn campaign(turns: u32) -> Option<()> {
     let dir = data_dir();
-    let sp = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+    let sp = dir.join("campaigns/eur_napoleon/startpos.esf");
     let db = GameDatabase::from_install(&dir).ok()?;
     let data = Arc::new(CampaignAiData::from_install(&dir, &db).ok()?);
     let mut loaded = ntw_campaign::read_file(&sp, &db).ok()?;

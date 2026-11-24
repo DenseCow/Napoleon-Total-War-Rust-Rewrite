@@ -4,9 +4,7 @@ use ntw_ai::tables::{self, layouts};
 use ntw_formats::pack::Vfs;
 
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| {
-        r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".to_string()
-    });
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).expect("open install");
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--grep") {

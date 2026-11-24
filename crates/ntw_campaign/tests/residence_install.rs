@@ -14,9 +14,7 @@ use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_sim::campaign::{CharacterId, RegionId};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 /// Region id → (settlement residence id, #14 resident ids) as stored.

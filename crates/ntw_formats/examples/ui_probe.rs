@@ -6,7 +6,6 @@
 use ntw_formats::pack::Vfs;
 use ntw_formats::ui_layout::{is_layout, UiComponent, UiLayout};
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn tree(c: &UiComponent, depth: usize) {
     let st = c.initial_state();
@@ -43,7 +42,7 @@ fn tree(c: &UiComponent, depth: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let Some(command) = args.first() else {
         eprintln!("usage: ui_probe <all [verbose] | tree <path> | statefns [prefix] | statekey <state> <key> [prefix]>");
         std::process::exit(2);

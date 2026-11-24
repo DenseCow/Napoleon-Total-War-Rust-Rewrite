@@ -4,11 +4,10 @@ use ntw_formats::campaign_map::CampaignMap;
 use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let map = std::env::args().nth(1).unwrap_or_else(|| "nap_europe".into());
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let files = GameFiles { vfs: &vfs };
     let m = CampaignMap::load(&files, &map).unwrap();

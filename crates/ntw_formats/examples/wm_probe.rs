@@ -3,11 +3,10 @@
 use ntw_formats::pack::Vfs;
 use ntw_formats::weighted_mesh::{WeightedMesh, WeightedMeshError};
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let paths: Vec<String> = vfs.list("").into_iter().filter(|p| p.ends_with(".variant_weighted_mesh")).map(str::to_owned).collect();
     let (mut ok, mut bad) = (0, 0);
     for p in &paths {

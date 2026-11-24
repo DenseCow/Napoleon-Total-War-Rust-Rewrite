@@ -15,11 +15,7 @@ use ntw_formats::esf::EsfFile;
 use ntw_sim::campaign::FactionId;
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-        })
+    ntw_formats::install::data_dir()
 }
 
 /// The game database, loaded once for all tests (None without an install).
@@ -401,7 +397,7 @@ fn loads_all_eight_startpos() {
 #[test]
 fn the_out_of_game_flag_round_trips() {
     let Some(db) = db() else { return };
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     if !path.is_file() {
         return;
     }
@@ -428,7 +424,7 @@ fn the_out_of_game_flag_round_trips() {
 #[test]
 fn europe_startpos_exact_counts() {
     let Some(db) = db() else { return };
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     if !path.is_file() {
         return;
     }
@@ -584,7 +580,7 @@ fn recruit_permissions_from_the_real_data() {
 fn outcome_movies_from_the_real_data() {
     use ntw_sim::campaign::outcome::{CampaignOutcome, MovieExit};
     let Some(db) = db() else { return };
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     if !path.is_file() {
         return;
     }
@@ -629,7 +625,7 @@ fn outcome_movies_from_the_real_data() {
 fn ally_attacked_message_row_from_the_real_data() {
     use ntw_sim::campaign::message_events::ALLY_ATTACKED;
     let Some(db) = db() else { return };
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     if !path.is_file() {
         return;
     }
@@ -681,7 +677,7 @@ fn technology_faction_lists_from_the_real_data() {
             assert_eq!(t.factions.iter().filter(|f| **f == row.faction).count(), 1, "{} {}", row.technology, row.faction);
         }
     }
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     if !path.is_file() {
         return;
     }

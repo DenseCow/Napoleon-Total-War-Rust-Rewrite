@@ -7,13 +7,9 @@
 //! ```
 use ntw_formats::pack::Vfs;
 
-const DEFAULT_DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let data = std::env::var("NAPOLEON_INSTALL_DIR")
-        .map(|d| format!(r"{d}\data"))
-        .unwrap_or_else(|_| DEFAULT_DATA.to_string());
+    let data = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&data).expect("open install");
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
     let num = |i: usize, d: usize| args.get(i).and_then(|s| s.parse().ok()).unwrap_or(d);

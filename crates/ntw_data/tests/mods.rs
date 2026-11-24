@@ -216,9 +216,7 @@ fn load_table_drops_units_naming_an_unknown_unit_resource() {
 }
 
 fn install_data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 /// With no mods active, the install loads exactly as before mod support: every file that the

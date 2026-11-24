@@ -19,12 +19,11 @@ const NAMES: [&str; 25] = [
     "vegetation_medium_woodland", "water_deep", "water_frozen", "water_medium_ford", "water_shallow", "wood", "stone", "glass", "none",
 ];
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let filter = args.first().cloned().unwrap_or_default();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     println!("{:<26} {:>7} {:>7} {:>9} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8}", "map", "scale", "bias", "h_min", "h_max", "typed%", "below0%", "w_min", "w_max", "w_mean");
     for name in battle_terrain::list_presets(&vfs) {
         if !filter.is_empty() && !name.contains(&filter) {

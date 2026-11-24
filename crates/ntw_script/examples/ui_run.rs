@@ -6,7 +6,6 @@ use ntw_formats::loc::Localisation;
 use ntw_script::ScriptSource;
 use ntw_script::ui::{FrontEndFacts, NodeId, PointerEvent, UiScriptHost, UiWorld};
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn print_tree(w: &UiWorld, id: NodeId, depth: usize) {
     let Some(n) = w.get(id) else { return };
@@ -39,11 +38,11 @@ fn print_tree(w: &UiWorld, id: NodeId, depth: usize) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let source = ScriptSource::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
-    let original = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join("The Creative Assembly").join("Napoleon"));
+    let original = ntw_formats::install::original_user_dir();
     let facts = FrontEndFacts { campaign_saves_exist: true, game_version: "1.3.0".into(), original_user_dir: original, user_dir: None, nap_unlock: 1, ..Default::default() };
     let limits = ntw_data::load_game_limits(&vfs, &mut Vec::new()).unwrap();
     let host = UiScriptHost::new(source, loc, facts, (1280.0, 960.0), limits).unwrap();

@@ -14,10 +14,10 @@
 //!
 //! ```no_run
 //! use ntw_data::GameDatabase;
-//! let data = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-//! let db = GameDatabase::from_install(data).unwrap();
+//! let data = ntw_formats::install::data_dir();
+//! let db = GameDatabase::from_install(&data).unwrap();
 //! let loaded = ntw_campaign::read_file(
-//!     format!(r"{data}\campaigns\eur_napoleon\startpos.esf"),
+//!     data.join("campaigns/eur_napoleon/startpos.esf"),
 //!     &db,
 //! ).unwrap();
 //! let world = &loaded.model.world;

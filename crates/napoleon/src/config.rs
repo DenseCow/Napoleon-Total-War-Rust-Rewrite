@@ -1,59 +1,69 @@
 //! Program configuration.
 //!
 //! The only setting so far is where the original Napoleon: Total War is installed. The game
-//! READS the original files from there (read-only) and never copies or changes them.
+//! READS the original files from there (read-only) and never copies or changes them. The
+//! per-platform lookups (Windows, Linux through Proton) live in `ntw_formats::install`.
 
 use std::path::PathBuf;
 
-/// The default Steam install location.
-pub const DEFAULT_INSTALL_DIR: &str =
-    r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War";
-
 /// Name of the environment variable that overrides the install location.
-pub const INSTALL_DIR_ENV: &str = "NAPOLEON_INSTALL_DIR";
+pub const INSTALL_DIR_ENV: &str = ntw_formats::install::INSTALL_DIR_ENV;
 
-/// The original game's `data` folder: `$NAPOLEON_INSTALL_DIR\data` if that variable is set,
-/// otherwise the default Steam location.
+/// The original game's `data` folder (`ntw_formats::install::data_dir`: `$NTW_DATA_DIR`, else
+/// `$NAPOLEON_INSTALL_DIR/data`, else the Steam library that holds the game).
 pub fn game_data_dir() -> PathBuf {
-    let install = std::env::var_os(INSTALL_DIR_ENV)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR));
-    install.join("data")
+    ntw_formats::install::data_dir()
 }
 
 /// The original game's own user folder, `%APPDATA%\The Creative Assembly\Napoleon` (saves,
-/// preferences). NapoleonRust only READS it.
+/// preferences), or the same folder in its Proton prefix on Linux. NapoleonRust only READS it.
 pub fn original_user_dir() -> Option<PathBuf> {
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("The Creative Assembly").join("Napoleon"))
+    ntw_formats::install::original_user_dir()
 }
 
 /// Name of the environment variable that overrides NapoleonRust's own user folder.
 pub const USER_DIR_ENV: &str = "NAPOLEONRUST_USER_DIR";
 
 /// NapoleonRust's own user folder (our preferences copy lives in its `scripts\`):
-/// `$NAPOLEONRUST_USER_DIR` if set, otherwise `%APPDATA%\NapoleonRust`. It is never the original
-/// game's folder, so the original's settings stay untouched.
+/// `$NAPOLEONRUST_USER_DIR` if set, otherwise `%APPDATA%\NapoleonRust` on Windows and
+/// `$XDG_DATA_HOME/NapoleonRust` (`~/.local/share/NapoleonRust`) elsewhere. It is never the
+/// original game's folder, so the original's settings stay untouched.
 pub fn user_dir() -> Option<PathBuf> {
-    std::env::var_os(USER_DIR_ENV)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("NapoleonRust")))
+    let var = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    if let Some(dir) = var(USER_DIR_ENV) {
+        return Some(dir);
+    }
+    if cfg!(windows) {
+        return var("APPDATA").map(|a| a.join("NapoleonRust"));
+    }
+    var("XDG_DATA_HOME").or_else(|| var("HOME").map(|h| h.join(".local/share"))).map(|d| d.join("NapoleonRust"))
 }
+
+const NAP_UNLOCK_KEY: &str = r"Software\The Creative Assembly\Napoleon";
 
 /// Napoleon's campaign progress `nap_unlock` (1..=4). The original reads it from the registry value
 /// `HKCU\Software\The Creative Assembly\Napoleon\nap_unlock` (default 1, clamped to 1..4;
-/// CONFIRMED `0x0047B750`). We read the same value (read only, with `reg query`), default 1.
+/// CONFIRMED `0x0047B750`). We read the same value (read only): with `reg query` on Windows, from
+/// the Proton prefix's `user.reg` on Linux; default 1.
 pub fn nap_unlock() -> u32 {
-    let out = std::process::Command::new("reg")
-        .args(["query", r"HKCU\Software\The Creative Assembly\Napoleon", "/v", "nap_unlock"])
-        .output();
-    let Ok(out) = out else { return 1 };
+    let value = if cfg!(windows) { nap_unlock_from_reg_query() } else { nap_unlock_from_wine_prefix() };
+    value.unwrap_or(1).clamp(1, 4)
+}
+
+fn nap_unlock_from_wine_prefix() -> Option<u32> {
+    let reg = ntw_formats::install::proton_prefix()?.join("user.reg");
+    let text = std::fs::read_to_string(reg).ok()?;
+    ntw_formats::install::wine_reg_dword(&text, NAP_UNLOCK_KEY, "nap_unlock")
+}
+
+fn nap_unlock_from_reg_query() -> Option<u32> {
+    let key = format!(r"HKCU\{NAP_UNLOCK_KEY}");
+    let out = std::process::Command::new("reg").args(["query", &key, "/v", "nap_unlock"]).output().ok()?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let value = text
-        .lines()
+    text.lines()
         .find(|l| l.contains("nap_unlock"))
         .and_then(|l| l.split_whitespace().last())
-        .and_then(|v| v.strip_prefix("0x").map_or_else(|| v.parse().ok(), |h| u32::from_str_radix(h, 16).ok()));
-    value.unwrap_or(1).clamp(1, 4)
+        .and_then(|v| v.strip_prefix("0x").map_or_else(|| v.parse().ok(), |h| u32::from_str_radix(h, 16).ok()))
 }
 
 /// Our easy-mod folder next to the program: `<exe folder>\mods` (packs and loose folders, with an

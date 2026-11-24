@@ -24,7 +24,6 @@ use std::collections::BTreeMap;
 
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 #[derive(Clone)]
 enum K {
@@ -210,7 +209,7 @@ fn main() {
     if args.first().map(String::as_str) == Some("strings") {
         let needle = args.get(1).cloned().unwrap_or_default();
         let only = args.get(2).cloned().unwrap_or_default();
-        let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+        let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
         for p in vfs.list("ui") {
             if !p.to_ascii_lowercase().ends_with(".luac") {
                 continue;
@@ -239,7 +238,7 @@ fn main() {
     }
     let method = args.first().cloned().unwrap_or_else(|| "OpenPanel".into());
     let only = args.get(1).cloned().unwrap_or_default();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let mut out = Vec::new();
     let mut files = 0usize;
     for p in vfs.list("ui") {

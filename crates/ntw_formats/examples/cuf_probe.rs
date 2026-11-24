@@ -2,7 +2,6 @@
 //!   cargo run -p ntw_formats --release --example cuf_probe -- <font path> [chars]
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn u16_at(b: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([b[o], b[o + 1]])
@@ -10,7 +9,7 @@ fn u16_at(b: &[u8], o: usize) -> u16 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let b = vfs.read(&args[0]).unwrap();
     let hdr: Vec<i16> = (0..12).map(|i| u16_at(&b, 4 + 2 * i) as i16).collect();
     let n = hdr[11] as usize;

@@ -16,10 +16,8 @@ use ntw_data::debugger::{IMAGE_BASE, PROBE_BREAKPOINTS, RETURN_PAIRS, TEXT_RANGE
 use std::path::PathBuf;
 
 fn exe() -> Option<PathBuf> {
-    let dir = std::env::var("NTW_INSTALL_DIR").unwrap_or_else(|_| {
-        r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War".to_string()
-    });
-    let p = PathBuf::from(dir).join("Napoleon.exe");
+    let dir = std::env::var_os("NTW_INSTALL_DIR").map(PathBuf::from).unwrap_or_else(ntw_formats::install::install_dir);
+    let p = dir.join("Napoleon.exe");
     p.is_file().then_some(p)
 }
 

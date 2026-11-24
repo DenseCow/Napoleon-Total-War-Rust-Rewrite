@@ -9,9 +9,7 @@ use ntw_formats::campaign_pathfinding::PathfindingFile;
 use ntw_sim::campaign::polypath::{kind, PolyMap};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 const MAPS: [&str; 5] = ["nap_europe", "nap_italy", "nap_egypt", "nap_spain", "nap_tut"];

@@ -5,11 +5,10 @@
 use ntw_formats::loc::Localisation;
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let loc = Localisation::from_vfs(&vfs).unwrap();
     let mode = args.first().map(String::as_str).unwrap_or("key");

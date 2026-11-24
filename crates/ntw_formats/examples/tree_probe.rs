@@ -8,8 +8,6 @@
 use ntw_formats::dds::Dds;
 use ntw_formats::pack::Vfs;
 
-const DEFAULT_DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
-
 fn f32_at(b: &[u8], o: usize) -> f32 {
     f32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
@@ -35,9 +33,7 @@ fn dump_model(b: &[u8]) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let data = std::env::var("NAPOLEON_INSTALL_DIR")
-        .map(|d| format!(r"{d}\data"))
-        .unwrap_or_else(|_| DEFAULT_DATA.to_string());
+    let data = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&data).expect("open install");
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
     match arg(0).as_str() {

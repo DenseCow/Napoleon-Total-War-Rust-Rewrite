@@ -457,12 +457,13 @@ pub(super) fn install_saves(lua: &Lua, inner: &Rc<Inner>, t: &Table) -> mlua::Re
     // merged list is ours, not the original's behaviour.
     let names: Rc<RefCell<std::collections::HashMap<String, PathBuf>>> = Rc::default();
 
-    // FileExtenstionAndPathForWriteClass(class) → extension, folder (with a trailing separator).
+    // FileExtenstionAndPathForWriteClass(class) → extension, folder (with a trailing separator; the
+    // scripts append the file name, so it is the platform's: `\` on Windows, as in the original).
     let i = inner.clone();
     t.set("FileExtenstionAndPathForWriteClass", lua.create_function(move |_, class: String| {
         let Some((ext, folder)) = write_class(&class) else { return Ok((None, None)) };
         let base = i.facts.user_dir.as_ref().or(i.facts.original_user_dir.as_ref());
-        let dir = base.map(|d| format!("{}\\", d.join(folder).display()));
+        let dir = base.map(|d| format!("{}{}", d.join(folder).display(), std::path::MAIN_SEPARATOR));
         Ok((Some(ext.to_owned()), dir))
     })?)?;
 

@@ -3,7 +3,6 @@
 //!   cargo run -p ntw_script --release --example luac_dis -- "ui/frontend ui/main.main.luac"
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 const OPS: [&str; 38] = [
     "MOVE", "LOADK", "LOADBOOL", "LOADNIL", "GETUPVAL", "GETGLOBAL", "GETTABLE", "SETGLOBAL", "SETUPVAL", "SETTABLE",
     "NEWTABLE", "SELF", "ADD", "SUB", "MUL", "DIV", "MOD", "POW", "UNM", "NOT", "LEN", "CONCAT", "JMP", "EQ", "LT", "LE",
@@ -109,7 +108,7 @@ impl R<'_> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     // `--list <prefix> [substring]`: the pack paths under a folder (to find a script's name).
     if args[0] == "--list" {
         let sub = args.get(2).map(|s| s.to_ascii_lowercase()).unwrap_or_default();

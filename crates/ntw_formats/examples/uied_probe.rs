@@ -4,8 +4,6 @@
 use ntw_formats::ui_layout::UiComponent;
 use ntw_formats::ui_templates::UiTemplateLibrary;
 
-const FILE: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data\UI\Templates\uied.templates";
-
 fn tree(c: &UiComponent, depth: usize) {
     let st = c.initial_state();
     println!(
@@ -27,7 +25,7 @@ fn tree(c: &UiComponent, depth: usize) {
 }
 
 fn main() {
-    let b = std::fs::read(FILE).unwrap();
+    let b = std::fs::read(ntw_formats::install::data_dir().join("UI").join("Templates").join("uied.templates")).unwrap();
     if let Ok(n) = std::env::var("UIED_DEBUG") {
         debug_entry(&b, &n);
         return;

@@ -11,7 +11,6 @@
 //! dev-dependency would be a cycle.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
 use ntw_formats::pack::Vfs;
@@ -24,9 +23,7 @@ fn stem(p: &str) -> &str {
 }
 
 fn install() -> (GameDatabase, Vfs) {
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     (GameDatabase::from_install(&dir).expect("load the database"), Vfs::open_install(&dir).expect("open install"))
 }
 

@@ -1,7 +1,6 @@
 //! Research helper: which `names` filter (type, genders, noble flag; entries weighted by the i32
 //! column) reproduces each stored allocator pool size, for every faction of the given saves.
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use ntw_campaign::names;
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode};
@@ -9,7 +8,7 @@ use ntw_formats::pack::Vfs;
 type Filter = Box<dyn Fn(&names::NameRow) -> bool>;
 
 fn main() {
-    let dir = PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data");
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let vfs = Vfs::open_install(&dir).expect("vfs");
     let rows = names::read_names(&vfs).expect("names");

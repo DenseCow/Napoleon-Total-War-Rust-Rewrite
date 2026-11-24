@@ -8,11 +8,10 @@ use ntw_formats::pack::GameFiles;
 use ntw_formats::pack::Vfs;
 use ntw_formats::rigid_model::RigidModel;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let path = std::env::args().nth(1).expect("path");
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let files = GameFiles { vfs: &vfs };
     let bytes = files.read(&path).expect("read");

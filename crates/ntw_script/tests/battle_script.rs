@@ -10,9 +10,7 @@ use ntw_script::ScriptSource;
 use ntw_script::battle_script::{BattleScriptFacts, BattleScriptHost, BattleScriptRequest, ScriptUnit};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-    })
+    ntw_formats::install::data_dir()
 }
 
 /// Facts from the battle file alone: every unit at its file position with its file men.

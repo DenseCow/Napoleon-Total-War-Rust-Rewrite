@@ -6,7 +6,6 @@
 //! cargo run -p ntw_ai --release --example character_run -- [turns] [campaign] [faction]
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntw_ai::campaign::driver;
@@ -23,9 +22,7 @@ fn main() {
     let turns: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(5);
     let campaign = args.get(1).cloned().unwrap_or_else(|| "eur_napoleon".into());
     let human = args.get(2).cloned().unwrap_or_else(|| "france".into());
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     for w in &db.load_warnings {
         eprintln!("WARN game data: {w}");

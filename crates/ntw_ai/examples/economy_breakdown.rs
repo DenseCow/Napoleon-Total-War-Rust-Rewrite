@@ -9,7 +9,6 @@
 //! End Turn: treasury, taxes, trade, other income, land and naval upkeep (with effects and plain),
 //! units, regions, and the effect sums that move these numbers.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntw_ai::campaign::driver;
@@ -28,10 +27,8 @@ fn main() {
     let focus = args.get(1).cloned().unwrap_or_else(|| "britain".into());
     let rounds: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3);
     let ai = args.get(3).is_none_or(|s| s != "noai");
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
-    let sp = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+    let dir = ntw_formats::install::data_dir();
+    let sp = dir.join("campaigns/eur_napoleon/startpos.esf");
     let db = GameDatabase::from_install(&dir).expect("db");
     let data = Arc::new(CampaignAiData::from_install(&dir, &db).expect("ai data"));
     let mut loaded = ntw_campaign::read_file(&sp, &db).expect("startpos");

@@ -1,9 +1,8 @@
 //! Research helper: per faction its names groups and the stored allocator sizes.
-use std::path::PathBuf;
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode};
 fn main() {
-    let dir = PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data");
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let esf = EsfFile::open(std::env::args().nth(1).unwrap()).unwrap();
     let w = esf.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap();

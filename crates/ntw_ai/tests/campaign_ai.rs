@@ -18,9 +18,7 @@ use ntw_formats::pack::Vfs;
 use ntw_sim::campaign::{CampaignModel, FactionId, RegionId, Terrain};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 struct Fixture {
@@ -37,7 +35,7 @@ fn fixture() -> Option<&'static Fixture> {
     static F: OnceLock<Option<Fixture>> = OnceLock::new();
     F.get_or_init(|| {
         let dir = data_dir();
-        let sp = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+        let sp = dir.join("campaigns/eur_napoleon/startpos.esf");
         if !sp.is_file() {
             eprintln!("skipped: no install");
             return None;
@@ -338,7 +336,7 @@ fn ai_keys_come_from_the_startpos() {
 #[test]
 fn region_base_values_come_from_the_startpos() {
     let dir = data_dir();
-    let sp = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+    let sp = dir.join("campaigns/eur_napoleon/startpos.esf");
     if !sp.is_file() {
         eprintln!("skipped: no install");
         return;
@@ -379,7 +377,7 @@ fn bdi_pool_builds_the_goal_tree() {
 #[test]
 fn faction_difficulty_blocks_come_from_the_startpos() {
     let dir = data_dir();
-    let sp = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+    let sp = dir.join("campaigns/eur_napoleon/startpos.esf");
     if !sp.is_file() {
         return;
     }

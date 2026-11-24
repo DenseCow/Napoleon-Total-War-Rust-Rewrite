@@ -1,7 +1,7 @@
 //! Research helper: `units` columns the custom battle reads (mp_category, the three era flags,
 //! costs) for a few units. Read-only.
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
     let mut cats = std::collections::BTreeMap::new();
     for u in db.units.rows() {
