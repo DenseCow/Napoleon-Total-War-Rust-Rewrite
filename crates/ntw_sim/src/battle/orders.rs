@@ -177,11 +177,17 @@ impl Battle {
         true
     }
 
-    /// The enemy unit `idx`'s melee attack chases, while it is still on the field with men.
+    /// The enemy unit `idx`'s melee attack chases: while it is still on the field with men, and
+    /// until the attacker is in melee or within the stop distance of the advance on an enemy
+    /// (`MELEE_CONTACT_RANGE` × `ADVANCE_STOP_FRACTION`, the same PLACEHOLDER stop), where the
+    /// melee code takes over.
     pub(super) fn melee_target_to_chase(&self, idx: usize) -> Option<usize> {
-        let t = self.unit_index(self.units[idx].melee_target?)?;
+        let u = &self.units[idx];
+        let t = self.unit_index(u.melee_target?)?;
         let e = &self.units[t];
-        (e.men > 0 && e.active && !e.left_field).then_some(t)
+        let stop = super::model::MELEE_CONTACT_RANGE * super::model::ADVANCE_STOP_FRACTION;
+        let (dx, dy) = (e.position.0 - u.position.0, e.position.1 - u.position.1);
+        (e.men > 0 && e.active && !e.left_field && !u.in_melee && dx * dx + dy * dy > stop * stop).then_some(t)
     }
 
     /// Ends a charge (clears `charging`). Returns false if `id` is unknown.
@@ -339,8 +345,12 @@ mod tests {
         assert_eq!(b.movement_goal(0).map(|g| g.0), Some((100.0, 0.0)));
         b.units[1].position = (80.0, 20.0);
         assert_eq!(b.movement_goal(0).map(|g| g.0), Some((80.0, 20.0)), "follows the target");
+        b.units[1].position = (5.0, 0.0);
+        assert_eq!(b.movement_goal(0), None, "stops at contact, where the melee code takes over");
+        assert_eq!(b.units[0].melee_target, Some(2), "the attack stays on");
         assert!(b.order_move(1, (10.0, 0.0)));
         assert_eq!(b.units[0].melee_target, None, "a new order replaces the attack");
+        assert!(!b.units[0].charging, "and its charge");
         assert!(!b.order_attack(1, 1), "same side refused");
     }
 

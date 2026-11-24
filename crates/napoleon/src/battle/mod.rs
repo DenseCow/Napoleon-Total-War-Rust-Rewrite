@@ -171,7 +171,7 @@ impl Plugin for BattlePlugin {
                 )
                     .chain(),
             )
-            .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave))
+            .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave, input::reset_drag))
             .add_systems(
                 Update,
                 (hud::harness, hud::keys, hud::frame, hud::selection_box, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),

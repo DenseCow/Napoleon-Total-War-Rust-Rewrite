@@ -740,9 +740,22 @@ fn order_unit(sim: &mut BattleSim, id: u32, name: &str, arg: Option<bool>) -> bo
 /// as the exe calls them (`0x005C5BB0` each frame of the drag, `0x005D7220` on release; CONFIRMED;
 /// the script lays its `box_selection` component over the corners). The corners are in the HUD's
 /// frame (the exe passes window pixels from its viewport, `0x00611A70`; ours scales them to the
-/// frame the scripts see, as every pointer position, PROVISIONAL). Called only when the box changes.
-pub fn selection_box(hud: Option<NonSendMut<BattleHud>>, drag: Res<super::input::MouseDrag>, mut shown: Local<Option<(Vec2, Vec2)>>) {
-    let Some(hud) = hud else { return };
+/// frame the scripts see, as every pointer position, PROVISIONAL). Called only when the box changes;
+/// after a script error it is logged once and not called again in this battle.
+pub fn selection_box(
+    hud: Option<NonSendMut<BattleHud>>,
+    drag: Res<super::input::MouseDrag>,
+    mut shown: Local<Option<(Vec2, Vec2)>>,
+    mut failed: Local<bool>,
+) {
+    let Some(hud) = hud else {
+        // Between battles: the next battle starts with no box shown and calls the script again.
+        (*shown, *failed) = (None, false);
+        return;
+    };
+    if *failed {
+        return;
+    }
     let corners = drag.box_corners().map(|(a, b)| (window_to_ui(a, hud.screen), window_to_ui(b, hud.screen)));
     if corners == *shown {
         return;
@@ -753,9 +766,9 @@ pub fn selection_box(hud: Option<NonSendMut<BattleHud>>, drag: Res<super::input:
         }),
         None => ui_battle::call_event(&hud.host, "HideSelectionBox"),
     };
-    // A failure is logged with the scripts' other errors (`log_errors`); the next change retries.
     if let Err(e) = result {
-        warn!("Battle HUD: selection box: {e}");
+        warn!("Battle HUD: the selection box script failed, no box is drawn in this battle: {e}");
+        *failed = true;
     }
     *shown = corners;
 }

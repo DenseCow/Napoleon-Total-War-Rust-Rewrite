@@ -7,7 +7,11 @@ use ntw_sim::battle::model::{Battle, LandUnit};
 use ntw_sim::battle::speed::BattleSpeed;
 use ntw_sim::battle::victory::{Outcome, VictoryRules};
 
-/// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
+/// A unit that can still take orders: men left, active and not gone off the field.
+pub fn on_field(u: &LandUnit) -> bool {
+    u.men > 0 && u.active && !u.left_field
+}
+
 /// How a selection change combines with the current selection ([`BattleSim::select`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectMode {
@@ -22,6 +26,7 @@ pub enum SelectMode {
     Toggle,
 }
 
+/// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
 #[derive(Resource)]
 pub struct BattleSim {
     /// The model. Only `tick_battle` advances it; `input` only sets orders.
@@ -190,8 +195,8 @@ impl BattleSim {
         self.selection.contains(&id)
     }
 
-    /// Changes the selection (the one writer). Units the player does not control are dropped;
-    /// each unit is kept once.
+    /// Changes the selection (the one writer). Units the player does not control and units no
+    /// longer on the field are dropped; each unit is kept once.
     pub fn select(&mut self, ids: &[u32], mode: SelectMode) {
         match mode {
             SelectMode::Replace => self.selection.clear(),
@@ -206,7 +211,8 @@ impl BattleSim {
             }
         }
         for &id in ids {
-            if self.info_of(id).is_some_and(|i| i.controllable) && !self.selection.contains(&id) {
+            let on_field = self.battle.unit_index(id).is_some_and(|i| on_field(&self.battle.units[i]));
+            if on_field && self.info_of(id).is_some_and(|i| i.controllable) && !self.selection.contains(&id) {
                 self.selection.push(id);
             }
         }
@@ -267,7 +273,7 @@ mod tests {
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
-    /// the enemy's units and repeats are never selected.
+    /// the enemy's units, units gone from the field and repeats are never selected.
     #[test]
     fn selection_modes() {
         let mut sim = sim();
@@ -282,5 +288,9 @@ mod tests {
         assert!(sim.is_selected(3) && !sim.is_selected(4));
         sim.select(&[], SelectMode::Replace);
         assert!(sim.selection().is_empty());
+        sim.battle.units[0].left_field = true;
+        sim.battle.units[1].men = 0;
+        sim.select(&[1, 2, 3], SelectMode::Replace);
+        assert_eq!(sim.selection(), [3], "units gone from the field are not selected");
     }
 }

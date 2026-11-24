@@ -125,6 +125,11 @@ impl MouseDrag {
     }
 }
 
+/// Leaving a battle: no press carries over into the next one.
+pub fn reset_drag(mut drag: ResMut<MouseDrag>) {
+    *drag = MouseDrag::default();
+}
+
 /// Mouse: select with the left button (click or box), order with the right button (attack, move,
 /// dragged-out line), run with a double right-click. `last` is the last right-click that gave an
 /// order, cleared by any left click.
@@ -154,7 +159,15 @@ pub fn mouse(
         Some(Vec2::new(hit.x, -hit.z))
     };
 
-    // Presses start only on the battlefield, not on the HUD.
+    // A press whose release was missed (the button let go while the battle was not updating, or
+    // outside the window) is dropped.
+    if !buttons.pressed(MouseButton::Left) && !buttons.just_released(MouseButton::Left) {
+        drag.left = None;
+    }
+    if !buttons.pressed(MouseButton::Right) && !buttons.just_released(MouseButton::Right) {
+        drag.right = None;
+    }
+    // Presses start only on the battlefield, not on the HUD; a release over the HUD cancels them.
     if let Some(c) = cursor.filter(|_| !over_hud) {
         if buttons.just_pressed(MouseButton::Left) {
             drag.left = Some(Press { start: c, ground: None, ctrl });
@@ -171,7 +184,9 @@ pub fn mouse(
         // PROVISIONAL window follows: a double click is two clicks of the same button).
         *last = None;
         let end = cursor.unwrap_or(press.start);
-        if press.start.distance(end) > DRAG_PX {
+        if over_hud {
+            // Released over the HUD: the HUD's own click, not the battlefield's.
+        } else if press.start.distance(end) > DRAG_PX {
             let ids = units_in_box(&sim, press.start, end, |p| camera.world_to_viewport(camera_transform, p).ok());
             sim.select(&ids, if press.ctrl { SelectMode::Add } else { SelectMode::Replace });
         } else if let Some(point) = ground_at(end) {
@@ -187,6 +202,7 @@ pub fn mouse(
 
     if buttons.just_released(MouseButton::Right)
         && let Some(press) = drag.right.take()
+        && !over_hud
     {
         let end = cursor.unwrap_or(press.start);
         let Some(end_ground) = ground_at(end) else { return };
@@ -207,11 +223,12 @@ pub fn mouse(
             }
             return;
         }
-        *last = Some(OrderClick { at: now, pos: end, unit: first });
         if let (true, Some(start_ground)) = (dragged, press.ground) {
+            // A drag is no first click of a double click.
             order_formation(&mut sim, &ids, start_ground, end_ground, camera_transform.forward().as_vec3());
             return;
         }
+        *last = Some(OrderClick { at: now, pos: end, unit: first });
         // A right click on an enemy: the attack order on it (`0x005DEAB0`; the scripts hear the
         // command "Attack Unit" about the target, once per order).
         let enemy = unit_near(&sim, end_ground, |s, u| s.battle.unit_index(first).is_some_and(|i| s.battle.units[i].side != u.side));
@@ -237,13 +254,13 @@ pub fn mouse(
 
 /// Deployment: a right click inside the player's deployment area puts the selection there at
 /// once, keeping each unit's place relative to the others and its facing (PROVISIONAL: the
-/// original drags out a formation; the exact placement rules are UNKNOWN). A click outside the
-/// area is refused.
+/// original drags out a formation; the exact placement rules are UNKNOWN). A unit whose place
+/// would be outside the area stays where it is.
 fn deploy(sim: &mut BattleSim, ids: &[u32], point: Vec2) {
-    if sim.deployment_area.as_ref().is_some_and(|a| !setup::area_contains(a, (point.x, point.y))) {
-        return;
-    }
     for (id, dest) in group_destinations(sim, ids, point) {
+        if sim.deployment_area.as_ref().is_some_and(|a| !setup::area_contains(a, (dest.x, dest.y))) {
+            continue;
+        }
         if let Some(i) = sim.battle.unit_index(id) {
             let u = &mut sim.battle.units[i];
             u.place_at((dest.x, dest.y), u.facing);
@@ -266,11 +283,13 @@ fn order_group_move(sim: &mut BattleSim, ids: &[u32], point: Vec2) {
 }
 
 /// Each selected unit's destination for a group move to `point`: the group's centre goes to the
-/// point and every unit keeps its offset from that centre.
+/// point and every unit keeps its offset from that centre. Units gone from the field are left out.
 fn group_destinations(sim: &BattleSim, ids: &[u32], point: Vec2) -> Vec<(u32, Vec2)> {
     let positions: Vec<(u32, Vec2)> = ids
         .iter()
-        .filter_map(|&id| sim.battle.unit_index(id).map(|i| (id, Vec2::from(sim.battle.units[i].position))))
+        .filter_map(|&id| sim.battle.unit_index(id).map(|i| (id, &sim.battle.units[i])))
+        .filter(|(_, u)| super::sim::on_field(u))
+        .map(|(id, u)| (id, Vec2::from(u.position)))
         .collect();
     if positions.is_empty() {
         return Vec::new();
@@ -284,6 +303,7 @@ fn group_destinations(sim: &BattleSim, ids: &[u32], point: Vec2) -> Vec<(u32, Ve
 fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, camera_forward: Vec3) {
     let widths: Vec<(u32, f32)> = ids
         .iter()
+        .filter(|&&id| sim.battle.unit_index(id).is_some_and(|i| super::sim::on_field(&sim.battle.units[i])))
         .filter_map(|&id| sim.info_of(id).map(|i| (id, i.size_m.x.max(1.0))))
         .collect();
     // The battlefield's y axis is the world's −z.
@@ -341,7 +361,7 @@ fn units_in_box(sim: &BattleSim, a: Vec2, b: Vec2, to_screen: impl Fn(Vec3) -> O
     sim.battle
         .units
         .iter()
-        .filter(|u| u.men > 0 && sim.info_of(u.id).is_some_and(|i| i.controllable))
+        .filter(|u| super::sim::on_field(u) && sim.info_of(u.id).is_some_and(|i| i.controllable))
         .filter(|u| {
             to_screen(super::view::world_of(Vec2::new(u.position.0, u.position.1)))
                 .is_some_and(|p| p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y)

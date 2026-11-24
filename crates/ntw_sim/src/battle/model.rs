@@ -70,7 +70,7 @@ pub enum Reinforcement {
     },
 }
 /// PLACEHOLDER: advancing units stop at this fraction of the contact range.
-const ADVANCE_STOP_FRACTION: f32 = 0.8;
+pub(super) const ADVANCE_STOP_FRACTION: f32 = 0.8;
 /// APPROXIMATION: at most this many men of a unit are engaged in one melee (its "frontage").
 pub const MELEE_FRONTAGE_MEN: u32 = 40;
 /// APPROXIMATION: each engaged soldier pair starts one exchange every this many ticks (5 s).
@@ -354,7 +354,10 @@ impl LandUnit {
         self.destination = dest;
         self.timed_move = None;
         self.inspire_order = None;
-        self.melee_target = None;
+        // A melee attack's charge goes with it (`Battle::order_attack` set it).
+        if self.melee_target.take().is_some() {
+            self.charging = false;
+        }
         self.arrival_facing = None;
     }
 

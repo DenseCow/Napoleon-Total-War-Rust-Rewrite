@@ -3002,7 +3002,8 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   the attack (up to 10 when the click's byte is set) and posts event 7 / 8 (missile) or 9 / 10 (melee) on
   battle `+0x3D8`. The `!isMeleePressed` field's reader was not followed (the per-unit byte comes from
   `+0xD98`). Ours: `Battle::order_attack` (melee chases `LandUnit::melee_target`, PROVISIONAL straight
-  path; `charging` set as the AI's attack sets it, PROVISIONAL). Before: a unit that could not fire walked
+  path that stops at the advance's PLACEHOLDER contact distance or once in melee; `charging` set as the
+  AI's attack sets it and cleared with the attack, PROVISIONAL). Before: a unit that could not fire walked
   to the clicked point instead (wrong).
 - **Melee mode (CONFIRMED structure):** unit `+0xD98`. The state-byte reset `0x005357B0` sets it to
   `!0x0053EFE0` (so cavalry and unarmed units start in melee mode); callers `0x0051B7D0` (constructor),
@@ -3013,6 +3014,9 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   refused leaving melee mode when the unit cannot fire; posts event 0x2A / 0x2B and writes `+0xD98`
   (which argument is the value: INFERRED from the decompiler). Ours: `Battle::reset_state_bytes`,
   `Battle::order_melee_mode`, the HUD's `Current_Selection_Enable_Melee`, `button_melee` shows it.
+  Open (Ghidra stopped answering before it was read): whether a unit that runs out of rounds gets melee
+  mode back. Until then a unit out of rounds and not in melee mode ignores a right click on an enemy, as
+  `0x0055FBE0` does for it; the melee button sends it in.
 - **Right click and drag on the ground (structure only):** with no unit under the cursor `0x005DEAB0`
   builds the formation from the drag (`0x005C4030`: start / end from `0x005B70E0`; with its byte argument
   set it copies the selection's stored shape, else the line along the drag, its length clamped between the
