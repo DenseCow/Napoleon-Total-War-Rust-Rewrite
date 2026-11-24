@@ -4,8 +4,6 @@
 //!   dump_stack DUMP [max]
 use std::collections::BTreeMap;
 
-const EXE: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\Napoleon.exe";
-
 fn u32_at(b: &[u8], o: usize) -> u32 {
     u32::from_le_bytes(b[o..o + 4].try_into().unwrap())
 }
@@ -80,7 +78,7 @@ fn main() {
         }
     }
     find(&d, &ranges(&d));
-    let exe = std::fs::read(EXE).unwrap();
+    let exe = std::fs::read(ntw_formats::install::install_dir().join("Napoleon.exe")).unwrap();
     // .text: VA 0x1000, raw 0x400, size 0xf05a00 (SAVE_COMPAT notes; section table checked).
     let file_of = |va: u64| -> Option<usize> {
         let rel = va.checked_sub(base)?;

@@ -15,9 +15,7 @@ use ntw_formats::esf::{EsfFile, EsfNode};
 use ntw_sim::campaign::economy;
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 #[test]
@@ -42,7 +40,7 @@ fn other_income_matches_the_startpos_records() {
         "spa_napoleon",
         "tut_napoleon",
     ] {
-        let path = dir.join(format!(r"campaigns\{campaign}\startpos.esf"));
+        let path = dir.join("campaigns").join(campaign).join("startpos.esf");
         if !path.is_file() {
             continue;
         }
@@ -98,7 +96,7 @@ fn gdp_and_growth_match_the_startpos_records() {
     let db = GameDatabase::from_install(&dir).expect("database");
     let mut checked = 0;
     for campaign in ["eur_napoleon", "mp_eur_napoleon", "egy_napoleon", "ita_napoleon", "spa_napoleon", "tut_napoleon"] {
-        let path = dir.join(format!(r"campaigns\{campaign}\startpos.esf"));
+        let path = dir.join("campaigns").join(campaign).join("startpos.esf");
         if !path.is_file() {
             continue;
         }
@@ -970,7 +968,7 @@ fn recruiting_takes_no_population_in_the_vanilla_saves() {
 #[test]
 fn faction_power_is_the_originals_at_the_coalition_start() {
     let dir = data_dir();
-    let path = dir.join(r"campaigns\mp_eur_napoleon\startpos.esf");
+    let path = dir.join("campaigns/mp_eur_napoleon/startpos.esf");
     if !path.is_file() {
         println!("SKIP: no install at {}", dir.display());
         return;

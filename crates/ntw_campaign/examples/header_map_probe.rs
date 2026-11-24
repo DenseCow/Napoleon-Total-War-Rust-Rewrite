@@ -7,7 +7,6 @@
 //! the save's faction, and prints the colour changes found.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
 use ntw_formats::pack::GameFiles;
@@ -20,9 +19,7 @@ type Stats = (usize, usize, BTreeMap<([u8; 4], [u8; 4]), usize>);
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).expect("install");
     let db = GameDatabase::from_install(&dir).expect("db");
     let files = GameFiles { vfs: &vfs };

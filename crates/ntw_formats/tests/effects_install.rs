@@ -4,17 +4,15 @@
 //! cargo test -p ntw_formats --test effects_install -- --ignored --nocapture
 //! ```
 //! See `analysis/graphics/BATTLE_EFFECTS.md`.
-use std::path::PathBuf;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use ntw_formats::effects::{CAMPAIGN_MAP_EFFECTS, EffectLibrary, LAND_BATTLE_EFFECTS, ModifierType, NAVAL_BATTLE_EFFECTS};
 use ntw_formats::pack::Vfs;
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 

@@ -1,7 +1,6 @@
 //! Battle AI on the real install's units (read-only). Skips (passes) without an install.
 //! Override the location with `NTW_DATA_DIR`.
 
-use std::path::PathBuf;
 
 use ntw_ai::battle::{BattleAi, run_headless};
 use ntw_data::GameDatabase;
@@ -9,9 +8,7 @@ use ntw_sim::battle::model::{Battle, BattleResult, LandUnit};
 use ntw_sim::battle::shooting::MissileWeapon;
 
 fn db() -> Option<GameDatabase> {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-    });
+    let dir = ntw_formats::install::data_dir();
     if !dir.is_dir() {
         eprintln!("skipped: no install at {}", dir.display());
         return None;

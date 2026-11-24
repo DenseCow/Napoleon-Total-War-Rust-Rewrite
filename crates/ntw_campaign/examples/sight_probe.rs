@@ -2,7 +2,6 @@
 //! each character's `LINE_OF_SIGHT` against the disc of his position and radius (#17), #17 against
 //! his type's radius, #22 (hidden), the `EXPOSED_CHARACTERS` layout, and each shroud's trees against
 //! our encoder. Read-only.
-use std::path::PathBuf;
 
 use ntw_campaign::shroud;
 use ntw_data::GameDatabase;
@@ -10,9 +9,7 @@ use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_sim::campaign::CharacterId;
 
 fn main() {
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     for path in std::env::args().skip(1) {
         let esf = EsfFile::from_bytes(&std::fs::read(&path).expect("read")).expect("esf");

@@ -2,10 +2,9 @@
 //! bytes left after the skeleton and which key sizes divide them.
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     for p in vfs.list("testdata/animations") {
         let b = vfs.read(p).unwrap();
         let rd = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());

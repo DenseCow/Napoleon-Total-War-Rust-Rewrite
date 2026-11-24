@@ -4,14 +4,13 @@
 use ntw_formats::pack::Vfs;
 use std::collections::BTreeMap;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn u16_at(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
 fn u32_at(b: &[u8], o: usize) -> u32 { u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let paths: Vec<String> = vfs.list("battleterrain").into_iter().filter(|p| p.ends_with(".markers")).map(str::to_owned).collect();
     let mut stats: BTreeMap<u32, Vec<(usize, usize)>> = BTreeMap::new();
     for p in &paths {

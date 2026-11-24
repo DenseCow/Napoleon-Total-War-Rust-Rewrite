@@ -5,17 +5,15 @@
 //! The install path can be overridden with `NTW_DATA_DIR`.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use ntw_formats::battle_terrain::{self, BattleMap, HeightfieldSettings};
 use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 use ntw_formats::tga::Tga;
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 

@@ -15,10 +15,9 @@ use ntw_formats::loc::{LocFile, Localisation};
 use ntw_formats::pack::{PackFile, PackType, Vfs};
 use ntw_formats::unit_variant::{UnitVariant, VariantPartMesh, VariantPartMeshBody, VariantVertexFormat};
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    ntw_formats::install::data_dir()
 }
 
 /// Recursively collects files with the given extension.
@@ -66,7 +65,7 @@ fn every_loose_esf_parses_and_round_trips() {
 #[test]
 #[ignore]
 fn eur_startpos_structure_and_round_trip() {
-    let path = data_dir().join(r"campaigns\eur_napoleon\startpos.esf");
+    let path = data_dir().join("campaigns/eur_napoleon/startpos.esf");
     let bytes = std::fs::read(path).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     assert_eq!((esf.root.name.as_str(), esf.root.version), ("CAMPAIGN_STARTPOS", 5));
@@ -80,7 +79,7 @@ fn eur_startpos_structure_and_round_trip() {
 
     // The u32 after CAMPAIGN_MAP_DATA is the regions.esf timestamp (W3 §3).
     assert!(matches!(model.get(1), Some(EsfNode::U32(1_260_299_822))));
-    let regions = EsfFile::open(data_dir().join(r"campaign_maps\nap_europe\regions.esf")).unwrap();
+    let regions = EsfFile::open(data_dir().join("campaign_maps/nap_europe/regions.esf")).unwrap();
     assert_eq!(regions.header.timestamp, 1_260_299_822);
 
     // Count characters and regions anywhere in the tree.
@@ -689,7 +688,7 @@ fn all_286_weighted_meshes_parse() {
 #[ignore]
 fn uied_templates_read_completely() {
     use ntw_formats::ui_templates::UiTemplateLibrary;
-    let b = std::fs::read(data_dir().join(r"UI\Templates\uied.templates")).unwrap();
+    let b = std::fs::read(data_dir().join("UI/Templates/uied.templates")).unwrap();
     let lib = UiTemplateLibrary::read(&b).unwrap();
     assert_eq!(lib.templates.len(), 126);
     assert!(lib.unreadable.is_empty(), "{:?}", lib.unreadable);

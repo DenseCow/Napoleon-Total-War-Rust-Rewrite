@@ -12,7 +12,6 @@
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn short(n: &EsfNode) -> String {
     match n {
@@ -27,7 +26,7 @@ fn short(n: &EsfNode) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let files: Vec<String> = vfs
         .list("battleterrain")
         .into_iter()

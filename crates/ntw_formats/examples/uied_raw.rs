@@ -1,6 +1,6 @@
 //! Research probe: the raw framing of `uied.templates` entries (read-only).
 fn main() {
-    let path = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data\UI\Templates\uied.templates";
+    let path = ntw_formats::install::data_dir().join("UI").join("Templates").join("uied.templates");
     let b = std::fs::read(path).unwrap();
     let u32_at = |p: usize| u32::from_le_bytes(b[p..p + 4].try_into().unwrap());
     let n = u32_at(0) as usize;

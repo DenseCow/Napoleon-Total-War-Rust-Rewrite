@@ -15,9 +15,7 @@ use ntw_formats::esf::EsfFile;
 use ntw_sim::campaign::{CampaignModel, FactionId, Stance, World};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 /// Every faction with a manager (all but the rebels) holds the constructors' values: treaty breaks
@@ -71,7 +69,7 @@ fn counters_round_trip_through_a_save() {
         return;
     }
     let db = GameDatabase::from_install(&dir).expect("database");
-    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     assert_vanilla_counters(&l.model, "eur_napoleon startpos", 0);
@@ -184,7 +182,7 @@ fn war_started_and_record_order_load_and_round_trip() {
         return;
     }
     let db = GameDatabase::from_install(&dir).expect("database");
-    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let w = &l.model.world;

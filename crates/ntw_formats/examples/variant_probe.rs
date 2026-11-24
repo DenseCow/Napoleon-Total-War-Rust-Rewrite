@@ -6,7 +6,6 @@
 use ntw_formats::pack::Vfs;
 use ntw_formats::unit_variant::{UnitVariant, VariantPartMesh, VariantPartMeshBody, VariantVertexFormat};
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn half(b: &[u8]) -> f32 {
     ntw_formats::unit_variant::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
@@ -14,7 +13,7 @@ fn half(b: &[u8]) -> f32 {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     match args[0].as_str() {
         "vtx" => {

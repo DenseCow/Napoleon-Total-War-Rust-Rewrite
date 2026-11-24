@@ -7,7 +7,6 @@ use ntw_formats::pack::Vfs;
 use std::collections::BTreeMap;
 use std::env;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
@@ -15,7 +14,7 @@ fn main() {
         "settings" => {
             // index, packed value, and the sound_settings.xml element (with the comment above it)
             use ntw_formats::sound::{library::SETTINGS_XML, SoundBankDatabase};
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let db = SoundBankDatabase::read(&vfs.read(SoundBankDatabase::PATH).unwrap()).unwrap();
             let xml = ntw_formats::xml::decode_text(&vfs.read(SETTINGS_XML).unwrap());
             let mut i = 0;
@@ -53,7 +52,7 @@ fn main() {
             }
         }
         "formats" => {
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let mut m: BTreeMap<String, (usize, String)> = BTreeMap::new();
             for p in vfs.packs() {
                 let pn = p.path().file_name().unwrap().to_string_lossy().into_owned();
@@ -84,7 +83,7 @@ fn main() {
         "events" => {
             // events [filter]: parse sounds_packed\sound_events and print a summary + matching events
             use ntw_formats::sound::{slots::SLOT_NAMES, SoundEvents};
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let se = SoundEvents::read(&vfs.read(SoundEvents::PATH).unwrap()).unwrap();
             println!("header {:#x} categories {} params {} events {} keyed {} movies {}", se.header, se.categories.len(), se.params.len(), se.events.len(), se.emitters.len(), se.movies.len());
             println!("special {:?}", se.special_categories.iter().map(|&i| se.categories[i as usize].name.as_str()).collect::<Vec<_>>());
@@ -120,7 +119,7 @@ fn main() {
         "banks" => {
             // banks [type]: parse sounds_packed\sound_bank_database; print settings and bank sizes, or one bank's entries
             use ntw_formats::sound::{SoundBankDatabase, SoundEvents, slots::SLOT_NAMES};
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let se = SoundEvents::read(&vfs.read(SoundEvents::PATH).unwrap()).unwrap();
             let db = SoundBankDatabase::read(&vfs.read(SoundBankDatabase::PATH).unwrap()).unwrap();
             let slot_of = |e: u32| se.slots.iter().position(|&s| s == e).map(|s| SLOT_NAMES[s]).unwrap_or("");
@@ -143,7 +142,7 @@ fn main() {
         "names" => {
             // names [filter]: event names from the CSV sources, checked against the packed events
             use ntw_formats::sound::{SoundEvents, names::{EventNames, CSV_DIR}};
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let se = SoundEvents::read(&vfs.read(SoundEvents::PATH).unwrap()).unwrap();
             let mut csvs = Vec::new();
             for p in vfs.list(CSV_DIR) {
@@ -186,7 +185,7 @@ fn main() {
         "vocab" => {
             // vocab: which XML source each bank type was built from, and its condition names
             use ntw_formats::sound::SoundLibrary;
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let lib = SoundLibrary::load(&vfs).unwrap();
             println!("named settings {}/154, named events {}/{}", lib.settings.len(), lib.names.named_count(), lib.events.events.len());
             for b in &lib.banks.banks {
@@ -224,7 +223,7 @@ fn main() {
         "params" => {
             // params: compare the 35 packed parameter values with the CSV columns of every named event
             use ntw_formats::sound::{SoundLibrary, names::{split_csv_line, CSV_DIR}};
-            let vfs = Vfs::open_install(DATA).unwrap();
+            let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
             let lib = SoundLibrary::load(&vfs).unwrap();
             let mut header: Vec<String> = Vec::new();
             let mut numeric_bad = vec![0usize; 35];

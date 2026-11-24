@@ -19,10 +19,9 @@ const PROJECTILES_EXPLOSIONS: &str = "db/projectiles_explosions_tables/projectil
 const PROJECTILE_IMPACTS: &str = "db/projectile_impacts_tables/projectile_impacts";
 const PROJECTILE_TRAILS: &str = "db/projectile_trails_tables/projectile_trails";
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR))
+    ntw_formats::install::data_dir()
 }
 
 fn vfs() -> Vfs {

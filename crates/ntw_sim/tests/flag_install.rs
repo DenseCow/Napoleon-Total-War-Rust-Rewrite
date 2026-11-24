@@ -9,7 +9,6 @@
 //! `ntw_formats` as a dev-dependency, so the model crate itself still builds std only.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use ntw_formats::cloth;
 use ntw_formats::pack::Vfs;
@@ -18,14 +17,13 @@ use ntw_formats::verlet::{VerletLogic, bounds};
 use ntw_formats::weighted_mesh::WeightedMesh;
 use ntw_sim::battle::cloth::{ClothMesh, FlagCloth};
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 const FLAG_LOGIC: &str = r"rigidmodels\verletitems\standard_bearer_flag.logic";
 const EQUIPMENT_MESH: &str = r"unitmodels\euro_equipment.variant_weighted_mesh";
 const POLE: &str = "rigid_equip_euro_flagpole01";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 

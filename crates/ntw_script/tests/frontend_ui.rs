@@ -10,9 +10,7 @@ use ntw_script::ui::{FrontEndFacts, PointerEvent, UiScriptHost};
 use ntw_script::ui::test_support::no_errors;
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data")
-    })
+    ntw_formats::install::data_dir()
 }
 
 #[test]
@@ -293,7 +291,7 @@ fn options_pages_read_a_file_in_the_originals_format() {
 #[test]
 fn load_game_page_lists_both_folders_and_loads_by_name() {
     let dir = data_dir();
-    let startpos = dir.join(r"campaigns\eur_napoleon\startpos.esf");
+    let startpos = dir.join("campaigns/eur_napoleon/startpos.esf");
     if !startpos.is_file() {
         eprintln!("skipped: no install");
         return;

@@ -10,8 +10,7 @@
 //!
 //! Read-only against the install. Prints one block; nothing is written.
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR")
-        .unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
     let rows: Vec<&ntw_data::UnitRecord> = db.units.rows().iter().collect();
 

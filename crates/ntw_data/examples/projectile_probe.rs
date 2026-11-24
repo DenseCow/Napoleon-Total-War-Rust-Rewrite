@@ -4,11 +4,10 @@
 //!   cargo run -p ntw_data --example projectile_probe -- [filter]
 use ntw_data::GameDatabase;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).unwrap();
     for p in db.projectiles.iter().filter(|p| p.key.contains(&filter)) {
         println!(

@@ -6,15 +6,12 @@
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use ntw_data::GameDatabase;
 use ntw_formats::esf::EsfFile;
 
 fn main() {
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     for p in std::env::args().skip(1) {
         let bytes = std::fs::read(&p).expect("read");

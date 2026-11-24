@@ -340,7 +340,7 @@ mod tests {
         g.teams[0].armies.push(ArmySetupFile { era: 2, army_size: 5000, faction: "france".into(), cards: vec![Card { key: "Gen_Generals_Staff".into(), ..Default::default() }], ..Default::default() });
         assert_eq!(BattlePrefsFile::read(&g.to_bytes()).unwrap(), g);
         // An original file read from the user's folder, if there is one (read only).
-        let p = std::env::var_os("APPDATA").map(|a| std::path::PathBuf::from(a).join(r"The Creative Assembly\Napoleon\battle_preferences\.mp_default.battle_preferences"));
+        let p = ntw_formats::install::original_user_dir().map(|d| d.join("battle_preferences").join(".mp_default.battle_preferences"));
         if let Some(orig) = p.as_ref().and_then(|p| std::fs::read(p).ok()) {
             let o = BattlePrefsFile::read(&orig).unwrap();
             assert_eq!(o.to_bytes(), orig, "byte-exact round trip of the original's file");

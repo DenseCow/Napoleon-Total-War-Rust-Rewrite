@@ -2,7 +2,6 @@
 //! owners (`ntw_campaign::header_map`) and compares them with the stored ones (SAVE_COMPAT.md §25).
 //! Read-only.
 use std::collections::HashSet;
-use std::path::PathBuf;
 
 use ntw_campaign::header_map::TheatrePictures;
 use ntw_data::GameDatabase;
@@ -11,9 +10,7 @@ use ntw_formats::esf::EsfFile;
 use ntw_formats::pack::Vfs;
 
 fn main() {
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).expect("install");
     let db = GameDatabase::from_install(&dir).expect("db");
     let files = GameFiles { vfs: &vfs };

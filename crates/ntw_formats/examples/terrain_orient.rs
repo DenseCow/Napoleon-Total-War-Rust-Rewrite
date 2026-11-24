@@ -13,7 +13,6 @@
 use ntw_formats::battle_terrain::{BattleMap, Heightfield};
 use ntw_formats::pack::Vfs;
 
-const DEFAULT_DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 /// Maps normalized (u, v) in 0..1 (u grows with x, v with y) to a grid cell under orientation `o`.
 fn cell(u: f32, v: f32, w: u32, h: u32, o: u8) -> (u32, u32) {
@@ -38,7 +37,7 @@ fn slope(hf: &Heightfield, c: u32, r: u32) -> f32 {
 }
 
 fn main() {
-    let vfs = Vfs::open_install(DEFAULT_DATA).expect("install");
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).expect("install");
     for name in std::env::args().skip(1) {
         let map = BattleMap::load(&vfs, &name).expect("map");
         let hf = map.ground().expect("heightfield");

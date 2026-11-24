@@ -3,11 +3,10 @@
 use ntw_formats::group_formation::{self, ElementBody};
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default().to_ascii_lowercase();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let t = group_formation::read(&vfs.read("groupformations.bin").unwrap()).unwrap();
     for g in t.iter().filter(|g| g.name.to_ascii_lowercase().contains(&filter)) {

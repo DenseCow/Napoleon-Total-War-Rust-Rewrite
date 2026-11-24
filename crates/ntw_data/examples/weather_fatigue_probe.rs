@@ -4,10 +4,9 @@
 use ntw_data::GameDatabase;
 use std::collections::BTreeMap;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).unwrap();
     for w in db.battle_weather_types.iter() {
         println!("weather {:16} intensity {} kind {}", w.key, w.intensity, w.kind);

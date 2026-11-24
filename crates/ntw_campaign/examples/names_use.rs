@@ -1,7 +1,6 @@
 //! Research helper: which allocator pool each new character's forename and surname comes from,
 //! by character type, between two saves of one game (characters new in NEW).
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 use ntw_campaign::names;
 use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
@@ -18,7 +17,7 @@ fn chars(esf: &EsfFile) -> Vec<(String, EsfRecord)> {
     out
 }
 fn main() {
-    let dir = PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data");
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let vfs = Vfs::open_install(&dir).expect("vfs");
     let rows = names::read_names(&vfs).expect("names");

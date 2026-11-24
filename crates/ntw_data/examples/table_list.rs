@@ -12,8 +12,7 @@ use ntw_formats::db::DbHeader;
 
 fn main() {
     let filter = std::env::args().nth(1).unwrap_or_default();
-    let dir = std::env::var("NTW_DATA_DIR")
-        .unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).expect("vfs");
     if filter == "--paths" {
         for p in vfs.list("db") {

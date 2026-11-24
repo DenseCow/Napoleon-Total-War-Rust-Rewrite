@@ -15,7 +15,6 @@ use ntw_script::ui::{CampaignLink, CampaignRequest, CampaignSelection, FrontEndF
 use ntw_script::{ScriptHost, ScriptSource};
 use ntw_sim::campaign::CharacterKind;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn print_tree(w: &UiWorld, id: NodeId, depth: usize, all: bool) {
     let Some(n) = w.get(id) else { return };
@@ -89,7 +88,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let opt = |name: &str| args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned();
     let campaign = opt("--campaign").unwrap_or_else(|| "eur_napoleon".into());
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let db = ntw_data::GameDatabase::from_vfs(&vfs).unwrap();
     if let Some(sub) = opt("--variants") {

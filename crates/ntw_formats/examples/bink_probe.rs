@@ -4,7 +4,6 @@
 use ntw_formats::bink::{split_packet, AudioDecoder, BinkHeader, VideoDecoder};
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn header(vfs: &Vfs, path: &str) -> BinkHeader {
     let fixed = vfs.read_range(path, 0, BinkHeader::FIXED_LEN).unwrap();
@@ -14,7 +13,7 @@ fn header(vfs: &Vfs, path: &str) -> BinkHeader {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let vfs = Vfs::open_install(&dir).unwrap();
     let movies: Vec<String> = vfs.list("movies\\").into_iter().filter(|p| p.ends_with(".bik")).map(String::from).collect();
     match args.first().map(String::as_str) {

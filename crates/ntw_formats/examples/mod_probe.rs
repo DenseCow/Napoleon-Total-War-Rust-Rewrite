@@ -6,7 +6,6 @@ use ntw_formats::pack::{PackFile, Vfs, normalize_path};
 use std::collections::BTreeMap;
 use std::path::Path;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
     for e in std::fs::read_dir(dir).unwrap().flatten() {
@@ -21,7 +20,7 @@ fn walk(dir: &Path, base: &Path, out: &mut Vec<String>) {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     match args.first().map(String::as_str).unwrap_or("packs") {
         "packs" => {
             for e in std::fs::read_dir(&dir).unwrap().flatten() {

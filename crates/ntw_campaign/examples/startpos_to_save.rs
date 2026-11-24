@@ -4,7 +4,7 @@
 use ntw_formats::esf::EsfFile;
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
-    let dir = std::path::PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data");
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
     let esf = EsfFile::open(&a[0]).unwrap();
     let mut l = ntw_campaign::read_esf(&esf, &db).unwrap();

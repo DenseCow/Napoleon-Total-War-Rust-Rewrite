@@ -19,10 +19,9 @@
 //! Everything it prints comes from the install's own bytes; it writes nothing.
 use ntw_formats::pack::Vfs;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 
@@ -137,7 +136,7 @@ fn rows(vfs: &Vfs, path: &str) {
 /// Every `gun_type_to_projectiles` row: the gun type, the projectile, and the `muzzle_flash`
 /// column, so its shape can be seen next to the two it joins to.
 fn guns() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("database");
     println!("{} gun_type_to_projectiles rows", db.gun_type_to_projectiles.len());
     for g in db.gun_type_to_projectiles.iter() {
@@ -253,7 +252,7 @@ fn main() {
 /// it resolves to. Right: the `projectile_trails` table's own five rows with their ten floats, and
 /// what the seven trail projectiles have in their decoded columns to correlate those floats against.
 fn trails(vfs: &Vfs) {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("database");
     let land = ntw_formats::effects::EffectLibrary::from_vfs_path(
         vfs,
@@ -795,7 +794,7 @@ fn facing(vfs: &Vfs) {
 /// Every `projectiles` row's tail columns, decoded with the shipped schema: the columns after
 /// `calibre` are the ones the effects notes are about.
 fn projectiles(filter: &str) {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("database");
     println!("{} projectiles", db.projectiles.len());
     for p in db.projectiles.iter().filter(|p| filter.is_empty() || p.key.contains(filter)) {

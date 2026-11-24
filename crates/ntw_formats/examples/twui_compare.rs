@@ -4,7 +4,6 @@
 use ntw_formats::pack::Vfs;
 use ntw_formats::ui_layout::{UiComponent, UiLayout};
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn walk(c: &UiComponent, ids: &[&str], path: &str) {
     if ids.contains(&c.id.as_str()) {
@@ -19,7 +18,7 @@ fn walk(c: &UiComponent, ids: &[&str], path: &str) {
 }
 
 fn main() {
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let ids = ["killed_dy", "deployed_dy", "lost_dy", "experience_old", "arrow", "post_battle_entry"];
     let mut h = std::collections::BTreeMap::new();
     for p in vfs.list("ui") {

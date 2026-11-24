@@ -4,7 +4,7 @@
 //! agent-record units, so the promotion-cost column can be recognised from the shipped data.
 //! Prints every row's numbers (the table is ~700 rows).
 fn main() {
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data".into());
+    let dir = ntw_formats::install::data_dir();
     let db = ntw_data::GameDatabase::from_install(&dir).expect("db");
     println!("{:52} {:<22} {:>6} {:>6} {:>5} {:>6} {:>5} {:>6} {:>5}", "key", "category", "cost", "second", "turns", "u3c", "upk", "u44", "u84");
     let mut naval = 0;

@@ -20,11 +20,9 @@
 //! `BITRK = 1 << 8`. `ISK(x) = x & 256`. `RKB/RKC`: if the operand has BITRK it is
 //! `K[Bx & !BITRK]`, otherwise a register.
 
-use std::path::PathBuf;
 
 use ntw_formats::pack::Vfs;
 
-const DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -32,7 +30,7 @@ fn main() {
         eprintln!("usage: luac_dump <pack-relative path to .luac> [--all|--proto <pc>|--line <n>] [--grep <text>]");
         return;
     }
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(DATA_DIR))).expect("open install");
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).expect("open install");
     let bytes = vfs.read(&args[0]).unwrap_or_else(|e| panic!("read {}: {e}", args[0]));
 
     if let Some(at) = args.iter().position(|a| a == "--at").map(|i| args[i + 1].parse::<usize>().expect("offset")) {

@@ -6,7 +6,6 @@
 //! cargo run -p ntw_ai --example ai_turns_save -- <turns> <out.save>
 //! ```
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use ntw_ai::campaign::CampaignAiData;
@@ -24,12 +23,10 @@ fn main() {
         eprintln!("usage: ai_turns_save <turns> <out.save>");
         std::process::exit(2);
     };
-    let dir = std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"));
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).expect("db");
     let data = Arc::new(CampaignAiData::from_install(&dir, &db).expect("AI tables"));
-    let startpos = EsfFile::open(dir.join(r"campaigns\eur_napoleon\startpos.esf")).expect("startpos");
+    let startpos = EsfFile::open(dir.join("campaigns/eur_napoleon/startpos.esf")).expect("startpos");
     let mut loaded = ntw_campaign::read_esf(&startpos, &db).expect("load");
     loaded.set_human("france");
     let vfs = Vfs::open_install(&dir).expect("packs");

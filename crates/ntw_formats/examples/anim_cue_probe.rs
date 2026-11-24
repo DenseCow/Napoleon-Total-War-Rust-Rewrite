@@ -6,11 +6,10 @@ use std::collections::BTreeMap;
 use ntw_formats::pack::Vfs;
 use ntw_formats::sound::anim_events::AnimSoundEvents;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let per: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(4);
-    let vfs = Vfs::open_install(std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into())).unwrap();
+    let vfs = Vfs::open_install(ntw_formats::install::data_dir()).unwrap();
     let mut cues: BTreeMap<u32, (usize, f32, f32, Vec<String>)> = BTreeMap::new();
     for p in vfs.list("animations").into_iter().filter(|p| p.ends_with(".anim_sound_event")) {
         let Some(a) = vfs.read(p).ok().and_then(|b| AnimSoundEvents::read(&b)) else { continue };

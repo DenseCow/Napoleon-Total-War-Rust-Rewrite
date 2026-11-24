@@ -13,9 +13,7 @@ use ntw_data::GameDatabase;
 use ntw_formats::esf::{EsfFile, EsfNode, EsfRecord};
 
 fn data_dir() -> PathBuf {
-    std::env::var_os("NTW_DATA_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data"))
+    ntw_formats::install::data_dir()
 }
 
 /// A start position written as a save reloads to the same model, for all 8 campaigns, and
@@ -69,7 +67,7 @@ fn taxes_stances_and_script_values_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
@@ -104,7 +102,7 @@ fn diplomacy_permissions_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
@@ -154,7 +152,7 @@ fn removed_characters_leave_no_references() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let mut pool = None;
     esf.root.walk(&mut |r| {
         if pool.is_none() && r.name == "GENERAL_RECRUITMENT" {
@@ -183,7 +181,7 @@ fn region_economy_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     let ids: Vec<_> = m.world.regions.keys().copied().take(3).collect();
@@ -232,7 +230,7 @@ fn region_population_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     // `government_types` #3, the rank `0x008A94D0` compares (3, 2, 1, 0 in the shipped table).
     let ranks = &l.model.rules.government_ranks;
@@ -292,7 +290,7 @@ fn trade_accumulation_and_bankruptcy_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     // Each route keeps its own value (+0x3C): set the last route of three pairs, so a pair's other
@@ -322,7 +320,7 @@ fn embarked_armies_are_linked() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     let france = m.faction_by_key("france").unwrap().id;
@@ -374,7 +372,7 @@ fn victory_conditions_and_captured_regions_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let option = ntw_campaign::victory::options(&esf.root, "france").unwrap().remove(0);
     assert_eq!(ntw_campaign::victory::kind(&option), (1, 5));
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
@@ -453,7 +451,7 @@ fn removed_obstacles_leave_a_valid_grid() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     // Three field armies go (commander and force); one more field army moves a little.
@@ -499,7 +497,7 @@ fn commodity_market_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let tm = |e: &EsfFile| e.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/CAMPAIGN_TRADE_MANAGER").unwrap().clone();
     let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
@@ -554,7 +552,7 @@ fn new_units_get_regiment_names() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     let france = m.faction_by_key("france").unwrap().id;
@@ -617,7 +615,7 @@ fn new_characters_and_officers_get_names() {
     let db = GameDatabase::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let nd = NameData::load(&vfs, &db).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     // The shipping path: the model names what it creates (`names::attach`, as `source::open`).
@@ -703,7 +701,7 @@ fn character_changes_and_deaths_are_written() {
     let db = GameDatabase::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let nd = ntw_campaign::names::NameData::load(&vfs, &db).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     ntw_campaign::names::attach_data(&mut m, &nd);
@@ -806,7 +804,7 @@ fn an_existing_character_takes_over_a_dead_commanders_force() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let mut m = l.model.clone();
     // A land force with a second character riding on one of its units: make that character the
@@ -873,7 +871,7 @@ fn technology_research_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let techs = |e: &EsfFile| -> Vec<EsfRecord> {
         let mut v = Vec::new();
@@ -927,7 +925,7 @@ fn header_territory_map_follows_the_owners() {
     let db = GameDatabase::from_install(&dir).unwrap();
     let vfs = ntw_formats::pack::Vfs::open_install(&dir).unwrap();
     let files = ntw_formats::pack::GameFiles { vfs: &vfs };
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let pics: Vec<TheatrePictures> = l.info.header.maps.iter().filter_map(|m| TheatrePictures::load(&files, &db, &l.info.map_key, &m.theatre)).collect();
     assert_eq!(pics.len(), 1);
@@ -980,7 +978,7 @@ fn governorship_tax_levels_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let taxes = |e: &EsfFile| {
         let mut v = Vec::new();
@@ -1017,7 +1015,7 @@ fn duel_counters_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let counters = |e: &EsfFile| {
         let mut v = Vec::new();
@@ -1054,7 +1052,7 @@ fn siege_counters_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let counters = |e: &EsfFile| {
         let mut v = Vec::new();
@@ -1092,7 +1090,7 @@ fn sight_state_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     let same = save::write_save(&esf, &l.model, "france", 1, None).unwrap();
     let world = |e: &EsfFile| e.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD").unwrap().clone();
@@ -1138,7 +1136,7 @@ fn the_header_season_is_the_callers_string() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let bytes = std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap();
+    let bytes = std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap();
     let esf = EsfFile::from_bytes(&bytes).unwrap();
     let mut l = ntw_campaign::read_esf(&esf, &db).unwrap();
     assert_eq!(l.info.header.season_name, "Winter");
@@ -1195,7 +1193,7 @@ fn the_header_reads_from_a_file_without_its_body() {
         println!("SKIPPED (the start position part): no install");
         return;
     }
-    let startpos = data.join(r"campaigns\eur_napoleon\startpos.esf");
+    let startpos = data.join("campaigns/eur_napoleon/startpos.esf");
     let whole = ntw_campaign::read_info(&std::fs::read(&startpos).unwrap()).unwrap();
     assert_eq!(ntw_campaign::read_header_file(&startpos).unwrap(), whole.header);
 }
@@ -1212,7 +1210,7 @@ fn triggered_historical_events_are_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let mut m = ntw_campaign::read_esf(&esf, &db).unwrap().model;
     let block = |f: &EsfFile| -> (Vec<String>, EsfRecord) {
         let model = f.root.find_path("CAMPAIGN_ENV/CAMPAIGN_MODEL").unwrap();
@@ -1249,7 +1247,7 @@ fn siege_state_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\eur_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/eur_napoleon/startpos.esf")).unwrap()).unwrap();
     let l = ntw_campaign::read_esf(&esf, &db).unwrap();
     assert!(l.model.world.regions.values().all(|r| !r.siege.under_siege()), "nothing is besieged at the start");
     let mut m = l.model.clone();
@@ -1278,7 +1276,7 @@ fn fortification_damage_is_written() {
         return;
     }
     let db = GameDatabase::from_install(&dir).unwrap();
-    let esf = EsfFile::from_bytes(&std::fs::read(dir.join(r"campaigns\egy_napoleon\startpos.esf")).unwrap()).unwrap();
+    let esf = EsfFile::from_bytes(&std::fs::read(dir.join("campaigns/egy_napoleon/startpos.esf")).unwrap()).unwrap();
     let blocks = |f: &EsfFile| -> std::collections::BTreeMap<i32, ntw_formats::esf::EsfRecordArray> {
         let regions = f.root.find_record_array("CAMPAIGN_ENV/CAMPAIGN_MODEL/WORLD/REGION_MANAGER/REGIONS_ARRAY").unwrap();
         regions

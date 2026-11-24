@@ -2,7 +2,6 @@
 //! ```text
 //! cargo test -p ntw_sim --test group_formation_install -- --ignored --nocapture
 //! ```
-use std::path::PathBuf;
 
 use ntw_formats::group_formation::{self, GroupUnit, PURPOSE_DEPLOYMENT, Placement, Role};
 use ntw_formats::pack::Vfs;
@@ -12,10 +11,9 @@ fn class_id(key: &str) -> u32 {
     u32::from(ntw_sim::unit_kind::class_code(key))
 }
 
-const DEFAULT_DATA_DIR: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn vfs() -> Vfs {
-    let dir = std::env::var_os("NTW_DATA_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(DEFAULT_DATA_DIR));
+    let dir = ntw_formats::install::data_dir();
     Vfs::open_install(dir).expect("open install")
 }
 

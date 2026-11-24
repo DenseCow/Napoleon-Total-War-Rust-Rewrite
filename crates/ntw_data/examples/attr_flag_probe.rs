@@ -4,11 +4,10 @@
 //!   cargo run -p ntw_data --example attr_flag_probe -- [max_keys]
 use ntw_data::GameDatabase;
 
-const DATA: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Napoleon Total War\data";
 
 fn main() {
     let max_keys: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(12);
-    let dir = std::env::var("NTW_DATA_DIR").unwrap_or_else(|_| DATA.into());
+    let dir = ntw_formats::install::data_dir();
     let db = GameDatabase::from_install(&dir).unwrap();
     type Get = fn(&ntw_data::UnitStatsLand) -> bool;
     let cols: [(u32, &str, Get); 31] = [
