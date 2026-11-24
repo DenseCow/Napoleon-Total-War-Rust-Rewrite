@@ -163,6 +163,29 @@ pub enum BattleUiRequest {
     /// target set (`on`) or let go, `SetTrackTarget` `0x005F9B70`; the rest of what it does is in
     /// `napoleon::battle::camera::BattleCamera::set_track_target` (BATTLE_FIDELITY.md §59.5).
     SelectionProxy { id: u32, on: bool },
+    /// `BattleUI.DismissCurrentAdvice()` (`0x007910B0`): the advice window's close button.
+    DismissAdvice,
+    /// `BattleUI.RepeatAdvice()` (`0x007911A0`): play the current advice again.
+    RepeatAdvice,
+    /// `BattleUI.ChangeAdviceAudioMode(on)` (`0x0075C370`): the advisor speaks (`on`) or not.
+    AdviceAudioMode(bool),
+    /// `BattleUI.ChangeAdviceTextMode(on)` (`0x0075C380`): the advice window shows its text or not.
+    AdviceTextMode(bool),
+}
+
+/// One advice as the advice window's `UpdateWithNewAdvice` reads it (the table `0x005AB820`
+/// builds; CONFIRMED field names and which are left out).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AdviceView {
+    pub title: String,
+    /// Set only when not empty.
+    pub subtitle: String,
+    pub text: String,
+    pub locatable: bool,
+    /// The advice names a speech file (whether or not it plays).
+    pub has_audio: bool,
+    /// The speaker's portrait, when it has one.
+    pub icon_path: Option<String>,
 }
 
 /// Installs the battle UI's engine side into a UI host. Call before loading
@@ -432,11 +455,57 @@ pub fn take_requests(host: &UiScriptHost) -> mlua::Result<Vec<BattleUiRequest>> 
             "summary_dismissed" => BattleUiRequest::SummaryDismissed,
             "zoom" => BattleUiRequest::ZoomTo(r.get("id")?),
             "selection_proxy" => BattleUiRequest::SelectionProxy { id: r.get("id")?, on: r.get("on")? },
+            "dismiss_advice" => BattleUiRequest::DismissAdvice,
+            "repeat_advice" => BattleUiRequest::RepeatAdvice,
+            "advice_audio_mode" => BattleUiRequest::AdviceAudioMode(r.get("on")?),
+            "advice_text_mode" => BattleUiRequest::AdviceTextMode(r.get("on")?),
             _ => continue,
         });
     }
     lua.globals().set("__battle_requests", lua.create_table()?)?;
     Ok(out)
+}
+
+/// The engine's `ShowPersistentPanels(false)` at the HUD's start (`0x005F2660`): the menu bar and
+/// its advice window. True when the window gave its text panel, which the advice calls below go to.
+pub fn show_persistent_panels(host: &UiScriptHost) -> mlua::Result<bool> {
+    let f: Function = host.lua().globals().get("__ntw_battle_show_persistent_panels")?;
+    f.call::<bool>(())
+}
+
+/// Shows `advice` in the advice window (`UpdateWithNewAdvice(advice, show_text)`, `0x0075C260`).
+pub fn show_advice(host: &UiScriptHost, advice: &AdviceView, show_text: bool) -> mlua::Result<()> {
+    let lua = host.lua();
+    let t = lua.create_table()?;
+    t.set("advisory_title", advice.title.as_str())?;
+    if !advice.subtitle.is_empty() {
+        t.set("advisory_subtitle", advice.subtitle.as_str())?;
+    }
+    t.set("advisory_text", advice.text.as_str())?;
+    t.set("advisory_is_locatable", advice.locatable)?;
+    t.set("advisory_has_audio", advice.has_audio)?;
+    if let Some(icon) = &advice.icon_path {
+        t.set("advisory_icon_path", icon.as_str())?;
+    }
+    let f: Function = lua.globals().get("__ntw_battle_show_advice")?;
+    f.call::<()>((t, show_text))
+}
+
+/// The current advice was dismissed (`CurrentAdviceDismissed()`, `0x0076DB70`).
+pub fn advice_dismissed(host: &UiScriptHost) -> mlua::Result<()> {
+    step(host, "__ntw_battle_advice_dismissed")
+}
+
+/// The advice text setting changed (`AdviceTextSettingChanged(on)`, `0x0075C380`).
+pub fn advice_text_setting(host: &UiScriptHost, on: bool) -> mlua::Result<()> {
+    let f: Function = host.lua().globals().get("__ntw_battle_advice_text_setting")?;
+    f.call::<()>(on)
+}
+
+/// Whether the advisor's speech plays, as `BattleUI.IsAudioPlaying()` answers (`0x00791110`).
+pub fn set_advice_audio_playing(host: &UiScriptHost, playing: bool) -> mlua::Result<()> {
+    let battle: Table = host.lua().globals().get("__battle")?;
+    battle.set("advice_audio_playing", playing)
 }
 
 /// Calls one of the prelude's engine steps (a global Lua function without arguments).

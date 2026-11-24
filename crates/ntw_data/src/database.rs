@@ -75,6 +75,10 @@ pub struct GameDatabase {
     pub sea_surfaces: Table<SeaSurface>,
     /// `sea_climate_details` (the battle sea per climate).
     pub sea_climate_details: Table<SeaClimateDetail>,
+    /// `battle_script_strings` (the battle scripts' advisor lines).
+    pub battle_script_strings: Table<BattleScriptString>,
+    /// `advisors` (the advisors' portraits).
+    pub advisors: Table<AdvisorRecord>,
     /// `fatigue_effects` (several rows per threshold).
     pub fatigue_effects: Table<FatigueEffect>,
     /// `entity_training_levels` (one row per training level).
@@ -641,6 +645,9 @@ impl GameDatabase {
             // Only the battle sea reads them (no rows: it is not drawn, logged once there).
             sea_surfaces: load_optional(vfs)?,
             sea_climate_details: load_optional(vfs)?,
+            // Only the battle advisor reads them (a missing row shows no text or portrait).
+            battle_script_strings: load_optional(vfs)?,
+            advisors: load_optional(vfs)?,
             fatigue_effects: load(vfs)?,
             entity_training_levels: load(vfs)?,
             unit_special_abilities,
@@ -1139,6 +1146,8 @@ impl GameDatabase {
             battle_climate_weather: Table::from_rows(0, Vec::new()),
             sea_surfaces: Table::from_rows(0, Vec::new()),
             sea_climate_details: Table::from_rows(0, Vec::new()),
+            battle_script_strings: Table::from_rows(0, Vec::new()),
+            advisors: Table::from_rows(0, Vec::new()),
             fatigue_effects: Table::from_rows(0, Vec::new()),
             entity_training_levels: Table::from_rows(0, Vec::new()),
             unit_special_abilities: Table::from_rows(0, Vec::new()),

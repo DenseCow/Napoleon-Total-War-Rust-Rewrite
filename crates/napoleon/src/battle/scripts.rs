@@ -43,6 +43,10 @@ pub struct BattleScripts {
 pub fn enter(world: &mut World) {
     world.remove_non_send::<BattleScripts>();
     world.insert_resource(ScriptKeys::default());
+    world.insert_resource(super::advisor::Advisor::default());
+    if let Some(mut speech) = world.get_resource_mut::<crate::audio::AdviceSpeech>() {
+        speech.stop();
+    }
     if std::env::var("NAPOLEON_BATTLE_SCRIPTS").is_ok_and(|v| v == "off") {
         return;
     }
@@ -89,8 +93,9 @@ pub fn enter(world: &mut World) {
 pub fn tick(world: &mut World) {
     let Some(mut scripts) = world.remove_non_send::<BattleScripts>() else { return };
     let mut deferred = Vec::new();
+    let advice_playing = world.get_resource::<crate::audio::AdviceSpeech>().is_some_and(|s| s.playing());
     if let Some(mut sim) = world.get_resource_mut::<BattleSim>() {
-        deferred = step(&mut scripts, &mut sim);
+        deferred = step(&mut scripts, &mut sim, advice_playing);
     }
     world.insert_non_send(scripts);
     for r in deferred {
@@ -101,6 +106,8 @@ pub fn tick(world: &mut World) {
                     world.get_resource_or_insert_with(super::view::ScriptCamera::default).0.push((position, target, seconds));
                 }
             }
+            BattleScriptRequest::Advice { key, message } => advise(world, |a, s| a.show(s, &key, &message)),
+            BattleScriptRequest::CloseAdvisor => advise(world, |a, s| a.close(s)),
             BattleScriptRequest::EscapeKey { stolen } => world.get_resource_or_insert_with(ScriptKeys::default).escape = stolen,
             BattleScriptRequest::InputFocus { stolen } => world.get_resource_or_insert_with(ScriptKeys::default).input = stolen,
             BattleScriptRequest::UiVisible { name, visible } => super::hud::set_component_visible(world, &name, visible),
@@ -113,9 +120,18 @@ pub fn tick(world: &mut World) {
     }
 }
 
-fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> {
-    // The buildings were given at load time and do not change.
-    s.host.set_facts(facts_of(&sim.battle, sim.infos(), &[]));
+/// A script's advice request, on the battle's advisor and its speech.
+fn advise(world: &mut World, f: impl FnOnce(&mut super::advisor::Advisor, &mut crate::audio::AdviceSpeech)) {
+    let mut speech = world.remove_resource::<crate::audio::AdviceSpeech>().unwrap_or_default();
+    f(&mut world.get_resource_or_insert_with(super::advisor::Advisor::default), &mut speech);
+    world.insert_resource(speech);
+}
+
+fn step(s: &mut BattleScripts, sim: &mut BattleSim, advice_playing: bool) -> Vec<BattleScriptRequest> {
+    // The buildings were given at load time and do not change; the advisor's speech is the audio's.
+    let mut facts = facts_of(&sim.battle, sim.infos(), &[]);
+    facts.advice_playing = advice_playing;
+    s.host.set_facts(facts);
     if s.shown != Some(sim.phase()) {
         match sim.phase() {
             BattlePhase::Deployment => s.host.phase("Deployment"),
@@ -164,7 +180,9 @@ fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> 
             | BattleScriptRequest::UiVisible { .. }
             | BattleScriptRequest::Marker { .. }
             | BattleScriptRequest::EscapeKey { .. }
-            | BattleScriptRequest::InputFocus { .. } => deferred.push(r),
+            | BattleScriptRequest::InputFocus { .. }
+            | BattleScriptRequest::Advice { .. }
+            | BattleScriptRequest::CloseAdvisor => deferred.push(r),
             r => apply(&mut sim.battle, r),
         }
     }
@@ -318,7 +336,9 @@ pub fn apply(b: &mut Battle, r: BattleScriptRequest) {
         | BattleScriptRequest::UiVisible { .. }
         | BattleScriptRequest::Marker { .. }
         | BattleScriptRequest::EscapeKey { .. }
-        | BattleScriptRequest::InputFocus { .. } => {}
+        | BattleScriptRequest::InputFocus { .. }
+        | BattleScriptRequest::Advice { .. }
+        | BattleScriptRequest::CloseAdvisor => {}
         BattleScriptRequest::Other { order, .. } => debug!("Battle script order not modelled: {order}"),
     }
 }
@@ -336,4 +356,8 @@ fn flush_log(host: &BattleScriptHost) {
 /// Leaving the battle: drop the script.
 pub fn leave(world: &mut World) {
     world.remove_non_send::<BattleScripts>();
+    world.remove_resource::<super::advisor::Advisor>();
+    if let Some(mut speech) = world.get_resource_mut::<crate::audio::AdviceSpeech>() {
+        speech.stop();
+    }
 }

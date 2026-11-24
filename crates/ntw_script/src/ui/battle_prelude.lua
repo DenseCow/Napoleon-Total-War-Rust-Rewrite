@@ -239,7 +239,67 @@ B.TriggerPanelClosedEvent = function() end
 B.TriggerAdviceForPanel = function() end
 B.TriggerMessageDropEvent = function() end
 B.TriggerMessageOpenedEvent = function() end
-B.DismissCurrentAdvice = function() end
+-- The advisor (BATTLE_FIDELITY.md §59.8; bindings 0x00791030..0x007911C0, CONFIRMED names). The
+-- advice window (`ui/common ui/advice_interface`) is the menu bar's, made by root.lua's
+-- ShowPersistentPanels (`__ntw_battle_show_persistent_panels`). Each acts on the engine's advisor
+-- (napoleon battle/advisor.rs) through a request, read once per frame.
+B.DismissCurrentAdvice = function() request({ kind = "dismiss_advice" }) end
+B.RepeatAdvice = function() request({ kind = "repeat_advice" }) end
+-- ChangeAdviceAudioMode(on) / ChangeAdviceTextMode(on) (0x0075C370 / 0x0075C380): the menu bar's
+-- audio and text buttons; the advisor keeps them (audio byte +1, text byte +0, both on when made,
+-- 0x00709BB0); a text change is told to the text panel (AdviceTextSettingChanged).
+B.ChangeAdviceAudioMode = function(on) request({ kind = "advice_audio_mode", on = on == true }) end
+B.ChangeAdviceTextMode = function(on) request({ kind = "advice_text_mode", on = on == true }) end
+-- IsAudioPlaying() (0x00791110): the advisor's speech plays.
+B.IsAudioPlaying = function() return __battle.advice_audio_playing == true end
+-- PROVISIONAL: the advice history (NextAdvice 0x007A7100, PreviousAdvice 0x007B1250), the zoom to
+-- a locatable advice (0x007911C0) and the "reached render" mark (0x007910D0: the advisor's +0x3C,
+-- handed to the advice it replaces) are not traced further; no battle script needs them.
+B.NextAdvice = function() end
+B.PreviousAdvice = function() end
+B.ZoomToAdviceLocation = function() end
+B.InformAdviceReachedRender = function() end
+-- The engine objects the menu bar's scripts only pass along (to MultiplayerPlayerInterface),
+-- CONFIRMED bindings 0x005D19D0 / 0x005D3110; ShowVoiceChat (0x005D3690) is off in single player.
+for _, name in ipairs({ "MultiplayerBaseInterface", "RetrieveGameCore" }) do
+    B[name] = function() return { __engine_object = name } end
+end
+B.ShowVoiceChat = function() return false end
+B.EnableVoiceChat = function() end
+
+-- ShowPersistentPanels(false) (the engine's call at the HUD's start, 0x005F2660; the argument is
+-- the multiplayer flag): root.lua makes the menu bar, whose InitialiseMenuBar makes the advice
+-- window and returns it; the engine then asks the window for its text panel (AdvicePanelAddress,
+-- 0x007C5310), the component the advice goes to (kept here). True when there is one.
+local advice_panel = nil
+function __ntw_battle_show_persistent_panels()
+    for _, env in pairs(__ntw_envs) do
+        local f = rawget(env, "ShowPersistentPanels")
+        if type(f) == "function" then
+            local window = __ntw_call_in(rawget(env, "Address"), f, false)
+            if window ~= nil then advice_panel = UIComponent(window):LuaCall("AdvicePanelAddress") end
+            return advice_panel ~= nil
+        end
+    end
+    return false
+end
+-- UpdateWithNewAdvice(advice, show_text) on the text panel (0x0075C260, which builds `advice` with
+-- 0x005AB820: advisory_title, advisory_subtitle when not empty, advisory_text,
+-- advisory_is_locatable, advisory_has_audio, advisory_icon_path when there is one).
+function __ntw_battle_show_advice(advice, show_text)
+    if advice_panel == nil then return end
+    UIComponent(advice_panel):LuaCall("UpdateWithNewAdvice", advice, show_text)
+end
+-- AdviceTextSettingChanged(on) on the text panel (0x0075C380).
+function __ntw_battle_advice_text_setting(on)
+    if advice_panel == nil then return end
+    UIComponent(advice_panel):LuaCall("AdviceTextSettingChanged", on)
+end
+-- CurrentAdviceDismissed() on the text panel (0x0076DB70).
+function __ntw_battle_advice_dismissed()
+    if advice_panel == nil then return end
+    UIComponent(advice_panel):LuaCall("CurrentAdviceDismissed")
+end
 -- { Land = {...}, Naval = {...} } (CONFIRMED reads in 3d_component_manager.lua). PROVISIONAL: no
 -- floating unit ids over the 3D units yet.
 B.UnitListForBattleIds = function() return { Land = {}, Naval = {} } end

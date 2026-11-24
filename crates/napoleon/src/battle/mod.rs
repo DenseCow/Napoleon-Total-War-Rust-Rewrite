@@ -21,6 +21,7 @@
 //! *virtual* clock, so a tick's RESULT never depends on speed or frame rate (determinism).
 
 mod actions;
+mod advisor;
 mod camera;
 pub(crate) mod flag;
 pub(crate) mod fx;

@@ -328,10 +328,19 @@ function empire_battle:steal_input_focus() nb.request("input_focus", { units = {
 function empire_battle:release_input_focus() nb.request("input_focus", { units = {}, stolen = false }) end
 function empire_battle:steal_escape_key() nb.request("escape_key", { units = {}, stolen = true }) end
 function empire_battle:release_escape_key() nb.request("escape_key", { units = {}, stolen = false }) end
--- Known calls with no effect in our game yet (PROVISIONAL, not logged): contextual advice, the
--- advisor window.
+-- Known call with no effect in our game yet (PROVISIONAL, not logged): contextual advice.
 function empire_battle:suspend_contextual_advice() end
-function empire_battle:close_advisor() end
+-- The advisor (BATTLE_FIDELITY.md §59.8). show_advisor_message(key, message) (0x006646D0): both
+-- must be strings, else the call fails with the exe's own message; the game shows the
+-- battle_script_strings row named by key (or message when there is none) and plays its speech.
+-- advice_finished() (0x0062A350): the speech has ended. close_advisor() (0x0063D670): dismissed.
+function empire_battle:show_advisor_message(key, message)
+    if type(key) ~= "string" and type(key) ~= "number" then error("bad argument #1 (invalid key (string) argument)", 2) end
+    if type(message) ~= "string" and type(message) ~= "number" then error("bad argument #2 (invalid message (string) argument)", 2) end
+    nb.request("advisor", { units = {}, key = tostring(key), message = tostring(message) })
+end
+function empire_battle:advice_finished() return nb.advice_finished() end
+function empire_battle:close_advisor() nb.request("close_advisor", { units = {} }) end
 function empire_battle:register_singleshot_timer(name, ms) nb.timer(name, ms or 0, false) end
 function empire_battle:register_repeating_timer(name, ms) nb.timer(name, ms or 0, true) end
 function empire_battle:unregister_timer(name) nb.untimer(name) end
@@ -348,8 +357,7 @@ function empire_battle:unregister_input_handler() nb.input_handler(nil) end
 -- suppress_unit_voices(b) (0x00612DF0 → 0x006670F0): the units' speech. PROVISIONAL no-op: the
 -- game plays no unit voices yet.
 function empire_battle:suppress_unit_voices() end
-function empire_battle:advice_finished() return true end
-function empire_battle:show_advisor_message(s) log("advisor: " .. tostring(s)) end
+-- PROVISIONAL: the locatable advice (its own binding, a position to zoom to) is not traced yet.
 function empire_battle:show_locatable_advisor_message(s) log("advisor: " .. tostring(s)) end
 function empire_battle:end_battle_to_frontend() nb.request("end_battle", { units = {} }) end
 -- Markers (battle:marker(name), binding 0x00612C30 → 0x0064BC10, CONFIRMED object layout: position

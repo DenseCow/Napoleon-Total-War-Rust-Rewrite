@@ -125,6 +125,8 @@ fn tutorial_script_follows_the_players_actions() {
             f.time_ms = t;
             host.set_facts(f.clone());
             host.advance();
+            // The game takes the requests every step (an advice counts as playing until it has).
+            host.take_requests();
         }
     };
     run(&host, &mut f, 5_000);
@@ -195,6 +197,68 @@ fn austerlitz_intro_takes_the_keys_and_escape_skips_it() {
     assert!(log.iter().any(|l| l.contains("Skipping remainder of cutscene Cutscene_Intro")), "{log:#?}");
     assert!(log.iter().any(|l| l.contains("Called Function: Start_Battle")), "{log:#?}");
     assert!(log.iter().all(|l| !l.starts_with("ERROR")), "{log:#?}");
+}
+
+/// The Austerlitz intro holds on `cutscene:wait_for_advisor()` (`battle:advice_finished()`,
+/// `0x0062A350`) while the advisor's speech plays: its second advice comes only once the first
+/// speech has ended.
+#[test]
+fn austerlitz_intro_waits_for_the_advisors_speech() {
+    let dir = data_dir();
+    if !dir.join("data.pack").is_file() {
+        eprintln!("skipped: no install at {}", dir.display());
+        return;
+    }
+    let vfs = Vfs::open_install(&dir).unwrap();
+    let spec = BattleSpec::parse(&vfs.read("napoleon_historical_battles/austerlitz/austerlitz_battle.xml").unwrap()).unwrap();
+    let script = vfs.read("napoleon_historical_battles/austerlitz/austerlitz_battle.battle_script").unwrap();
+    let mut f = facts(&spec);
+    let host = BattleScriptHost::new(ScriptSource::from_install(&dir).unwrap(), f.clone(), 1).unwrap();
+    host.load("@austerlitz_battle.battle_script", &script).expect("script runs");
+    host.phase("Deployment");
+    host.phase("Deployed");
+    let run = |f: &mut BattleScriptFacts, advice: &mut Vec<(String, String)>, from: u64, to: u64, playing: bool| {
+        for step in from..to {
+            f.time_ms = step * 100;
+            f.advice_playing = playing;
+            host.set_facts(f.clone());
+            host.advance();
+            for r in host.take_requests() {
+                if let BattleScriptRequest::Advice { key, message } = r {
+                    advice.push((key, message));
+                }
+            }
+        }
+    };
+    // The speech plays from the first advice (2 s) to 40 s, long past the second one's 14 s.
+    let mut advice = Vec::new();
+    run(&mut f, &mut advice, 1, 400, true);
+    assert_eq!(advice, [("CreativeAssembly.HB_Austerlitz_Intro_1".to_owned(), String::new())]);
+    run(&mut f, &mut advice, 400, 420, false);
+    assert_eq!(advice.get(1).map(|a| a.0.as_str()), Some("CreativeAssembly.HB_Austerlitz_Intro_2"), "{advice:?}");
+    assert!(host.take_log().iter().all(|l| !l.starts_with("ERROR")));
+}
+
+/// An advice counts as playing from the script's call until the game has taken it and said how its
+/// speech goes; then `advice_finished()` is the game's word.
+#[test]
+fn an_advice_is_unfinished_until_the_game_has_taken_it() {
+    let host = BattleScriptHost::new(ScriptSource::empty(), BattleScriptFacts::default(), 1).unwrap();
+    host.load("@advice.lua", b"b = empire_battle:new(); b:show_advisor_message('k', 'm')").expect("script runs");
+    assert!(!host.advice_finished());
+    host.set_facts(BattleScriptFacts::default());
+    assert!(!host.advice_finished(), "not taken yet");
+    assert_eq!(host.take_requests(), [BattleScriptRequest::Advice { key: "k".into(), message: "m".into() }]);
+    assert!(!host.advice_finished(), "taken, not yet told");
+    host.set_facts(BattleScriptFacts::default());
+    assert!(host.advice_finished(), "no speech plays");
+    host.set_facts(BattleScriptFacts { advice_playing: true, ..Default::default() });
+    let lua_says: bool = host.lua().load("return b:advice_finished()").eval().unwrap();
+    assert!(!lua_says && !host.advice_finished());
+    host.load("@close.lua", b"b:close_advisor()").expect("script runs");
+    assert_eq!(host.take_requests(), [BattleScriptRequest::CloseAdvisor]);
+    // A key that is not a string fails like the exe's argument check.
+    assert!(host.load("@bad.lua", b"b:show_advisor_message(nil, 'm')").is_err());
 }
 
 /// A script that steals ESCAPE without an `Esc_Key_Pressed` gets one error, not one per press.

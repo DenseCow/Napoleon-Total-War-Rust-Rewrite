@@ -64,6 +64,10 @@ pub struct BattleHud {
     shortcuts: ShortcutMachine,
     /// The scripts' `steal_input_focus` as last applied to `shortcuts` ([`keys`]).
     input_stolen: bool,
+    /// The advice window gave its text panel at the start (`ui_battle::show_persistent_panels`).
+    advice_window: bool,
+    /// What `BattleUI.IsAudioPlaying()` was last told (`None`: nothing yet).
+    advice_audio_told: Option<bool>,
 }
 
 /// The per-frame HUD steps (model → HUD). A step that fails fails every frame, so each logs its
@@ -184,6 +188,8 @@ pub fn enter(world: &mut World) {
         frame_errors: FrameErrors::default(),
         shortcuts,
         input_stolen: false,
+        advice_window: false,
+        advice_audio_told: None,
     };
     if let Some(sim) = world.get_resource::<BattleSim>()
         && let Err(e) = write_facts(&mut hud, sim, &world.resource::<GameData>().db)
@@ -193,6 +199,13 @@ pub fn enter(world: &mut World) {
     if let Err(e) = ui_battle::load_hud(&hud.host) {
         warn!("Battle HUD: layout not loaded: {e}");
         return;
+    }
+    // root.lua's ShowPersistentPanels: the menu bar and the advice window, before the deployment
+    // popup as in the exe (`0x005EA360` → `0x005F2660`).
+    match ui_battle::show_persistent_panels(&hud.host) {
+        Ok(true) => hud.advice_window = true,
+        Ok(false) => warn!("Battle HUD: the menu bar gave no advice window; the advisor's advice is not shown"),
+        Err(e) => warn!("Battle HUD: menu bar and advice window: {e}"),
     }
     if let Err(e) = ui_battle::create_cards(&hud.host) {
         warn!("Battle HUD: unit cards: {e}");
@@ -448,6 +461,7 @@ pub fn frame(
     mut music: MessageWriter<crate::audio::SetMusic>,
     mut next: ResMut<NextState<GameMode>>,
     mut cams: Query<&mut super::camera::BattleCamera>,
+    (mut advisor, mut speech): (Option<ResMut<super::advisor::Advisor>>, Option<ResMut<crate::audio::AdviceSpeech>>),
 ) {
     let (Some(mut hud), Some(mut sim), Ok(window)) = (hud, sim, window.single()) else { return };
     let size = Vec2::new(window.width(), window.height());
@@ -483,6 +497,17 @@ pub fn frame(
         }
         hud.written_facts.as_ref().or(hud.spare_facts.as_ref()).and_then(|f| f.player_won)
     };
+    // The advisor → its window (BATTLE_FIDELITY.md §59.8).
+    if let Some(a) = advisor.as_deref_mut() {
+        tell_advice_window(&mut hud, a, &data.db);
+    }
+    let playing = speech.as_deref().is_some_and(crate::audio::AdviceSpeech::playing);
+    if hud.advice_audio_told != Some(playing) {
+        hud.advice_audio_told = Some(playing);
+        if let Err(e) = ui_battle::set_advice_audio_playing(&hud.host, playing) {
+            warn!("Battle HUD: advice audio state: {e}");
+        }
+    }
     hud.host.pulse(f64::from(t));
     // Phase popups (the engine's calls into root.lua) and the music of each phase.
     if hud.shown != Some(sim.phase()) {
@@ -559,6 +584,16 @@ pub fn frame(
         Vec::new()
     });
     for r in requests {
+        // The advice window's buttons, on the battle's advisor.
+        if let (Some(a), Some(s)) = (advisor.as_deref_mut(), speech.as_deref_mut()) {
+            match r {
+                BattleUiRequest::DismissAdvice => a.close(s),
+                BattleUiRequest::RepeatAdvice => a.repeat(s),
+                BattleUiRequest::AdviceAudioMode(on) => a.set_audio_mode(on),
+                BattleUiRequest::AdviceTextMode(on) => a.set_text_mode(on),
+                _ => {}
+            }
+        }
         if let BattleUiRequest::SelectionProxy { id, on } = r {
             // The camera manager's track target (`SetTrackTarget` 0x005F9B70). Served only while
             // the battle UI runs, as the exe's `+0x9CD` gate; the context camera's subject and
@@ -649,7 +684,30 @@ fn apply(hud: &mut BattleHud, sim: &mut BattleSim, r: BattleUiRequest, next: &mu
         }
         BattleUiRequest::ZoomTo(_) => {}
         // Handled by `frame`, which has the camera.
+        // Handled by `frame`, which has the advisor.
+        BattleUiRequest::DismissAdvice | BattleUiRequest::RepeatAdvice | BattleUiRequest::AdviceAudioMode(_) | BattleUiRequest::AdviceTextMode(_) => {}
         BattleUiRequest::SelectionProxy { .. } => {}
+    }
+}
+
+/// Tells the advice window what the advisor did since the last frame, in order. A failed call is
+/// logged (each is one advice, not a frame).
+fn tell_advice_window(hud: &mut BattleHud, advisor: &mut super::advisor::Advisor, db: &ntw_data::GameDatabase) {
+    for step in advisor.take_for_hud() {
+        if !hud.advice_window {
+            continue;
+        }
+        let told = match step {
+            super::advisor::ToHud::Show { key, message, show_text } => {
+                let view = super::advisor::advice_view(db, &hud.loc, &key, &message);
+                ui_battle::show_advice(&hud.host, &view, show_text)
+            }
+            super::advisor::ToHud::Dismissed => ui_battle::advice_dismissed(&hud.host),
+            super::advisor::ToHud::TextSetting(on) => ui_battle::advice_text_setting(&hud.host, on),
+        };
+        if let Err(e) = told {
+            warn!("Battle HUD: advice window: {e}");
+        }
     }
 }
 

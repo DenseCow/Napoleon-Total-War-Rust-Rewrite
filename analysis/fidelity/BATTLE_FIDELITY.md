@@ -3008,15 +3008,66 @@ this the engine calls were stubs, so ESC opened the menu instead of skipping, an
   argument order (target, then position) is CONFIRMED by the handler. Ours: `BattleCamera::script_move_to`.
 - **Not done (PROVISIONAL / UNKNOWN):** `disable_functionality` queues `BCQ_CAMERA_DISABLE_FUNCTIONALITY`
   (`0x0040C700`, handler `0x005BEF30` → event `+0x1080` with the mask); where the mask is tested is not traced (the
-  keyboard camera is already off through `steal_input_focus`). The advisor: `show_advisor_message` (`0x006646D0` →
-  `0x00E1A970`) and `advice_finished` (`0x0062A350`: true when the battle UI's advisor `+0x28208` exists and its
-  speech object is gone or its vfunc `+0x64` says it is not playing) are still stubs (speech, window and the wait).
+  keyboard camera is already off through `steal_input_focus`). The advisor is §59.8.
 - Tests: `ntw_script --test battle_script austerlitz_intro_takes_the_keys_and_escape_skips_it` (the shipped script:
   keys taken, the first shot `move_to(..., 3)`, ESC skips back to the start view and starts the battle),
   `ui::shortcuts::tests::stolen_input_presses_only_quit_and_end_battle`,
   `ui::battle::tests::battle_keys_are_the_keys_files_bindings` (a script-held key), `napoleon`
   `battle::camera::tests::a_script_move_glides_for_the_scaled_length`. In game (Austerlitz): the intro's camera glides
   between its shots (screenshots 1.5 s apart show it moving).
+
+### 59.8 The battle advisor: script advice, its speech and the advice window (2026-11-24; static, CONFIRMED unless tagged)
+
+- **`battle:show_advisor_message(key, message)`** (`0x006646D0`): both arguments must be strings (else the exe's
+  "invalid key (string) argument" / "invalid message (string) argument"). A non-empty key is looked up in
+  `battle_script_strings` (`0x0065ED60`; row reader `0x00E548B0`: #0 key, #1 text `+0x0C`, #2 speaker `+0x18`,
+  version ≥ 1); a row replaces the message by its text and gives its speaker. The message is built by `0x00E1A970` →
+  `0x00DF1860` (vtable `0x013A4514`): title empty, subtitle empty, text, speaker, and the key at `+0x4C`, then queued
+  for the advisor (`0x00E2E8A0`). The shown text is the localisation `battle_script_strings_string_<key>` (the
+  shipped loc has every row). Ours: `napoleon::battle::advisor::advice_view` (falls back to the row's own text).
+- **The table the window reads** (`0x005AB820`, built by `0x0075C260`, which calls the text panel's
+  `UpdateWithNewAdvice(advice, text_mode)`): `advisory_title` (vfunc `+0x04`), `advisory_subtitle` only when not
+  empty (`+0x08`), `advisory_text` (`+0x0C`), `advisory_is_locatable` (`+0x20`; 0 for script advice:
+  `0x00461180`), `advisory_has_audio` (the key `+0x4C` via `0x00E0FA40` is not empty), `advisory_icon_path`
+  (`+0x10` → `0x00E0E3E0`: the speaker's `advisors` row, #1 the portrait). `advisors` (row reader `0x00FA3C40`,
+  9 rows, version ≥ 1 for #1).
+- **The speech** is `advisor\<key>.mp3` (`0x0100BC80`, format `advisor\%S.mp3`; the file is checked first, so a
+  key without a file is text only). **`battle:advice_finished()`** (`0x0062A350`): true when the UI's advisor
+  (`+0x28208`) exists and its current sound (`+0x28050`) is gone or not playing (vfunc `+0x64`). Ours: the
+  script host counts an advice as playing from the call until the game has taken it and reported its speech
+  (`BattleScriptHost::advice_finished`); the speech is `crate::audio::AdviceSpeech`, which counts a speech just
+  asked for as playing until the audio has tried it, and stops one no audio output takes (else a cutscene would
+  wait forever without a sound device; logged once). PROVISIONAL: the speech plays in the speech group at volume
+  1 (`SS_<LANG>_LAND_BATTLE_ADVISOR_VOLUME` not applied).
+- **`battle:close_advisor()`** (`0x0063D670`) and the window's close button (`BattleUI.DismissCurrentAdvice`,
+  `0x007910B0`) both run `0x0076DB70`: the speech stops and the text panel's `CurrentAdviceDismissed()` runs.
+- **The window** is the original `ui/common ui/advice_interface`, made by the menu bar: the engine calls root.lua's
+  `ShowPersistentPanels(multiplayer)` once at the HUD's start (`0x005F2660`, from `0x005EA360` just before
+  `ShowDeploymentPopup`); root.lua creates `common UI/menu_bar`, whose `InitialiseMenuBar` →
+  `ChangeAdvicePanelDisplay` creates the advice window and returns it; the engine makes its advisor (`0x00709BB0`,
+  text mode byte `+0` and audio mode byte `+1` both 1) and asks the window for its text panel
+  (`AdvicePanelAddress`, `0x007C5310`). Ours: `ui::battle::show_persistent_panels` / `show_advice` /
+  `advice_dismissed` / `advice_text_setting`, called by `napoleon::battle::hud`.
+- **The window's engine calls** (registrar `0x0059EB40`): `ChangeAdviceAudioMode` (`0x00791030` → `0x0075C370`, sets
+  byte `+1` only), `ChangeAdviceTextMode` (`0x00791070` → `0x0075C380`, byte `+0`, then the panel's
+  `AdviceTextSettingChanged(on)`), `DismissCurrentAdvice`, `IsAudioPlaying` (`0x00791110`), `RepeatAdvice`
+  (`0x007911A0` → `0x007AE8E0`), `NextAdvice` / `PreviousAdvice` (`0x007A7100` / `0x007B1250`),
+  `InformAdviceReachedRender` (`0x007910D0`, byte `+0x3C`), `ZoomToAdviceLocation` (`0x007911C0`).
+  `MultiplayerBaseInterface` / `RetrieveGameCore` (`0x005D19D0` / `0x005D3110`) only feed the voice button's
+  `MultiplayerPlayerInterface`. INFERRED: the audio mode off keeps a new advice's speech from starting.
+  PROVISIONAL: `RepeatAdvice` replays only the speech, and the advice history (Next / Previous), the zoom and
+  the "reached render" mark are no-ops; `SetOpacity` / `PropagateOpacity` (the window's fade after 60 s +
+  10 s, `fading_panel.lua`) draw nothing, so the window stays until it is hidden.
+- The window steals ESCAPE while it is shown (advice_interface's `StealShortcutKey("ESCAPE")`); every stealer
+  hears a stolen key (§59.7), so ESC during a cutscene both skips it and reaches the window.
+- **Not done:** `show_locatable_advisor_message` (its own binding, with a position to zoom to) stays a logged
+  stub; the contextual advice (`suspend_contextual_advice`, the advice threads) is not ported.
+- Tests: `ntw_script --test battle_script austerlitz_intro_waits_for_the_advisors_speech` (the shipped script
+  holds its second advice while the first speech plays), `an_advice_is_unfinished_until_the_game_has_taken_it`;
+  `ntw_script --test battle_advisor` (the original menu bar and advice window show an advice; its close button
+  asks to dismiss it); `ntw_data --test advisor_install -- --ignored` (both tables); `napoleon battle::advisor`
+  tests. In game (Austerlitz): the window shows Napoleon's portrait and each intro line in step with its
+  speech.
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.
