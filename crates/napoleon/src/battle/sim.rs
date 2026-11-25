@@ -341,7 +341,8 @@ mod tests {
         assert_eq!([0, 1, 2, 255].map(one_of_two_sides), [Some(0), Some(1), None, None]);
     }
 
-    /// A release build keeps the player on the first side for a side past the two.
+    /// A release build keeps the player on the first side for a side past the two (runs only under
+    /// `cargo test --release`; the helper's test runs in every build).
     #[test]
     #[cfg(not(debug_assertions))]
     fn a_release_build_keeps_a_bad_player_side_on_the_first() {

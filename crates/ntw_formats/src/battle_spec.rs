@@ -225,8 +225,9 @@ impl BattleSpec {
         Ok(spec)
     }
 
-    /// The alliance the human player commands and its first playable army: the first alliance
-    /// without an alliance-level `non_playable`, and its first army without an army-level one.
+    /// The alliance the human player commands and its first playable army: the first army without
+    /// an army-level `non_playable` in the first alliance without an alliance-level one that has
+    /// such an army.
     /// The two flags are CONFIRMED reads (alliance `+0x38`, army `+0xCD`; the XML element is a
     /// name → children map, so an alliance-level `non_playable` anywhere among the alliance's
     /// children counts). That the player takes the first such army is PROVISIONAL (the front
@@ -437,7 +438,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.player_army(), Some((2, 0)), "the only playable alliance");
-        assert_eq!(s.player_army_in(2), Some((0, 0)), "none playable in the first two: the first army there");
+        assert_eq!(s.player_army_in(2), Some((0, 0)), "none playable in the first two: the first unflagged army there");
         let s = BattleSpec { alliances: vec![alliance(false, vec![]), alliance(false, vec![army(true), army(false)])], ..Default::default() };
         assert_eq!(s.player_army_in(2), Some((1, 1)), "an alliance without armies is passed over");
         // Every army in the first two flagged: none there.
