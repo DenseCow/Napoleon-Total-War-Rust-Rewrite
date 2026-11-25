@@ -1391,8 +1391,11 @@ impl LandUnit {
             let p = laid.place(k);
             (m.side, m.lag) = (m.side - p.0, m.lag - p.1);
         }
-        // The slots now match the unit's frame at this facing.
-        self.march.laid_facing = self.facing;
+        // The slots now match the unit's frame at this facing, once they were assigned (the idle
+        // reform's lay-out keeps each man's slot, so small turns still add up).
+        if assign.is_some() || self.march.laid.is_none() {
+            self.march.laid_facing = self.facing;
+        }
         self.march.laid = Some(laid);
         #[cfg(test)]
         {

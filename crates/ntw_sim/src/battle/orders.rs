@@ -496,6 +496,18 @@ mod tests {
         // quickly clicked: an end man of the 20 m line can be some 9 m off plus what he has not
         // walked yet; crossing to the mirrored slot would be about 20 m.
         assert!(worst < 12.0, "no man crosses the block ({worst} m)");
+        // Six 30° turns, each walked out and the reform ended in between: no man ever crosses the
+        // block (each walks one small turn at a time).
+        settle(&mut b);
+        let mut worst = 0.0f32;
+        for _ in 0..6 {
+            let f = b.units[0].facing;
+            b.units[0].turn_to(f + 30f32.to_radians());
+            b.step();
+            worst = worst.max(off(&b));
+            settle(&mut b);
+        }
+        assert!(worst < 12.0, "no man crosses the block after walked-out turns ({worst} m)");
         // Before the first tick, turned about: every man is counted and stays where he stands,
         // and the first tick still lays out and reforms.
         let mut b = battle();

@@ -16,8 +16,9 @@
 //! red). The marker handles are made once per battle (`0x007159D0`).
 //!
 //! Ours: the view (`super::view::sync_views`) hands every marked man's drawn position and facing
-//! to [`MarkerQuads`]; [`draw`] writes them into one mesh per marker kind each frame, reusing its
-//! buffers. PROVISIONAL: the height argument is taken as the square's lift above the ground under
+//! to [`MarkerQuads`]; [`draw`] writes them into one mesh per marker kind when they changed (a
+//! standing unit's stay as they are), reusing its buffers, with the entity's height at least 0.1 as
+//! the original clamps it. PROVISIONAL: the height argument is taken as the square's lift above the ground under
 //! the man (INFERRED from the sizes of the two); the decal is a flat square, not projected on
 //! the slope; the unit under the mouse is the one whose centre is nearest the ground point
 //! (`input::unit_near`, the original picks a soldier).
@@ -49,6 +50,8 @@ pub enum Marker {
 #[derive(Resource, Default)]
 pub struct MarkerQuads {
     marks: [Vec<(Vec3, f32)>; 3],
+    /// The marks the meshes hold now (written by [`draw`]).
+    written: [Vec<(Vec3, f32)>; 3],
 }
 
 impl MarkerQuads {
@@ -130,25 +133,26 @@ pub fn corners(ground: Vec3, facing: f32, size: f32) -> [Vec3; 4] {
 /// shows the meshes that have any.
 pub fn draw(mut quads: ResMut<MarkerQuads>, made: Option<Res<MarkerMeshes>>, mut meshes: ResMut<Assets<Mesh>>, mut visibility: Query<&mut Visibility>) {
     let Some(made) = made else { return };
+    let MarkerQuads { marks, written } = &mut *quads;
     for (k, slot) in made.meshes.iter().enumerate() {
-        let marks = std::mem::take(&mut quads.marks[k]);
         if let Some((entity, handle)) = slot {
             if let Ok(mut v) = visibility.get_mut(*entity) {
-                let wanted = if marks.is_empty() { Visibility::Hidden } else { Visibility::Visible };
+                let wanted = if marks[k].is_empty() { Visibility::Hidden } else { Visibility::Visible };
                 v.set_if_neq(wanted);
             }
-            // An empty frame only hides the mesh: the renderer allocates no empty mesh.
-            if !marks.is_empty()
+            // An empty frame only hides the mesh (the renderer allocates no empty mesh), and the
+            // same marks as last frame's (a standing unit) leave the mesh as it is.
+            if !marks[k].is_empty()
+                && marks[k] != written[k]
                 && let Some(mut mesh) = meshes.get_mut(handle)
             {
                 let (_, size, lift) = KINDS[k];
-                write_quads(&mut mesh, &marks, size, lift);
+                write_quads(&mut mesh, &marks[k], size, lift);
+                // This frame's marks become the written ones; the old buffer is reused next frame.
+                std::mem::swap(&mut marks[k], &mut written[k]);
             }
         }
-        // Keep the buffer (cleared) for the next frame.
-        let mut marks = marks;
-        marks.clear();
-        quads.marks[k] = marks;
+        marks[k].clear();
     }
 }
 
@@ -168,7 +172,9 @@ fn write_quads(mesh: &mut Mesh, marks: &[(Vec3, f32)], size: f32, lift: f32) {
     if let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
         p.clear();
         for &(ground, facing) in marks {
-            p.extend(corners(ground + Vec3::Y * lift, facing, size).map(|c| c.to_array()));
+            // The man's height is at least 0.1 (`0x00789BD0` clamps the entity's height so).
+            let at = Vec3::new(ground.x, ground.y.max(0.1) + lift, ground.z);
+            p.extend(corners(at, facing, size).map(|c| c.to_array()));
         }
     }
     if let Some(VertexAttributeValues::Float32x3(n)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {

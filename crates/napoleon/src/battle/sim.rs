@@ -26,6 +26,11 @@ pub enum SelectMode {
     Toggle,
 }
 
+/// The player's alliance: the battle setup gives side 0 to the player's armies (the original keeps it
+/// at the battle's `+0x281A4` and compares an army's alliance `+0x44` → `+0x10` with it, e.g. for the
+/// mouse-over marker, `0x00789BD0`).
+pub const PLAYER_SIDE: u8 = 0;
+
 /// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
 #[derive(Resource)]
 pub struct BattleSim {
@@ -267,7 +272,7 @@ mod tests {
         let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
         for id in 1..=4 {
             let side = u8::from(id == 4);
-            sim.add_unit(LandUnit::new(id, side, 100, (id as f32 * 30.0, 0.0)), UnitInfo { id, controllable: side == 0, ..UnitInfo::default() });
+            sim.add_unit(LandUnit::new(id, side, 100, (id as f32 * 30.0, 0.0)), UnitInfo { id, controllable: side == PLAYER_SIDE, ..UnitInfo::default() });
         }
         sim
     }

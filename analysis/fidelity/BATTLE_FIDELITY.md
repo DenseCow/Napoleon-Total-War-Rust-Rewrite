@@ -3070,7 +3070,8 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   still finish the march or reform, so an about-turn on arrival, or many small rotations adding up, never
   sends a man across the block (ours, PROVISIONAL threshold). Tests `no_man_jumps_when_his_unit_turns`,
   `a_standing_unit_turned_walks_its_men_to_their_nearest_slots`, `a_moving_units_turn_leaves_its_men_to_the_march`. PROVISIONAL: the drawn size
-  `UnitInfo::size_m` (the selection outline, and the spread of the muzzle flashes, `fx_draw::muzzle_of`) is
+  `UnitInfo::size_m` (the fallback outline of a unit without figures, and the spread of the muzzle flashes,
+  `fx_draw::muzzle_of`) is
   set once at the battle's start and does not follow a new width.
 - **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no
   AI controls) also moved the player's units after every order, so a unit sent somewhere walked off on its
@@ -3096,10 +3097,11 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   (red, filled). The handles are made once per battle (`0x007159D0`, display `+0x174` / `+0x178` / `+0x17C`).
 - **Ours** (`battle::selection_markers`): the view hands every marked man's drawn position and facing over;
   one mesh per marker is rewritten each frame in place. The unit under the mouse is `input::MouseDrag::hovered`.
-  The debug rectangle (gizmo lines, coloured by side and morale) is gone. PROVISIONAL: the last argument is
+  The debug rectangle (gizmo lines, coloured by side and morale) is drawn only for a unit without figures
+  (no soldier library), so it can still be seen. The player's alliance is `battle::sim::PLAYER_SIDE`. PROVISIONAL: the last argument is
   taken as the square's lift above the ground (INFERRED from the two sizes); the square is flat, not
   projected on the slope; the hovered unit is picked by its centre (`input::unit_near`), the original's by
-  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported.
+  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported. The height clamp (at least 0.1) is.
 - Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
   rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
 

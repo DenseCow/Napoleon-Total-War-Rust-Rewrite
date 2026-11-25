@@ -581,7 +581,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             }
             unit.facing = facing;
             unit_info.faction = sim.side_factions[side].clone();
-            unit_info.controllable = side == 0;
+            unit_info.controllable = side == usize::from(super::sim::PLAYER_SIDE);
             unit_info.army = (side, 0);
             built.push(Built { unit, info: unit_info });
             next_id += 1;

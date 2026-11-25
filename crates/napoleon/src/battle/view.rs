@@ -1,6 +1,6 @@
 //! Drawing, in 3D: every model unit is a block of real soldier figures (assembled from the
-//! install by `crate::soldiers`), an outline on the ground in its side's colour, and a
-//! screen-space text label. Volleys are drawn as lines.
+//! install by `crate::soldiers`), the original's selection and mouse-over markers under its men
+//! (`super::selection_markers`), and a screen-space text label. Volleys are drawn as lines.
 //!
 //! These Bevy entities are only a *picture* of the model. They are read from `BattleSim` every
 //! frame and never feed back into the rules (the original's model/display split).
@@ -22,6 +22,7 @@ use ntw_formats::anim::Anim;
 use ntw_formats::unit_model::{VariantRole, unit_lod};
 use ntw_sim::battle::march::MoveKind;
 use ntw_sim::battle::model::LandUnit;
+use ntw_sim::battle::morale::MoraleState;
 
 use super::selection_markers;
 use super::skin::{self, BoneAtlas, ClipSlot, SkinExt, SkinMaterial};
@@ -1107,7 +1108,7 @@ pub fn spawn_camera(
     let mut harness = false;
     // Start behind the player's army (side 0), looking the way it faces.
     if let Some(sim) = sim.as_ref() {
-        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == 0).collect();
+        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == super::sim::PLAYER_SIDE).collect();
         if let Some(first) = mine.first() {
             let n = mine.len() as f32;
             let centre = mine.iter().fold(Vec2::ZERO, |a, u| a + Vec2::new(u.position.0, u.position.1)) / n;
@@ -1663,7 +1664,7 @@ pub fn sync_views(
     mut views: Query<(&UnitView, &DrawnPose, &mut Transform, Option<&mut UnitFigures>)>,
     mut men_tf: Query<&mut Transform, Without<UnitView>>,
     mut visibility: Query<&mut Visibility>,
-    (mut marker_quads, drag): (Option<ResMut<selection_markers::MarkerQuads>>, Option<Res<super::input::MouseDrag>>),
+    (mut marker_quads, drag, mut gizmos): (Option<ResMut<selection_markers::MarkerQuads>>, Option<Res<super::input::MouseDrag>>, Gizmos),
     cams: Query<&GlobalTransform, With<Camera3d>>,
     children: Query<&Children>,
     mut part_lods: Query<(&mut Mesh3d, &PartLods)>,
@@ -1696,14 +1697,28 @@ pub fn sync_views(
         // A figure faces local -Z; model facing 0 = +x. See `world_of` for the axes.
         transform.rotation = Quat::from_rotation_y(facing - std::f32::consts::FRAC_PI_2);
         // The markers its men show (`selection_markers`, `0x00789BD0`): selected, and under the
-        // mouse, blue for the player's alliance (side 0) and red for the enemy.
-        let on_field = view.info(&sim).is_some() && !unit.off_field();
-        let selected = on_field && sim.is_selected(unit.id);
-        let hover = (on_field && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == 0 {
+        // mouse, blue for the player's alliance and red for the enemy.
+        let info = view.info(&sim).filter(|_| !unit.off_field());
+        let selected = info.is_some() && sim.is_selected(unit.id);
+        let hover = (info.is_some() && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == super::sim::PLAYER_SIDE {
             selection_markers::Marker::MouseOver
         } else {
             selection_markers::Marker::MouseOverEnemy
         });
+        // Ours: a unit drawn without figures (no soldier library or no kits, e.g. on the test
+        // fixture) is an outline on the ground in its side's colour, yellow when selected, so it
+        // can still be seen and picked; the original always has its figures.
+        if let Some(info) = info.filter(|_| figures.is_none() || skin.is_none()) {
+            let half = info.size_m * 0.5;
+            let corners = [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y), (-half.x, half.y)].map(|(x, z)| {
+                let p = transform.transform_point(Vec3::new(x, 0.0, z));
+                Vec3::new(p.x, ground(Vec2::new(p.x, -p.z)) + 0.15, p.z)
+            });
+            let color = unit_color(unit, selected || hover.is_some());
+            for k in 0..4 {
+                gizmos.line(corners[k], corners[(k + 1) % 4], color);
+            }
+        }
         let Some(mut figures) = figures else { continue };
         let moved = pos.distance(figures.last_pos);
         figures.last_pos = pos;
@@ -2047,6 +2062,29 @@ fn frame_bone(atlas: &BoneAtlas, frame: &[u32; 4], bone: usize) -> Option<[f32; 
 
 fn find(sim: &BattleSim, id: u32) -> Option<&LandUnit> {
     sim.unit(id)
+}
+
+/// The fallback outline's colour: blue for the player's alliance, red for the enemy. Paler as morale drops; grey when
+/// shattered or destroyed; yellow when selected or under the mouse.
+fn unit_color(unit: &LandUnit, selected: bool) -> Color {
+    if selected {
+        return Color::srgb(1.0, 0.9, 0.2);
+    }
+    let base = if unit.side == super::sim::PLAYER_SIDE {
+        Vec3::new(0.15, 0.3, 0.85)
+    } else {
+        Vec3::new(0.85, 0.15, 0.15)
+    };
+    let fade = match unit.morale.state {
+        MoraleState::Shattered => return Color::srgb(0.45, 0.45, 0.45),
+        _ if unit.men == 0 => return Color::srgb(0.45, 0.45, 0.45),
+        MoraleState::Broken => 0.65,
+        MoraleState::Wavering => 0.45,
+        MoraleState::Shaken => 0.25,
+        _ => 0.0,
+    };
+    let c = base.lerp(Vec3::ONE, fade);
+    Color::srgb(c.x, c.y, c.z)
 }
 
 /// Every frame: draws recent volleys (display only, from [`VolleyFx`]) with Bevy "gizmos"
