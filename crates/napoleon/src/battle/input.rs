@@ -353,11 +353,22 @@ fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, cam
     }
 }
 
-/// A stamp of what [`formation_plan`] and [`order_preview`] read of the selected units (position,
-/// facing, men, files, width, abilities): it changes when any of them does.
+/// A stamp of what [`formation_plan`] reads of the selected units (on the field, position, men,
+/// files, width, spacing, man radius, abilities): it changes when any of them does. [`order_preview`]
+/// reads the units live every frame.
 fn plan_stamp(sim: &BattleSim) -> u64 {
     sim.selection().iter().filter_map(|&id| sim.battle.unit_index(id).map(|i| &sim.battle.units[i])).fold(0xcbf2_9ce4_8422_2325, |h, u| {
-        let parts = [u.position.0.to_bits(), u.position.1.to_bits(), u.facing.to_bits(), u.men, u.formation_files, u.formation_width.to_bits(), u.active_abilities];
+        let parts = [
+            u32::from(super::sim::on_field(u)),
+            u.position.0.to_bits(),
+            u.position.1.to_bits(),
+            u.men,
+            u.formation_files,
+            u.formation_width.to_bits(),
+            u.formation_file_spacing.to_bits(),
+            u.man_radius.to_bits(),
+            u.active_abilities,
+        ];
         parts.iter().fold(h, |h, &p| (h ^ u64::from(p)).wrapping_mul(0x0100_0000_01b3))
     })
 }

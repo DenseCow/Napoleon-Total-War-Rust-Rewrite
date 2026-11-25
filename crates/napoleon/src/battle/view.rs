@@ -2330,10 +2330,11 @@ mod tests {
             let a = d.local(j, 0.5, u.position, at, u.facing).unwrap();
             assert!((a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3, "figure {j}: {a:?} vs {b:?}");
         }
-        // Turned outside a tick (paused: observed again in the same tick): each man is drawn where
-        // he stood on the field.
+        // The next tick takes up that move.
         tick += 1;
         d.observe(&u, &g, tick, 30, false);
+        // Turned outside a tick (paused: observed again in the same tick, below): each man is drawn
+        // where he stood on the field.
         let field = |d: &MenDrawn, facing: f32| -> Vec<(f32, f32)> {
             (0..30).map(|j| ntw_sim::battle::march::unit_frame_offset(facing, d.local(j, 0.5, u.position, at, facing).unwrap())).collect()
         };
