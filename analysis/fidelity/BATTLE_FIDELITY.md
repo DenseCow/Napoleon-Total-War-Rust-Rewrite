@@ -3062,8 +3062,11 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   at once (to walk off, on arrival, the HUD's rotate buttons) and its men, whose places are offsets in the
   unit's frame, turned rigidly with it, up to 19 m in one tick for a wide line. `LandUnit::turn_to` turns
   the frame and leaves each man where he stands, his offset from his turned slot what he then walks, as the
-  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static); test
-  `no_man_jumps_when_his_unit_turns`. PROVISIONAL: the drawn size
+  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static). A turn of 45° or more
+  re-slots the men in full (each to his nearest slot; the threshold is ours, PROVISIONAL), and a unit not
+  under a move order (standing, rotated by the HUD, just arrived) sends its men to their slots at once
+  (the reform's walk, `0x005736B0`); tests `no_man_jumps_when_his_unit_turns`,
+  `a_standing_unit_turned_walks_its_men_to_their_nearest_slots`. PROVISIONAL: the drawn size
   `UnitInfo::size_m` (the selection outline, and the spread of the muzzle flashes, `fx_draw::muzzle_of`) is
   set once at the battle's start and does not follow a new width.
 - **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no

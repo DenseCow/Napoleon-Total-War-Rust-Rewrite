@@ -446,6 +446,50 @@ mod tests {
         assert!(off < 0.3, "the men stand in their new slots ({off} m off)");
     }
 
+    /// A standing unit turned a little (the HUD's rotate buttons) walks its men to the turned
+    /// slots; one turned about (180°) gives each man his nearest slot, so none crosses the block;
+    /// a turn before the unit's first tick also leaves every man where he stands.
+    #[test]
+    fn a_standing_unit_turned_walks_its_men_to_their_nearest_slots() {
+        let line = |b: &mut Battle| {
+            let u = &mut b.units[0];
+            (u.men, u.max_men, u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (60, 60, 20, 20.0, 1.0, 0.3);
+            (u.walk_speed, u.run_speed, u.hold_position) = (1.5, 4.0, true);
+            b.units[1].hold_position = true;
+        };
+        let off = |b: &Battle| b.units[0].march.men.iter().map(|m| m.side.hypot(m.lag)).fold(0.0f32, f32::max);
+        // A 15° turn: the men walk to their slots and stand in them.
+        let mut b = battle();
+        line(&mut b);
+        for _ in 0..30 {
+            b.step();
+        }
+        let f = b.units[0].facing;
+        b.units[0].turn_to(f + 15f32.to_radians());
+        assert!(off(&b) > 0.5 && b.units[0].march.reforming, "the turn left the men to walk");
+        for _ in 0..100 {
+            b.step();
+        }
+        assert!(off(&b) < 0.3, "in the turned slots ({} m off)", off(&b));
+        // About turn: the farthest man has about a rank's depth to go, not the line's width.
+        let f = b.units[0].facing;
+        b.units[0].turn_to(f + std::f32::consts::PI);
+        assert!(off(&b) < 4.0, "nearest slots ({} m off)", off(&b));
+        // Before the first tick: every man is counted and stays where he stands.
+        let mut b = battle();
+        line(&mut b);
+        let before: Vec<(f32, f32)> = { b.units[0].march.ensure_men(60); b.units[0].men_standing().map(|m| m.pos).collect() };
+        b.units[0].march.men.clear();
+        b.units[0].turn_to(1.0);
+        let mut after: Vec<(u32, (f32, f32))> = b.units[0].men_standing().zip(&b.units[0].march.men).map(|(s, m)| (m.figure, s.pos)).collect();
+        after.sort_by_key(|a| a.0);
+        let mut moved = 0.0f32;
+        for (a, (_, c)) in before.iter().zip(&after) {
+            moved = moved.max((a.0 - c.0).hypot(a.1 - c.1));
+        }
+        assert!(moved < 1e-3, "a man moved {moved} m at the turn");
+    }
+
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain
     /// move keeps the walking facing.
     #[test]

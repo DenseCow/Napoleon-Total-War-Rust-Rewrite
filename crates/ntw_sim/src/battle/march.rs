@@ -392,6 +392,10 @@ where
 /// shape makes the re-slot pending without restarting the countdown ([`LandUnit::shape_kind`]).
 pub const RESLOT_TICKS: u32 = 20;
 
+/// The turn (radians) from which [`LandUnit::turn_to`] gives the men their nearest slots again
+/// (45°; PROVISIONAL, ours: the exe turns its men through their own moves, not traced).
+pub const RESLOT_TURN: f32 = std::f32::consts::FRAC_PI_4;
+
 /// Ticks between an idle unit's in-place checks (`[0x014A35D0]`, 10, set by `0x00407740`): the
 /// idle update `0x005577C0` runs the check in the ticks whose remainder by this is the unit's
 /// ([`LandUnit::in_place_check`]). CONFIRMED static.
@@ -1307,13 +1311,19 @@ impl LandUnit {
     /// [`ManMarch::lag`]) becomes what is left of his way there, which he then walks as any offset
     /// (the march, or the reform's walk to his slot). As [`LandUnit::relay`] leaves the men where
     /// they stand at a new lay-out (`0x00555CA0`, CONFIRMED static), no man moves at the turn
-    /// itself. PROVISIONAL: the unit's own facing still turns at once (the exe's comes from its
-    /// men's heading, the squad summary's vote, not ported for a moving unit); its men's figures
-    /// face it.
+    /// itself. A turn of [`RESLOT_TURN`] or more lays the formation out again in full, each man to
+    /// his nearest slot ([`LandUnit::relay`] with a re-slot), so no man crosses the block to the
+    /// slot his number had; a unit not under a move order (standing, the HUD's rotate buttons, or
+    /// just arrived) then sends its men to their slots at once ([`LandUnit::send_men_to_slots`],
+    /// the reform's walk), as a move's men walk theirs in the march. PROVISIONAL: the unit's own
+    /// facing still turns at once (the exe's comes from its men's heading, the squad summary's
+    /// vote, not ported for a moving unit); its men's figures face it; the re-slot threshold is ours.
     pub fn turn_to(&mut self, facing: f32) {
         if facing == self.facing {
             return;
         }
+        // Every man counted, also before the unit's first tick sized the march.
+        self.march.ensure_men(self.max_men as usize);
         let formation = self.formation();
         let alive = (self.men as usize).min(self.march.men.len());
         let old = self.facing;
@@ -1325,7 +1335,14 @@ impl LandUnit {
             let (right, back) = unit_frame_offset(facing, world);
             (m.side, m.lag) = (right - p.0, back - p.1);
         }
+        let turn = (facing - old + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         self.facing = facing;
+        if turn.abs() >= RESLOT_TURN {
+            self.relay(true);
+        }
+        if self.destination.is_none() {
+            self.send_men_to_slots();
+        }
     }
 
     /// Lays the formation out again over the living men as [`LandUnit::relay`] does, giving the men
@@ -1462,7 +1479,8 @@ impl LandUnit {
 pub(super) struct UnitStep {
     /// The unit's position before the step.
     pub pos: (f32, f32),
-    /// The unit's facing after the step (the men's places are laid out on it).
+    /// The unit's walking facing after the step (the men's places are laid out on it); on the
+    /// arrival tick the turn to the formation's facing comes after the march ([`LandUnit::turn_to`]).
     pub facing: f32,
     /// The unit's direction of travel (unit vector) and metres left to its goal before the step.
     pub dir: (f32, f32),

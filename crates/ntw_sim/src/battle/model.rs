@@ -1437,7 +1437,7 @@ impl Battle {
             u.gradient = gradient;
         }
         // Its men follow the same order, each at his own speed (`march`), laid out at the unit's
-        // facing after the step (the drawn one).
+        // walking facing after the step (the drawn one, but on arrival: the arrival turn follows).
         let dir = if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) };
         let (facing, fatigue) = (self.units[idx].facing, self.units[idx].fatigue_effect().speed);
         let unit_step = super::march::UnitStep { pos, facing, dir, len, covered: len.min(step), is_order, fatigue };
