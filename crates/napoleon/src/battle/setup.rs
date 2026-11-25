@@ -403,15 +403,18 @@ fn army_number(i: usize) -> u32 {
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
     // The player's alliance is one of the first two: the battle UI and the battle AI are built for
     // the original's two sides (`BattleSim::player_side()`), so the player's army is looked for
-    // there (`BattleSpec::player_army_in`), else (0, 0) as before. Every shipped battle has it
-    // there (`ntw_formats` test `battle_spec_install`). PROVISIONAL, modded files only: a playable
-    // army in a later alliance leaves that alliance with neither the player nor the AI.
-    let player = spec.player_army_in(2).unwrap_or((0, 0));
-    if let Some(p) = spec.player_army().filter(|&p| p != player) {
-        warn!(
+    // there (`BattleSpec::player_army_in`: a playable army first, else any army there). Every
+    // shipped battle has it there (`ntw_formats` test `battle_spec_install`). PROVISIONAL, modded
+    // files only: a playable army in a later alliance leaves that alliance with neither the player
+    // nor the AI; first two alliances without armies give the player none.
+    let player = spec.player_army_in(2);
+    match (player, spec.player_army()) {
+        (None, _) => warn!("Battle {key}: no army in the first two alliances; the player commands none"),
+        (Some(p), Some(f)) if p != f => warn!(
             "Battle {key}: the playable army (alliance {}, army {}) is not on the two sides shown; the player commands alliance {}, army {} instead",
-            p.0, p.1, player.0, player.1
-        );
+            f.0, f.1, p.0, p.1
+        ),
+        _ => {}
     }
     // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
     if spec.alliances.len() > usize::from(u8::MAX) + 1 {
@@ -425,7 +428,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
             sim.side_factions[ai] = army.faction.clone();
         }
         for (ri, army) in alliance.armies.iter().enumerate() {
-            let controllable = (ai, ri) == player;
+            let controllable = Some((ai, ri)) == player;
             if controllable {
                 sim.set_player_side(side);
                 sim.camera_start = army.camera_start.zip(army.camera_target);

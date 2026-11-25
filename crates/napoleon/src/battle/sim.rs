@@ -204,7 +204,8 @@ impl BattleSim {
 
     /// Sets the player's alliance: one of the two sides the battle UI and AI are built for (the
     /// setup keeps a modded battle's player there, `BattleSpec::player_army_in`). A side past the
-    /// second is a setup bug: a debug build stops, a release build logs it and keeps the first side.
+    /// second is a setup bug (no setup path gives one): a debug build stops; the release branch is
+    /// only defensive, it logs and keeps the first side.
     pub fn set_player_side(&mut self, side: u8) {
         debug_assert!(side <= 1, "player side {side}: the setup keeps the player on the two sides");
         if side > 1 {
@@ -329,6 +330,15 @@ mod tests {
     #[should_panic(expected = "the setup keeps the player on the two sides")]
     fn a_player_side_past_the_two_is_a_setup_bug() {
         sim().set_player_side(2);
+    }
+
+    /// A release build keeps the player on the first side for a side past the two.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn a_release_build_keeps_a_bad_player_side_on_the_first() {
+        let mut sim = sim();
+        sim.set_player_side(2);
+        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
