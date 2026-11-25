@@ -1400,7 +1400,8 @@ impl Battle {
         if len > 0.0
             && let Some(d) = self.defence_in_the_way(idx, pos, next)
         {
-            self.units[idx].turn_to(dy.atan2(dx));
+            // The unit stops here: a standing turn (`LandUnit::turn_in_place`).
+            self.units[idx].turn_in_place(dy.atan2(dx));
             self.defence_contact(idx, &d);
             let u = &mut self.units[idx];
             u.speed = 0.0;
@@ -1443,9 +1444,10 @@ impl Battle {
         let unit_step = super::march::UnitStep { pos, facing, dir, len, covered: len.min(step), is_order, fatigue };
         self.march_men(idx, Some(unit_step), Some(planned_order));
         // On arrival the unit turns to its formation's facing after this tick's march, so the men
-        // walk the last step along the way they came, then the turn (`LandUnit::turn_to`).
+        // walk the last step along the way they came, then the turn and their walk to the turned
+        // slots (`LandUnit::turn_in_place`).
         if let Some(f) = arrival_facing {
-            self.units[idx].turn_to(f);
+            self.units[idx].turn_in_place(f);
         }
     }
 

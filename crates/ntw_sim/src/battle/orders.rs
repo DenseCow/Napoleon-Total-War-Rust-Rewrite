@@ -448,7 +448,8 @@ mod tests {
 
     /// A standing unit turned a little (the HUD's rotate buttons) walks its men to the turned
     /// slots; one turned about (180°) gives each man his nearest slot, so none crosses the block;
-    /// a turn before the unit's first tick also leaves every man where he stands.
+    /// a turn before the unit's first tick (under the re-slot threshold) also leaves every man
+    /// where he stands (`LandUnit::turn_in_place`).
     #[test]
     fn a_standing_unit_turned_walks_its_men_to_their_nearest_slots() {
         let line = |b: &mut Battle| {
@@ -465,7 +466,7 @@ mod tests {
             b.step();
         }
         let f = b.units[0].facing;
-        b.units[0].turn_to(f + 15f32.to_radians());
+        b.units[0].turn_in_place(f + 15f32.to_radians());
         assert!(off(&b) > 0.5 && b.units[0].march.reforming, "the turn left the men to walk");
         for _ in 0..100 {
             b.step();
@@ -473,14 +474,14 @@ mod tests {
         assert!(off(&b) < 0.3, "in the turned slots ({} m off)", off(&b));
         // About turn: the farthest man has about a rank's depth to go, not the line's width.
         let f = b.units[0].facing;
-        b.units[0].turn_to(f + std::f32::consts::PI);
+        b.units[0].turn_in_place(f + std::f32::consts::PI);
         assert!(off(&b) < 4.0, "nearest slots ({} m off)", off(&b));
         // Before the first tick: every man is counted and stays where he stands.
         let mut b = battle();
         line(&mut b);
         let before: Vec<(f32, f32)> = { b.units[0].march.ensure_men(60); b.units[0].men_standing().map(|m| m.pos).collect() };
         b.units[0].march.men.clear();
-        b.units[0].turn_to(1.0);
+        b.units[0].turn_in_place(0.5);
         let mut after: Vec<(u32, (f32, f32))> = b.units[0].men_standing().zip(&b.units[0].march.men).map(|(s, m)| (m.figure, s.pos)).collect();
         after.sort_by_key(|a| a.0);
         let mut moved = 0.0f32;
@@ -488,6 +489,35 @@ mod tests {
             moved = moved.max((a.0 - c.0).hypot(a.1 - c.1));
         }
         assert!(moved < 1e-3, "a man moved {moved} m at the turn");
+        assert!(b.units[0].march.laid.is_none() && !b.units[0].march.reforming, "the first tick still lays out and reforms");
+    }
+
+    /// The turns of a moving unit (walking off, a new order to its side) leave its men to the
+    /// order's march: no reform walk, no re-slot, the order's speed kept.
+    #[test]
+    fn a_moving_units_turn_leaves_its_men_to_the_march() {
+        // The lay-outs an order 20 m away at `angle` from the unit's facing makes in 20 ticks.
+        let assignments = |angle: f32| {
+            let mut b = battle();
+            let u = &mut b.units[0];
+            (u.men, u.max_men, u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (60, 60, 20, 20.0, 1.0, 0.3);
+            (u.walk_speed, u.run_speed, u.hold_position) = (1.5, 4.0, true);
+            b.units[1].hold_position = true;
+            for _ in 0..30 {
+                b.step();
+            }
+            let (f, before) = (b.units[0].facing + angle, b.units[0].march.assignments);
+            assert!(b.order_move(1, (20.0 * f.cos(), 20.0 * f.sin())));
+            for _ in 0..20 {
+                b.step();
+                let u = &b.units[0];
+                assert!(!u.march.reforming && u.march.men.iter().all(|m| m.walk.is_none()), "no reform walk while moving");
+            }
+            b.units[0].march.assignments - before
+        };
+        // 60° to the side is not behind the front: no more lay-outs than straight ahead (no re-slot
+        // of the turn's own).
+        assert_eq!(assignments(60f32.to_radians()), assignments(0.0));
     }
 
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain

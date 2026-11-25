@@ -392,7 +392,7 @@ where
 /// shape makes the re-slot pending without restarting the countdown ([`LandUnit::shape_kind`]).
 pub const RESLOT_TICKS: u32 = 20;
 
-/// The turn (radians) from which [`LandUnit::turn_to`] gives the men their nearest slots again
+/// The turn (radians) from which [`LandUnit::turn_in_place`] gives the men their nearest slots again
 /// (45°; PROVISIONAL, ours: the exe turns its men through their own moves, not traced).
 pub const RESLOT_TURN: f32 = std::f32::consts::FRAC_PI_4;
 
@@ -1174,7 +1174,7 @@ impl LandUnit {
         self.march.last_men = self.men;
         let due = self.march.reslot && self.march.reslot_in == 0;
         let first = self.march.laid.is_none();
-        let standing = self.timed_move.is_none() && self.march.plan.is_none();
+        let standing = self.standing();
         if standing {
             // The idle state: the reform state's entry when the gate holds (the unit's first tick
             // always: a new idle task), else the idle update.
@@ -1309,15 +1309,12 @@ impl LandUnit {
     /// Turns the unit to `facing` (radians, the model's facing) with every man staying where he
     /// stands: his slot turns with the unit and his offset from it ([`ManMarch::side`],
     /// [`ManMarch::lag`]) becomes what is left of his way there, which he then walks as any offset
-    /// (the march, or the reform's walk to his slot). As [`LandUnit::relay`] leaves the men where
-    /// they stand at a new lay-out (`0x00555CA0`, CONFIRMED static), no man moves at the turn
-    /// itself. A turn of [`RESLOT_TURN`] or more lays the formation out again in full, each man to
-    /// his nearest slot ([`LandUnit::relay`] with a re-slot), so no man crosses the block to the
-    /// slot his number had; a unit not under a move order (standing, the HUD's rotate buttons, or
-    /// just arrived) then sends its men to their slots at once ([`LandUnit::send_men_to_slots`],
-    /// the reform's walk), as a move's men walk theirs in the march. PROVISIONAL: the unit's own
-    /// facing still turns at once (the exe's comes from its men's heading, the squad summary's
-    /// vote, not ported for a moving unit); its men's figures face it; the re-slot threshold is ours.
+    /// (the march of a moving unit, or [`LandUnit::turn_in_place`] for a standing one). As
+    /// [`LandUnit::relay`] leaves the men where they stand at a new lay-out (`0x00555CA0`,
+    /// CONFIRMED static), no man moves at the turn itself. It assigns no slots and issues no moves:
+    /// a moving unit's slots and moves stay the order's (see [`Battle::march_men`]). PROVISIONAL:
+    /// the unit's own facing still turns at once (the exe's comes from its men's heading, the squad
+    /// summary's vote, not ported for a moving unit); its men's figures face it.
     pub fn turn_to(&mut self, facing: f32) {
         if facing == self.facing {
             return;
@@ -1335,14 +1332,36 @@ impl LandUnit {
             let (right, back) = unit_frame_offset(facing, world);
             (m.side, m.lag) = (right - p.0, back - p.1);
         }
-        let turn = (facing - old + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         self.facing = facing;
+    }
+
+    /// The unit is not moving: no move of its own and no men still under its order's march (the
+    /// idle state of [`LandUnit::reslot_tick`]).
+    pub fn standing(&self) -> bool {
+        self.timed_move.is_none() && self.march.plan.is_none()
+    }
+
+    /// Turns a unit that is not moving (the HUD's rotate buttons, the formation's facing on
+    /// arrival, a stop at an enemy defence) to `facing` ([`LandUnit::turn_to`]) and sets its men
+    /// walking to their turned slots at once (the reform's walk, [`LandUnit::send_men_to_slots`]).
+    /// A turn of [`RESLOT_TURN`] or more first gives each man his nearest slot (a full re-slot,
+    /// counted as this tick's assignment and ending a pending loss re-slot), so no man crosses the
+    /// block to the slot his number had. Before the unit's first tick it only turns: that tick
+    /// lays out and reforms in full anyway ([`LandUnit::reslot_tick`]). PROVISIONAL: the threshold
+    /// is ours (the exe turns its men through their own moves, not traced).
+    pub fn turn_in_place(&mut self, facing: f32) {
+        let old = self.facing;
+        self.turn_to(facing);
+        if self.march.laid.is_none() {
+            return;
+        }
+        let turn = (facing - old + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI;
         if turn.abs() >= RESLOT_TURN {
             self.relay(true);
+            self.march.relaid = Some(true);
+            self.march.reslot = false;
         }
-        if self.destination.is_none() {
-            self.send_men_to_slots();
-        }
+        self.send_men_to_slots();
     }
 
     /// Lays the formation out again over the living men as [`LandUnit::relay`] does, giving the men
