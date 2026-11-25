@@ -1125,6 +1125,15 @@ impl LandUnit {
         self.march.laid.unwrap_or_else(|| self.fresh_formation())
     }
 
+    /// The line the unit forms to once dragged out to `width` metres
+    /// ([`LandUnit::set_frontage`] then a fresh lay-out of the line, without changing the unit):
+    /// what the drag's preview shows. Only a unit in line takes a dragged width
+    /// ([`LandUnit::drag_width_limits`]).
+    pub fn line_at_width(&self, width: f32) -> Formation {
+        let files = self.files_for_width(width).max(1) as usize;
+        Formation::new(0, self.men as usize, files, self.file_spacing(), self.rank_spacing())
+    }
+
     /// One unit tick of the men's layout (CONFIRMED static, see [`LandUnit::formation`]):
     /// - a loss since the last tick makes a re-slot pending and sets its countdown to
     ///   [`RESLOT_TICKS`] (`0x005755D0`, at each death);

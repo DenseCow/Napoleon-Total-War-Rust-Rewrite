@@ -397,6 +397,13 @@ mod tests {
         // floor((30.001 − 0.5) / 1.5) + 1 = 20 files, a 29 m span; the layout keeps 1.5 m files.
         let u = &mut b.units[0];
         assert_eq!((u.formation_files, u.formation_width, u.formed_width()), (20, 30.0, 29.0));
+        // The drag's preview shows the very line the order lays out.
+        let shown = u.line_at_width(30.0);
+        let mut fresh = u.clone();
+        fresh.march.laid = None;
+        for i in 0..160 {
+            assert_eq!(shown.place(i), fresh.formation().place(i), "man {i}");
+        }
         assert_eq!(u.set_frontage(80.0), 80.0, "the widest stays within the cap");
         assert_eq!(u.set_frontage(8.0), 8.0, "the narrowest gives its own files back");
         assert_eq!(u.files_for_width(1000.0), 160, "capped at the men");

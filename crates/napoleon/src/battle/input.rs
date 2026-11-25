@@ -118,6 +118,9 @@ pub struct MouseDrag {
     /// The unit under the mouse this frame (any side, on the battlefield, not over the HUD): its
     /// men show the mouse-over marker (`selection_markers`).
     pub hovered: Option<u32>,
+    /// While the right button drags out a line in the battle: the places the release would order
+    /// ([`formation_plan`]), shown by [`order_preview`]; empty otherwise.
+    pub preview: Vec<LinePlace>,
 }
 
 impl MouseDrag {
@@ -184,6 +187,18 @@ pub fn mouse(
         if buttons.just_pressed(MouseButton::Right) {
             drag.right = Some(Press { start: c, ground: ground_at(c), ctrl });
         }
+    }
+    // The line the right drag would order, while it is held (not in deployment, which places).
+    drag.preview.clear();
+    if buttons.pressed(MouseButton::Right)
+        && sim.phase() != BattlePhase::Deployment
+        && !over_hud
+        && let (Some(press), Some(c)) = (drag.right, cursor)
+        && press.start.distance(c) > DRAG_PX
+        && let (Some(start), Some(end)) = (press.ground, ground_at(c))
+    {
+        let plan = formation_plan(&sim, sim.selection(), start, end, camera_transform.forward().as_vec3());
+        drag.preview = plan;
     }
 
     if buttons.just_released(MouseButton::Left)
@@ -307,11 +322,24 @@ fn group_destinations(sim: &BattleSim, ids: &[u32], point: Vec2) -> Vec<(u32, Ve
     positions.into_iter().map(|(id, p)| (id, point + (p - centre))).collect()
 }
 
+/// A unit's place in a dragged-out line: `(id, centre, facing, new width)` ([`formation_line`]).
+pub type LinePlace = (u32, Vec2, f32, Option<f32>);
+
 /// A right drag from `start` to `end` (battlefield metres): the selection forms up along that line
 /// ([`formation_line`]) and each unit walks to its place and turns to face the line's front. One
 /// unit alone takes the drag's length as its new width (clamped to its limits,
 /// [`ntw_sim::battle::model::LandUnit::drag_width_limits`]); several keep their own widths.
 fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, camera_forward: Vec3) {
+    for (id, place, facing, width) in formation_plan(sim, ids, start, end, camera_forward) {
+        if sim.battle.order_move_formed(id, (place.x, place.y), facing, MoveSpeed::Walk, width) {
+            sim.script_events.push(super::ScriptEvent::Command { name: "Move", unit: Some(id), bool1: false });
+        }
+    }
+}
+
+/// The places [`order_formation`] orders the selection to, and the drag's preview shows
+/// ([`order_preview`]).
+fn formation_plan(sim: &BattleSim, ids: &[u32], start: Vec2, end: Vec2, camera_forward: Vec3) -> Vec<LinePlace> {
     let units: Vec<LineUnit> = ids
         .iter()
         .filter_map(|&id| sim.battle.unit_index(id).map(|i| (id, &sim.battle.units[i])))
@@ -335,12 +363,33 @@ fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, cam
             u.span_of_files(u.files_for_width(w))
         })
     };
-    let line = formation_line(&units, start, end, away, &span);
-    for (id, place, facing, width) in line {
-        if sim.battle.order_move_formed(id, (place.x, place.y), facing, MoveSpeed::Walk, width) {
-            sim.script_events.push(super::ScriptEvent::Command { name: "Move", unit: Some(id), bool1: false });
+    formation_line(&units, start, end, away, &span)
+}
+
+/// While the right button drags out a line: a marker on the ground at every man's place in it
+/// (the `entity_selection_marker` square, `selection_markers`). PROVISIONAL (ours): the
+/// original shows the dragged line with its proxy models (`infantry_proxy`, `cavalry_proxy`,
+/// `artillery_proxy`, `facing_arrow_proxy`, loaded by `0x0059D010`), whose placement is not traced
+/// yet; ours shows the line each man is ordered to, from the same layout the order uses
+/// ([`formation_plan`], `LandUnit::line_at_width`).
+pub fn order_preview(sim: Res<BattleSim>, drag: Res<MouseDrag>, quads: Option<ResMut<super::selection_markers::MarkerQuads>>) {
+    let Some(mut quads) = quads else { return };
+    for &(id, centre, facing, width) in &drag.preview {
+        let Some(u) = sim.battle.unit_index(id).map(|i| &sim.battle.units[i]) else { continue };
+        for p in line_places(u, centre, facing, width) {
+            quads.push(super::selection_markers::Marker::Selected, super::view::world_of(p), facing);
         }
     }
+}
+
+/// Where each man of `u` stands (battlefield metres) once formed at `centre` facing `facing`, at
+/// the dragged `width` (`None`: his own formation).
+fn line_places(u: &ntw_sim::battle::model::LandUnit, centre: Vec2, facing: f32, width: Option<f32>) -> impl Iterator<Item = Vec2> + '_ {
+    let line = width.map_or_else(|| u.formation(), |w| u.line_at_width(w));
+    (0..u.men as usize).map(move |i| {
+        let (x, y) = ntw_sim::battle::march::unit_frame_offset(facing, line.place(i));
+        centre + Vec2::new(x, y)
+    })
 }
 
 /// The metres between two units of a dragged-out line: the minimum width of several units adds
@@ -367,7 +416,7 @@ pub struct LineUnit {
 ///   the line from `start`.
 /// - Several: sorted by where they stand along the drag (`0x00682BA0`) and laid side by side
 ///   from `start`, each keeping its width, [`LINE_GAP_M`] apart (`0x0068E5C0`).
-pub fn formation_line(units: &[LineUnit], start: Vec2, end: Vec2, away: Vec2, span: &dyn Fn(u32, f32) -> f32) -> Vec<(u32, Vec2, f32, Option<f32>)> {
+pub fn formation_line(units: &[LineUnit], start: Vec2, end: Vec2, away: Vec2, span: &dyn Fn(u32, f32) -> f32) -> Vec<LinePlace> {
     let along = (end - start).try_normalize().unwrap_or(Vec2::X);
     // The front: the line's normal on the camera's far side.
     let mut front = along.perp();
@@ -489,5 +538,25 @@ mod tests {
         assert_eq!(one(90.0, Some((8.0, 60.0))).3, Some(60.0), "a long drag: the widest");
         assert_eq!((one(90.0, None).1, one(90.0, None).3), (Vec2::new(0.0, 10.0), None), "artillery keeps its width");
         assert!((one(30.0, None).2 - 0.0).abs() < 1e-6, "faces +x");
+    }
+
+    /// The user's report (2026-11-25): no preview while dragging. The preview puts every man on
+    /// the dragged line: as wide as the span the order forms to, centred on its place, with the
+    /// front rank on the front side.
+    #[test]
+    fn the_drag_preview_shows_every_man_on_the_dragged_line() {
+        let mut u = ntw_sim::battle::model::LandUnit::new(0, 0, 120, (0.0, 0.0));
+        (u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (40, 40.0, 1.0, 0.25);
+        // Facing +x: the line runs along y.
+        let (centre, facing) = (Vec2::new(50.0, 20.0), 0.0);
+        let men: Vec<Vec2> = line_places(&u, centre, facing, Some(30.0)).collect();
+        assert_eq!(men.len(), 120);
+        let (lo, hi) = men.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+        let span = u.span_of_files(u.files_for_width(30.0));
+        assert!((hi - lo + 2.0 * u.man_radius - span).abs() < 1e-3, "{lo}..{hi} vs span {span}");
+        assert!(((hi + lo) * 0.5 - centre.y).abs() < 0.6, "centred: {lo}..{hi}");
+        // The front rank stands farthest along the facing.
+        let front = men[..30].iter().map(|p| p.x).fold(f32::MIN, f32::max);
+        assert!(men[30..].iter().all(|p| p.x < front), "the first rank is the front");
     }
 }

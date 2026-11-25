@@ -941,14 +941,18 @@ impl GroundSpeed {
     }
 }
 
-/// Each figure's own march as drawn: where he stands in the unit's frame and his own speed, which
-/// the model's men keep (`ntw_sim::battle::march`: each man walks his own timed move at his own
-/// speed, and a re-lay gives him the nearest slot, UNITS_TERRAIN_FIDELITY.md §1.10 "Each man's
-/// timed move"). Observed after every model tick with the unit's [`GroundSpeed`] and drawn lerped
-/// by the tick fraction, as [`DrawnPose`]. Figure `j` is the model's man whose `figure` is `j`
-/// (the model keeps its men in slot order, so a re-slot moves him to another entry); a figure the
-/// model has no entry for (the unit not yet ticked) stands at slot `j`. A figure first seen starts
-/// where his own man stands.
+/// Each figure's own march as drawn: where he stands and his own speed, which the model's men keep
+/// (`ntw_sim::battle::march`: each man walks his own timed move at his own speed, and a re-lay
+/// gives him the nearest slot, UNITS_TERRAIN_FIDELITY.md §1.10 "Each man's timed move"). Observed
+/// after every model tick with the unit's [`GroundSpeed`], and drawn lerped by the tick fraction
+/// on the field, not in the unit's frame: a unit that turns in a tick (an order, the arrival
+/// facing, a wheel) turns its frame by up to half a turn, and offsets lerped in that turning frame
+/// swung a wide line's men tens of metres out and back within the tick (the user's 2026-11-25
+/// report, "teleport back and forth"; the model keeps them where they stand, `LandUnit::turn_to`).
+/// Each figure is then drawn in the unit's drawn frame ([`DrawnPose`]) at that field place.
+/// Figure `j` is the model's man whose `figure` is `j` (the model keeps its men in slot order,
+/// so a re-slot moves him to another entry); a figure the model has no entry for (the unit not
+/// yet ticked) stands at slot `j`. A figure first seen starts where his own man stands.
 ///
 /// A man's speed is kept as his difference from the unit's drawn speed ([`GroundSpeed::at`]), so
 /// the unit's own rules (the placement tick skipped, the still ticks bridged) stay the unit's: in a
@@ -957,14 +961,17 @@ impl GroundSpeed {
 /// still walking to their places after the unit stopped).
 #[derive(Debug, Clone, Default)]
 struct MenDrawn {
-    /// Per figure: [right (m), back (m), speed difference (m/s)] before and after the last model
-    /// tick, in the unit's frame.
+    /// Per figure: [x (m), y (m), speed difference (m/s)] before and after the last model tick,
+    /// x and y on the model's field plane.
     from: Vec<[f32; 3]>,
     to: Vec<[f32; 3]>,
     /// Per figure: the model's entry he is in (`LandUnit::march`), at the last observation.
     entry: Vec<u32>,
     /// The model tick last seen.
     tick: u32,
+    /// The unit's model position at the last observation: a unit the model places between
+    /// observations (deployment) takes its men along at once.
+    at_pos: (f32, f32),
 }
 
 impl MenDrawn {
@@ -989,6 +996,9 @@ impl MenDrawn {
         }
         let ticked = tick != self.tick;
         self.tick = tick;
+        // A step longer than a march step is a placement, drawn at once (as [`DrawnPose`]).
+        let placed = (unit.position.0 - self.at_pos.0).hypot(unit.position.1 - self.at_pos.1) >= MAX_BLEND_STEP_M;
+        self.at_pos = unit.position;
         let speed = |m: &ntw_sim::battle::march::ManMarch| {
             if ground.still_ticks == 0 {
                 m.speed - ground.speed
@@ -1003,23 +1013,38 @@ impl MenDrawn {
             let k = self.entry[j] as usize;
             let (x, z) = laid.place(k);
             let (dx, dz, v) = men.get(k).map_or((0.0, 0.0, 0.0), |m| (m.side, m.lag, speed(m)));
+            let (ox, oy) = ntw_sim::battle::march::unit_frame_offset(unit.facing, (x + dx, z + dz));
+            let field = [unit.position.0 + ox, unit.position.1 + oy];
             // A figure first seen stands where his own man stands, not lerped from elsewhere.
             if j >= seen {
-                *to = [x + dx, z + dz, 0.0];
+                *to = [field[0], field[1], 0.0];
             }
             // The fallen keep where they fell (their entry is no longer laid out).
-            let now = if k < unit.men as usize || men.is_empty() { [x + dx, z + dz, v] } else { [to[0], to[1], 0.0] };
-            // The model did not tick (paused, deployment): nothing moves, a placement shows at once.
-            *from = if ticked { *to } else { [now[0], now[1], 0.0] };
-            *to = if ticked { now } else { [now[0], now[1], 0.0] };
+            let now = if k < unit.men as usize || men.is_empty() { [field[0], field[1], v] } else { [to[0], to[1], 0.0] };
+            // The model did not tick (paused, deployment) or placed the unit: nothing moves, a
+            // placement shows at once.
+            let still = !ticked || placed;
+            *from = if still { [now[0], now[1], 0.0] } else { *to };
+            *to = if still { [now[0], now[1], 0.0] } else { now };
         }
     }
 
-    /// Figure `j`'s [right, back, speed difference] `alpha` (0..1) of the way through the next tick.
+    /// Figure `j`'s [x, y, speed difference] `alpha` (0..1) of the way through the next tick, on
+    /// the field plane.
     fn at(&self, j: usize, alpha: f32) -> Option<[f32; 3]> {
         let (a, b) = (self.from.get(j)?, self.to.get(j)?);
         let t = alpha.clamp(0.0, 1.0);
         Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t])
+    }
+
+    /// Figure `j`'s [right, back] `alpha` of the way through the next tick in the frame of the
+    /// unit drawn at `pos` / `facing` ([`DrawnPose::blend`]), whose model position is `model_pos`
+    /// (one the model changed since the last observation moves the men with it).
+    fn local(&self, j: usize, alpha: f32, model_pos: (f32, f32), pos: Vec2, facing: f32) -> Option<(f32, f32)> {
+        let a = self.at(j, alpha)?;
+        let (sx, sy) = (model_pos.0 - self.at_pos.0, model_pos.1 - self.at_pos.1);
+        // `unit_frame_offset` is its own inverse: field offset → (right, back).
+        Some(ntw_sim::battle::march::unit_frame_offset(facing, (a[0] + sx - pos.x, a[1] + sy - pos.y)))
     }
 
     /// Figure `j`'s speed difference `alpha` of the way through the next tick (0 before he is seen).
@@ -1604,7 +1629,7 @@ pub fn spawn_missing_views(
                 last_facing: unit.facing,
                 seated: false,
                 ground: GroundSpeed::new(pos, sim.battle.tick, on_ground(unit)),
-                march: MenDrawn { tick: sim.battle.tick, ..MenDrawn::default() },
+                march: MenDrawn { tick: sim.battle.tick, at_pos: unit.position, ..MenDrawn::default() },
                 acts: vec![actions::ManAct::default(); men.len()],
                 blends: (0..=men.len()).map(|_| ClipBlend::with_scale(display_scale(&mut display_rng))).collect(),
                 lods: vec![0; men.len()],
@@ -1823,13 +1848,13 @@ pub fn sync_views(
             // Each man stands on the terrain under him (the unit's own origin is on the ground
             // at its centre; the parent only turns about Y, so a local y offset = a world one).
             // The fallen are detached and stay where they fell.
-            // He stands where the model's man stands in the unit's frame (`MenDrawn`); his
-            // transform is written only when that changed or the unit moved.
-            let at = figures.march.at(i, alpha);
-            let shifted = at.is_some_and(|a| men_tf.get(*man).is_ok_and(|t| (t.translation.x - a[0]).abs() > 1e-4 || (t.translation.z - a[1]).abs() > 1e-4));
+            // He stands where the model's man stands on the field (`MenDrawn`), in the drawn
+            // unit's frame; his transform is written only when that changed or the unit moved.
+            let at = figures.march.local(i, alpha, unit.position, pos, facing);
+            let shifted = at.is_some_and(|a| men_tf.get(*man).is_ok_and(|t| (t.translation.x - a.0).abs() > 1e-4 || (t.translation.z - a.1).abs() > 1e-4));
             if (reseat || shifted) && !dead && let Ok(mut man_tf) = men_tf.get_mut(*man) {
                 if let Some(a) = at {
-                    (man_tf.translation.x, man_tf.translation.z) = (a[0], a[1]);
+                    (man_tf.translation.x, man_tf.translation.z) = a;
                 }
                 let p = transform.transform_point(Vec3::new(man_tf.translation.x, 0.0, man_tf.translation.z));
                 man_tf.translation.y = ground(Vec2::new(p.x, -p.z)) - transform.translation.y;
@@ -2188,7 +2213,9 @@ mod tests {
             d.observe(&u, &g, tick, 2);
         }
         assert!((d.speed(0, 1.0) - 0.2).abs() < 1e-4 && d.speed(1, 1.0).abs() < 1e-4, "{d:?}");
-        assert_eq!(d.at(0, 0.5).map(|a| a[1]), Some(u.man_place(0).1 + 1.0), "his lag behind his slot");
+        let here = Vec2::new(u.position.0, u.position.1);
+        let lag = d.local(0, 1.0, u.position, here, u.facing).unwrap().1;
+        assert!((lag - (u.man_place(0).1 + 1.0)).abs() < 1e-4, "his lag behind his slot: {lag}");
         (u.speed, u.moved) = (0.0, false);
         (u.march.men[0].speed, u.march.men[1].speed) = (1.0, 0.0);
         for tick in 4..3 + STILL_TICKS {
@@ -2231,6 +2258,34 @@ mod tests {
         assert_eq!((d.entry(0), d.entry(3), d.entry(1)), (3, 0, 1));
     }
 
+    /// The user's report (2026-11-25): men teleported out and back when their unit turned. A unit
+    /// turned in a tick keeps its men where they stand (`LandUnit::turn_to`), and between the two
+    /// ticks, with the unit's frame drawn half turned, every figure is still drawn there.
+    #[test]
+    fn a_turning_units_men_stay_put_between_ticks() {
+        let mut u = LandUnit::new(0, 0, 60, (10.0, 20.0));
+        u.march.ensure_men(60);
+        let g = GroundSpeed::new(Vec2::new(10.0, 20.0), 0, true);
+        let mut d = MenDrawn { at_pos: u.position, ..MenDrawn::default() };
+        let mut pose = DrawnPose::at(Vec2::new(10.0, 20.0), u.facing);
+        d.observe(&u, &g, 1, 60);
+        let before: Vec<_> = (0..60).map(|j| d.at(j, 1.0).unwrap()).collect();
+        for moved in [true, false] {
+            u.turn_to(u.facing + std::f32::consts::FRAC_PI_2);
+            pose.observe(Vec2::new(10.0, 20.0), u.facing, moved);
+            d.observe(&u, &g, if moved { 2 } else { 3 }, 60);
+            for alpha in [0.0, 0.3, 0.5, 1.0] {
+                let (pos, facing) = pose.blend(Vec2::new(10.0, 20.0), u.facing, alpha);
+                for (j, b) in before.iter().enumerate() {
+                    let l = d.local(j, alpha, u.position, pos, facing).unwrap();
+                    let (x, y) = ntw_sim::battle::march::unit_frame_offset(facing, l);
+                    let off = (pos.x + x - b[0]).hypot(pos.y + y - b[1]);
+                    assert!(off < 1e-3, "moved {moved}, alpha {alpha}: figure {j} drawn {off} m off");
+                }
+            }
+        }
+    }
+
     /// A unit first seen after it ticked (spawned late): each figure starts where his own man
     /// stands, not lerped from slot `j` to him.
     #[test]
@@ -2246,7 +2301,8 @@ mod tests {
             assert_eq!((a[0], a[1]), (b[0], b[1]), "figure {j} does not move");
         }
         let p = u.man_place(0);
-        assert_eq!(d.at(3, 0.0).map(|a| (a[0], a[1])), Some((p.0, p.1 + 0.5)), "figure 3 is man 0");
+        let l = d.local(3, 0.0, u.position, Vec2::new(u.position.0, u.position.1), u.facing).unwrap();
+        assert!((l.0 - p.0).abs() < 1e-4 && (l.1 - p.1 - 0.5).abs() < 1e-4, "figure 3 is man 0: {l:?}");
     }
     /// The user's report (2026-10-08): walking men looked low-fps, drawn in 0.1 s model steps.
     /// Between ticks a marching unit is drawn on the line between its last two tick poses.

@@ -3108,6 +3108,21 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   the AI order his own army.
 - Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
   rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
+- **The drag preview** (user, 2026-11-25: none shown). The original loads four proxy models for it
+  (`0x0059D010`: `facing_arrow_proxy`, `artillery_proxy`, `cavalry_proxy`, `infantry_proxy`, all in
+  `rigidmodels/3dindicators/`; the object sits at `+0x444` of the object `0x00596B00` builds), and the
+  key bindings `Current_Selection_Proxy_Turn_Left/Right`, `..._Increase_Rank/File_Proxy` edit it.
+  Where and how many proxies it lays is UNKNOWN (not traced). Ours, PROVISIONAL: while the right button
+  drags out a line, every man of the selection gets the selection square at his place in it
+  (`input::order_preview`), from the same plan the release orders (`input::formation_plan`) and, for
+  a dragged width, `LandUnit::line_at_width` (the line `set_frontage` lays). Test:
+  `input::tests::the_drag_preview_shows_every_man_on_the_dragged_line`.
+- **Men drawn on the field, not in the turning frame** (user, 2026-11-25: men teleported back and
+  forth). The view lerped each man's offset in the unit's frame while the unit's facing was lerped
+  (or snapped) apart from it, so in the tick a unit turned (an order, the arrival facing) a wide
+  line's men swung up to tens of metres out and back. Ours now lerps each figure's field position and
+  draws it in the drawn frame (`view::MenDrawn::local`); a unit placed between ticks takes its men
+  along. Test: `view::tests::a_turning_units_men_stay_put_between_ticks`.
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.

@@ -190,6 +190,7 @@ impl Plugin for BattlePlugin {
                     view::spawn_missing_views,
                     flag::spawn_flags,
                     view::sync_views,
+                    input::order_preview,
                     selection_markers::draw,
                     // After the views: a tracking camera follows its unit's view this frame.
                     view::move_camera,
