@@ -237,6 +237,16 @@ pub fn defence_pieces(u: &super::model::LandUnit, kind: u8) -> Vec<Defence> {
     }
 }
 
+/// A line's files and width in metres ([`super::model::LandUnit::formation_files`],
+/// [`super::model::LandUnit::formation_width`]): the unit's own, or one a drag asks for. 0 is unknown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frontage {
+    /// Men in one rank (0: unknown).
+    pub files: u32,
+    /// The files' width at their spacing, files × spacing (0: unknown).
+    pub width: f32,
+}
+
 impl super::model::LandUnit {
     /// The formation's width in metres: the squad summary's (`+0x650`), measured from the men where
     /// they stand ([`super::model::LandUnit::squad_box`], `0x0053D1A0`, CONFIRMED static): the
@@ -251,14 +261,15 @@ impl super::model::LandUnit {
     /// is only as wide as its men, so they do not spread out), else those files at the PROVISIONAL
     /// [`FILE_SPACING_M`]. Both read the one count the exe's files cap reads (the living men, unit
     /// `+0x18`), so a fresh layout's width and grid agree.
-    pub(super) fn fresh_width(&self) -> f32 {
-        if self.formation_width <= 0.0 {
-            return self.files() as f32 * FILE_SPACING_M;
+    /// `f` is the line's files and width: the unit's own ([`Self::frontage`]) or a dragged one.
+    pub(super) fn fresh_width_at(&self, f: Frontage) -> f32 {
+        if f.width <= 0.0 {
+            return self.files_at(f) as f32 * FILE_SPACING_M;
         }
-        if self.formation_files > 0 {
-            self.formation_width * self.files() as f32 / self.formation_files as f32
+        if f.files > 0 {
+            f.width * self.files_at(f) as f32 / f.files as f32
         } else {
-            self.formation_width
+            f.width
         }
     }
 
@@ -333,12 +344,22 @@ impl super::model::LandUnit {
     /// at the order's `+0x1C`; a move's lay-out, `0x00576B30`, re-forms the men at the order's
     /// width), so ours sets it with the order ([`super::Battle::order_move_formed`]).
     pub fn set_frontage(&mut self, width: f32) -> f32 {
-        let spacing = self.file_spacing();
+        let f = self.frontage_for(width);
+        self.formation_file_spacing = self.file_spacing();
+        (self.formation_files, self.formation_width) = (f.files, f.width);
+        self.span_of_files(f.files)
+    }
+
+    /// The unit's own line: its files and width (`formation_files`, `formation_width`).
+    pub fn frontage(&self) -> Frontage {
+        Frontage { files: self.formation_files, width: self.formation_width }
+    }
+
+    /// The line [`Self::set_frontage`] gives for a span of `width` metres: the files it holds at
+    /// the unit's file spacing (which the re-form keeps) and their width.
+    pub fn frontage_for(&self, width: f32) -> Frontage {
         let files = self.files_for_width(width);
-        self.formation_file_spacing = spacing;
-        self.formation_files = files;
-        self.formation_width = files as f32 * spacing;
-        self.span_of_files(files)
+        Frontage { files, width: files as f32 * self.file_spacing() }
     }
 
     /// The formation's depth in metres: the squad summary's (`+0x654`), measured as

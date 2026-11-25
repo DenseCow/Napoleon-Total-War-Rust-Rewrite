@@ -121,6 +121,10 @@ pub struct MouseDrag {
     /// While the right button drags out a line in the battle: the places the release would order
     /// ([`formation_plan`]), shown by [`order_preview`]; empty otherwise.
     pub preview: Vec<LinePlace>,
+    /// What [`Self::preview`] was laid out for: the drag's ground line and the camera's view
+    /// direction, and the selection then.
+    preview_for: Option<(Vec2, Vec2, Vec3)>,
+    preview_ids: Vec<u32>,
 }
 
 impl MouseDrag {
@@ -189,16 +193,27 @@ pub fn mouse(
         }
     }
     // The line the right drag would order, while it is held (not in deployment, which places).
-    drag.preview.clear();
-    if buttons.pressed(MouseButton::Right)
+    // Laid out again only when the drag's line, the view or the selection changed.
+    let line = if buttons.pressed(MouseButton::Right)
         && sim.phase() != BattlePhase::Deployment
         && !over_hud
         && let (Some(press), Some(c)) = (drag.right, cursor)
         && press.start.distance(c) > DRAG_PX
         && let (Some(start), Some(end)) = (press.ground, ground_at(c))
     {
-        let plan = formation_plan(&sim, sim.selection(), start, end, camera_transform.forward().as_vec3());
-        drag.preview = plan;
+        Some((start, end, camera_transform.forward().as_vec3()))
+    } else {
+        None
+    };
+    if line != drag.preview_for || drag.preview_ids != sim.selection() {
+        drag.preview_for = line;
+        drag.preview_ids.clear();
+        drag.preview_ids.extend_from_slice(sim.selection());
+        drag.preview.clear();
+        if let Some((start, end, forward)) = line {
+            let plan = formation_plan(&sim, sim.selection(), start, end, forward);
+            drag.preview.extend(plan);
+        }
     }
 
     if buttons.just_released(MouseButton::Left)

@@ -316,7 +316,7 @@ pub struct LandUnit {
     /// `0x005C2B80`, CONFIRMED): the hit test skips its soldiers (`0x00679B20`).
     pub invincible: bool,
     /// The formation's width in metres (formation `+0x24`; set from the unit's files and spacing).
-    /// 0 = unknown: [`LandUnit::fresh_width`] falls back to the files at
+    /// 0 = unknown: [`LandUnit::fresh_width_at`] falls back to the files at
     /// [`super::abilities::FILE_SPACING_M`].
     pub formation_width: f32,
     /// Metres between the formation's ranks (close order, `spacing_rank_close`). Its depth is this

@@ -3120,9 +3120,11 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
 - **Men drawn on the field, not in the turning frame** (user, 2026-11-25: men teleported back and
   forth). The view lerped each man's offset in the unit's frame while the unit's facing was lerped
   (or snapped) apart from it, so in the tick a unit turned (an order, the arrival facing) a wide
-  line's men swung up to tens of metres out and back. Ours now lerps each figure's field position and
-  draws it in the drawn frame (`view::MenDrawn::local`); a unit placed between ticks takes its men
-  along. Test: `view::tests::a_turning_units_men_stay_put_between_ticks`.
+  line's men swung up to tens of metres out and back. Ours now lerps each figure's field offset from
+  the unit's position and draws it in the drawn frame (`view::MenDrawn::local`); a pose the model
+  changes in a tick without moving the unit (the same `moved` rule as `DrawnPose`) shows the men there
+  at once, and one changed outside a tick (paused) carries them in the unit's frame. Tests:
+  `view::tests::{a_turning_units_men_stay_put_between_ticks, a_placed_units_men_go_with_it_at_once}`.
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.

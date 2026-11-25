@@ -1054,7 +1054,7 @@ impl LandUnit {
 
     /// The formation laid out fresh over the living men in the unit's shape kind
     /// ([`LandUnit::shape_kind`]; the shape's layout vfunc `+0x24` run with the unit's soldier
-    /// count `+0x18`): the files of [`LandUnit::files`], the spacing of [`LandUnit::fresh_width`]
+    /// count `+0x18`): the files of [`LandUnit::files`], the spacing of [`LandUnit::fresh_width_at`]
     /// over them (the unit's p3) and the pitch [`LandUnit::rank_spacing`] (its p4), which the
     /// shape factory `0x00531680` hands the line and kinds 1 and 5 alike (CONFIRMED static).
     /// Kind 6 has its own: [`LIGHT_INFANTRY_SPACING_M`] and [`LIGHT_INFANTRY_PITCH_M`]
@@ -1070,7 +1070,7 @@ impl LandUnit {
     /// (`0x00576B30`) passes the order's width, the same `+0x384` → `+0x24` float its path query
     /// carries (`0x0054D900`). That width is not narrowed by the men (only the files are capped),
     /// so ours takes [`LandUnit::formation_width`] (else the fallback of
-    /// [`LandUnit::fresh_width`]). Its p1, CONFIRMED static for a unit on foot: ability 6 writes
+    /// [`LandUnit::fresh_width_at`]). Its p1, CONFIRMED static for a unit on foot: ability 6 writes
     /// no shape params; the unit set-up `0x0051B7D0` sets p1 = p2 = twice the unit's `+0x2EC`
     /// (`0x0051C739` / `0x0051C747`), the largest soldier radius `+0x58` (`0x0051C200`,
     /// `0x0051C43C`, `0x0051C691`). Of the other writers (the callers of `0x00579780`), the
@@ -1087,18 +1087,23 @@ impl LandUnit {
     /// PROVISIONAL: kind 6 keeps the line's files (the exe's come from `0x00642D90` over the width
     /// the light-infantry task `0x00515210` re-forms to, not traced).
     fn fresh_formation(&self) -> Formation {
+        self.fresh_formation_at(self.frontage())
+    }
+
+    /// [`LandUnit::fresh_formation`] for the line's files and width `f` (the unit's own, or a dragged one).
+    fn fresh_formation_at(&self, f: super::abilities::Frontage) -> Formation {
         let kind = self.shape_kind();
         let men = self.men as usize;
-        let files = (self.files() as usize).max(1);
+        let files = (self.files_at(f) as usize).max(1);
         let (files, spacing, pitch) = match kind {
             6 => (files, LIGHT_INFANTRY_SPACING_M, LIGHT_INFANTRY_PITCH_M),
             2 | 4 => (files, SQUARE_SPACING_M, SQUARE_SPACING_M),
             3 => {
-                let width = if self.formation_width > 0.0 { self.formation_width } else { self.fresh_width() };
+                let width = if f.width > 0.0 { f.width } else { self.fresh_width_at(f) };
                 let wall = line_files(width, self.man_radius, SQUARE_SPACING_M) as usize;
                 (wall.min(men).max(1), SQUARE_SPACING_M, SQUARE_SPACING_M)
             }
-            _ => (files, self.fresh_width() / files as f32, self.rank_spacing()),
+            _ => (files, self.fresh_width_at(f) / files as f32, self.rank_spacing()),
         };
         Formation::new(kind, men, files, spacing, pitch)
     }
@@ -1125,13 +1130,11 @@ impl LandUnit {
         self.march.laid.unwrap_or_else(|| self.fresh_formation())
     }
 
-    /// The line the unit forms to once dragged out to `width` metres
-    /// ([`LandUnit::set_frontage`] then a fresh lay-out of the line, without changing the unit):
-    /// what the drag's preview shows. Only a unit in line takes a dragged width
-    /// ([`LandUnit::drag_width_limits`]).
+    /// The formation the unit lays out once dragged out to `width` metres: the fresh lay-out at
+    /// the line [`LandUnit::set_frontage`] gives ([`LandUnit::frontage_for`]), without changing the
+    /// unit. What the drag's preview shows.
     pub fn line_at_width(&self, width: f32) -> Formation {
-        let files = self.files_for_width(width).max(1) as usize;
-        Formation::new(0, self.men as usize, files, self.file_spacing(), self.rank_spacing())
+        self.fresh_formation_at(self.frontage_for(width))
     }
 
     /// One unit tick of the men's layout (CONFIRMED static, see [`LandUnit::formation`]):
