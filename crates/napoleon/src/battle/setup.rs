@@ -416,6 +416,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
         for (ri, army) in alliance.armies.iter().enumerate() {
             let controllable = (ai, ri) == player;
             if controllable {
+                sim.player_side = side;
                 sim.camera_start = army.camera_start.zip(army.camera_target);
                 sim.deployment_area = army.deployment_area;
             }
@@ -581,7 +582,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             }
             unit.facing = facing;
             unit_info.faction = sim.side_factions[side].clone();
-            unit_info.controllable = side == usize::from(super::sim::PLAYER_SIDE);
+            unit_info.controllable = side == usize::from(sim.player_side);
             unit_info.army = (side, 0);
             built.push(Built { unit, info: unit_info });
             next_id += 1;
@@ -636,6 +637,8 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
         let area = setup.deployment.as_ref().and_then(|d| d.alliances.get(side)).and_then(|a| a.areas.get(ri).or_else(|| a.areas.first()));
         if army.human && sim.deployment_area.is_none() {
             sim.deployment_area = area.cloned();
+            // The first human army's alliance is the player's.
+            sim.player_side = side as u8;
         }
         let mut built = Vec::new();
         for (key, xp) in &army.units {
@@ -1445,6 +1448,16 @@ mod tests {
             assert!(area_contains(area, u.position), "{} at {:?} outside its area", i.key, u.position);
         }
         assert!(sim.deployment_area.is_some(), "the player's area is shown");
+        assert_eq!(sim.player_side, 0);
+        // The human army on the second alliance: that side is the player's.
+        let mut start = start;
+        for a in &mut start.custom {
+            a.human = !a.human;
+        }
+        let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start), Some(0.75));
+        let sim = build_battle(&db, &setup, FIRST_SEED);
+        assert_eq!(sim.player_side, 1);
+        assert!(sim.battle.units.iter().zip(sim.infos()).all(|(u, i)| i.controllable == (u.side == 1)));
     }
 
     fn area(orientation: f32, width: f32) -> DeploymentArea {

@@ -1106,9 +1106,9 @@ pub fn spawn_camera(
     // The start view as an orbit: (focus, distance, yaw, pitch).
     let mut orbit = (Vec3::new(30.0, 0.0, 90.0), 170.0, 0.0, 0.4);
     let mut harness = false;
-    // Start behind the player's army (side 0), looking the way it faces.
+    // Start behind the player's army (`BattleSim::player_side`), looking the way it faces.
     if let Some(sim) = sim.as_ref() {
-        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == super::sim::PLAYER_SIDE).collect();
+        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == sim.player_side).collect();
         if let Some(first) = mine.first() {
             let n = mine.len() as f32;
             let centre = mine.iter().fold(Vec2::ZERO, |a, u| a + Vec2::new(u.position.0, u.position.1)) / n;
@@ -1700,7 +1700,7 @@ pub fn sync_views(
         // mouse, blue for the player's alliance and red for the enemy.
         let info = view.info(&sim).filter(|_| !unit.off_field());
         let selected = info.is_some() && sim.is_selected(unit.id);
-        let hover = (info.is_some() && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == super::sim::PLAYER_SIDE {
+        let hover = (info.is_some() && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == sim.player_side {
             selection_markers::Marker::MouseOver
         } else {
             selection_markers::Marker::MouseOverEnemy
@@ -1714,7 +1714,7 @@ pub fn sync_views(
                 let p = transform.transform_point(Vec3::new(x, 0.0, z));
                 Vec3::new(p.x, ground(Vec2::new(p.x, -p.z)) + 0.15, p.z)
             });
-            let color = unit_color(unit, selected || hover.is_some());
+            let color = unit_color(unit, sim.player_side, selected);
             for k in 0..4 {
                 gizmos.line(corners[k], corners[(k + 1) % 4], color);
             }
@@ -2065,12 +2065,12 @@ fn find(sim: &BattleSim, id: u32) -> Option<&LandUnit> {
 }
 
 /// The fallback outline's colour: blue for the player's alliance, red for the enemy. Paler as morale drops; grey when
-/// shattered or destroyed; yellow when selected or under the mouse.
-fn unit_color(unit: &LandUnit, selected: bool) -> Color {
+/// shattered or destroyed; yellow when selected.
+fn unit_color(unit: &LandUnit, player_side: u8, selected: bool) -> Color {
     if selected {
         return Color::srgb(1.0, 0.9, 0.2);
     }
-    let base = if unit.side == super::sim::PLAYER_SIDE {
+    let base = if unit.side == player_side {
         Vec3::new(0.15, 0.3, 0.85)
     } else {
         Vec3::new(0.85, 0.15, 0.15)

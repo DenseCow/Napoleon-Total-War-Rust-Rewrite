@@ -17,8 +17,8 @@
 //!
 //! Ours: the view (`super::view::sync_views`) hands every marked man's drawn position and facing
 //! to [`MarkerQuads`]; [`draw`] writes them into one mesh per marker kind when they changed (a
-//! standing unit's stay as they are), reusing its buffers, with the entity's height at least 0.1 as
-//! the original clamps it. PROVISIONAL: the height argument is taken as the square's lift above the ground under
+//! standing unit's stay as they are), reusing its buffers. Not ported: the original clamps the entity's height to at least 0.1
+//! (`0x00789BD0`), in a frame not traced against our terrain heights (ours can be below 0). PROVISIONAL: the height argument is taken as the square's lift above the ground under
 //! the man (INFERRED from the sizes of the two); the decal is a flat square, not projected on
 //! the slope; the unit under the mouse is the one whose centre is nearest the ground point
 //! (`input::unit_near`, the original picks a soldier).
@@ -107,8 +107,8 @@ pub fn enter(
                 MeshMaterial3d(material),
                 Transform::IDENTITY,
                 Visibility::Hidden,
-                // The squares are rewritten in world space every frame: bounds from the first
-                // write would go stale and cull them.
+                // The squares are rewritten in world space whenever the marks change: bounds from the
+                // first write would go stale and cull them.
                 bevy::camera::visibility::NoFrustumCulling,
                 bevy::light::NotShadowCaster,
                 DespawnOnExit(GameMode::Battle),
@@ -172,9 +172,7 @@ fn write_quads(mesh: &mut Mesh, marks: &[(Vec3, f32)], size: f32, lift: f32) {
     if let Some(VertexAttributeValues::Float32x3(p)) = mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION) {
         p.clear();
         for &(ground, facing) in marks {
-            // The man's height is at least 0.1 (`0x00789BD0` clamps the entity's height so).
-            let at = Vec3::new(ground.x, ground.y.max(0.1) + lift, ground.z);
-            p.extend(corners(at, facing, size).map(|c| c.to_array()));
+            p.extend(corners(ground + Vec3::Y * lift, facing, size).map(|c| c.to_array()));
         }
     }
     if let Some(VertexAttributeValues::Float32x3(n)) = mesh.attribute_mut(Mesh::ATTRIBUTE_NORMAL) {

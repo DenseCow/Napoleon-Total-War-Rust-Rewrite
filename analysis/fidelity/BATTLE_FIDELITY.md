@@ -3096,12 +3096,13 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   at the front), `selector_units_mouse_over_diffuse` (its outline), `selector_units_mouse_over_enemy_diffuse`
   (red, filled). The handles are made once per battle (`0x007159D0`, display `+0x174` / `+0x178` / `+0x17C`).
 - **Ours** (`battle::selection_markers`): the view hands every marked man's drawn position and facing over;
-  one mesh per marker is rewritten each frame in place. The unit under the mouse is `input::MouseDrag::hovered`.
+  one mesh per marker is rewritten in place when its marks change. The unit under the mouse is `input::MouseDrag::hovered`.
   The debug rectangle (gizmo lines, coloured by side and morale) is drawn only for a unit without figures
-  (no soldier library), so it can still be seen. The player's alliance is `battle::sim::PLAYER_SIDE`. PROVISIONAL: the last argument is
+  (no soldier library), so it can still be seen. PROVISIONAL: the last argument is
   taken as the square's lift above the ground (INFERRED from the two sizes); the square is flat, not
   projected on the slope; the hovered unit is picked by its centre (`input::unit_near`), the original's by
-  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported. The height clamp (at least 0.1) is.
+  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported. Nor the height clamp (at least 0.1): its frame is not traced against our terrain heights. The player's
+  alliance is `BattleSim::player_side` (set by the setup from the player's army).
 - Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
   rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
 
