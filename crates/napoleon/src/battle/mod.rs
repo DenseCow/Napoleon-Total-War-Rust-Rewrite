@@ -31,6 +31,7 @@ mod input;
 mod labels;
 mod markers;
 mod scripts;
+mod selection_markers;
 mod sim;
 pub(crate) mod setup;
 mod skin;
@@ -167,6 +168,7 @@ impl Plugin for BattlePlugin {
                     scripts::enter,
                     view::spawn_camera,
                     flag::load,
+                    selection_markers::enter,
                     hud::enter,
                 )
                     .chain(),
@@ -188,6 +190,7 @@ impl Plugin for BattlePlugin {
                     view::spawn_missing_views,
                     flag::spawn_flags,
                     view::sync_views,
+                    selection_markers::draw,
                     // After the views: a tracking camera follows its unit's view this frame.
                     view::move_camera,
                     flag::sync_flags,

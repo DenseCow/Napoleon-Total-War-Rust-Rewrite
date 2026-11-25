@@ -3062,13 +3062,13 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   at once (to walk off, on arrival, the HUD's rotate buttons) and its men, whose places are offsets in the
   unit's frame, turned rigidly with it, up to 19 m in one tick for a wide line. `LandUnit::turn_to` turns
   the frame and leaves each man where he stands, his offset from his turned slot what he then walks, as the
-  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static). Every turn is `LandUnit::turn_to`; it also
-  opens the idle reform's gate, so a standing unit walks its men to the turned slots from its next tick
-  (the reform, `0x005736B0`). A moving unit's slots and moves stay its order's (a new order behind the
-  front re-slots in full, CONFIRMED). The layout step re-slots a standing unit in full (each man to his
-  nearest slot) once it has turned 45° or more from the facing of its last full assignment, also during a
-  reform, so an about-turn, or many small rotations adding up, never sends a man across the block (ours,
-  PROVISIONAL threshold). Tests `no_man_jumps_when_his_unit_turns`,
+  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static). Every turn is `LandUnit::turn_to`; a standing
+  unit's men then walk to the turned slots at once (the reform's walk, `0x005736B0`). A moving unit's slots
+  and moves stay its order's (a new order behind the front re-slots in full, CONFIRMED). The layout step
+  re-slots in full (each man to his nearest slot) once the unit's own move is over and it has turned 45° or
+  more from the facing of its last lay-out (`MenMarch::laid_facing`, in the state hash), also while its men
+  still finish the march or reform, so an about-turn on arrival, or many small rotations adding up, never
+  sends a man across the block (ours, PROVISIONAL threshold). Tests `no_man_jumps_when_his_unit_turns`,
   `a_standing_unit_turned_walks_its_men_to_their_nearest_slots`, `a_moving_units_turn_leaves_its_men_to_the_march`. PROVISIONAL: the drawn size
   `UnitInfo::size_m` (the selection outline, and the spread of the muzzle flashes, `fx_draw::muzzle_of`) is
   set once at the battle's start and does not follow a new width.
@@ -3081,6 +3081,27 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   a_missile_attack_fires_and_a_unit_that_cannot_fire_does_nothing, only_a_unit_that_can_fire_leaves_melee_mode,
   a_formed_move_turns_to_its_facing_on_arrival}`, `input::tests::{a_dragged_line_spreads_the_units_along_the_drag,
   a_short_drag_keeps_the_units_side_by_side}`, `sim::tests` (selection modes).
+
+### 59.9 Selection and mouse-over markers (2026-11-25; static, CONFIRMED unless tagged)
+
+- **What the original draws** (`0x00789BD0`, the soldier display's per-frame update): under every living,
+  shown man (entity `+0xCC` = 0, `+0xBA` = 1) a flat textured square from the decal manager (`0x00794B10`,
+  vfunc `+0x60`) at his position (entity `+0xA8..+0xB0`, the height at least 0.1), turned to his heading
+  (`+0xB8`). His unit selected (display `+0x88`): `entity_selection_marker`, 1 × 1 m, last argument 0.03.
+  His unit under the mouse (`+0x89`): 1.5 × 1.5 m, 0.045; `entity_mouse_over_marker` for the player's
+  alliance (army `+0x44` → `+0x10` = battle `+0x281A4`), else `entity_mouse_over_enemy_marker`. Both show at
+  once. No rectangle round the unit.
+- **Textures** (`0x0118CE90`): `Indicators/selector_units_selected_diffuse` (a filled blue disc with a point
+  at the front), `selector_units_mouse_over_diffuse` (its outline), `selector_units_mouse_over_enemy_diffuse`
+  (red, filled). The handles are made once per battle (`0x007159D0`, display `+0x174` / `+0x178` / `+0x17C`).
+- **Ours** (`battle::selection_markers`): the view hands every marked man's drawn position and facing over;
+  one mesh per marker is rewritten each frame in place. The unit under the mouse is `input::MouseDrag::hovered`.
+  The debug rectangle (gizmo lines, coloured by side and morale) is gone. PROVISIONAL: the last argument is
+  taken as the square's lift above the ground (INFERRED from the two sizes); the square is flat, not
+  projected on the slope; the hovered unit is picked by its centre (`input::unit_near`), the original's by
+  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported.
+- Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
+  rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.

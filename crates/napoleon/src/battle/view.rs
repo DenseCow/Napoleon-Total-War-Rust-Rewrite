@@ -22,8 +22,8 @@ use ntw_formats::anim::Anim;
 use ntw_formats::unit_model::{VariantRole, unit_lod};
 use ntw_sim::battle::march::MoveKind;
 use ntw_sim::battle::model::LandUnit;
-use ntw_sim::battle::morale::MoraleState;
 
+use super::selection_markers;
 use super::skin::{self, BoneAtlas, ClipSlot, SkinExt, SkinMaterial};
 use super::{BattleSim, UnitInfo, VOLLEY_FX_SECONDS, VolleyFx};
 use crate::data::GameData;
@@ -1663,7 +1663,7 @@ pub fn sync_views(
     mut views: Query<(&UnitView, &DrawnPose, &mut Transform, Option<&mut UnitFigures>)>,
     mut men_tf: Query<&mut Transform, Without<UnitView>>,
     mut visibility: Query<&mut Visibility>,
-    mut gizmos: Gizmos,
+    (mut marker_quads, drag): (Option<ResMut<selection_markers::MarkerQuads>>, Option<Res<super::input::MouseDrag>>),
     cams: Query<&GlobalTransform, With<Camera3d>>,
     children: Query<&Children>,
     mut part_lods: Query<(&mut Mesh3d, &PartLods)>,
@@ -1695,19 +1695,15 @@ pub fn sync_views(
         transform.translation = world_of(pos);
         // A figure faces local -Z; model facing 0 = +x. See `world_of` for the axes.
         transform.rotation = Quat::from_rotation_y(facing - std::f32::consts::FRAC_PI_2);
-        let info = view.info(&sim);
-        if let Some(info) = info.filter(|_| !unit.off_field()) {
-            let half = info.size_m * 0.5;
-            let corners = [(-half.x, -half.y), (half.x, -half.y), (half.x, half.y), (-half.x, half.y)]
-                .map(|(x, z)| {
-                    let p = transform.transform_point(Vec3::new(x, 0.0, z));
-                    Vec3::new(p.x, ground(Vec2::new(p.x, -p.z)) + 0.15, p.z)
-                });
-            let color = unit_color(unit, sim.is_selected(unit.id));
-            for k in 0..4 {
-                gizmos.line(corners[k], corners[(k + 1) % 4], color);
-            }
-        }
+        // The markers its men show (`selection_markers`, `0x00789BD0`): selected, and under the
+        // mouse, blue for the player's alliance (side 0) and red for the enemy.
+        let on_field = view.info(&sim).is_some() && !unit.off_field();
+        let selected = on_field && sim.is_selected(unit.id);
+        let hover = (on_field && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == 0 {
+            selection_markers::Marker::MouseOver
+        } else {
+            selection_markers::Marker::MouseOverEnemy
+        });
         let Some(mut figures) = figures else { continue };
         let moved = pos.distance(figures.last_pos);
         figures.last_pos = pos;
@@ -1821,6 +1817,20 @@ pub fn sync_views(
                 }
                 let p = transform.transform_point(Vec3::new(man_tf.translation.x, 0.0, man_tf.translation.z));
                 man_tf.translation.y = ground(Vec2::new(p.x, -p.z)) - transform.translation.y;
+            }
+            // His markers, on the ground under him where he is drawn, turned to his facing.
+            if (selected || hover.is_some())
+                && !dead
+                && figures.march.entry(i) < men_alive
+                && let (Some(quads), Ok(man_tf)) = (marker_quads.as_deref_mut(), men_tf.get(*man))
+            {
+                let at = transform.transform_point(man_tf.translation);
+                if selected {
+                    quads.push(selection_markers::Marker::Selected, at, facing);
+                }
+                if let Some(m) = hover {
+                    quads.push(m, at, facing);
+                }
             }
             // Part LODs by camera distance (CONFIRMED switch distances; only on a change).
             if !dead && let (Some(cam), Ok(man_tf)) = (cam_pos, men_tf.get(*man)) {
@@ -2037,29 +2047,6 @@ fn frame_bone(atlas: &BoneAtlas, frame: &[u32; 4], bone: usize) -> Option<[f32; 
 
 fn find(sim: &BattleSim, id: u32) -> Option<&LandUnit> {
     sim.unit(id)
-}
-
-/// Blue for France (side 0), red for Austria (side 1). Paler as morale drops; grey when
-/// shattered or destroyed; yellow when selected.
-fn unit_color(unit: &LandUnit, selected: bool) -> Color {
-    if selected {
-        return Color::srgb(1.0, 0.9, 0.2);
-    }
-    let base = if unit.side == 0 {
-        Vec3::new(0.15, 0.3, 0.85)
-    } else {
-        Vec3::new(0.85, 0.15, 0.15)
-    };
-    let fade = match unit.morale.state {
-        MoraleState::Shattered => return Color::srgb(0.45, 0.45, 0.45),
-        _ if unit.men == 0 => return Color::srgb(0.45, 0.45, 0.45),
-        MoraleState::Broken => 0.65,
-        MoraleState::Wavering => 0.45,
-        MoraleState::Shaken => 0.25,
-        _ => 0.0,
-    };
-    let c = base.lerp(Vec3::ONE, fade);
-    Color::srgb(c.x, c.y, c.z)
 }
 
 /// Every frame: draws recent volleys (display only, from [`VolleyFx`]) with Bevy "gizmos"

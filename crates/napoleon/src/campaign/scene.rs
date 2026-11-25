@@ -995,7 +995,7 @@ fn bezier_points(p: &[(f32, f32)]) -> Vec<(f32, f32)> {
 }
 
 /// A DDS file's image (all mips, sRGB, repeating) from its bytes.
-fn dds_image(bytes: &[u8]) -> Result<Image, String> {
+pub(crate) fn dds_image(bytes: &[u8]) -> Result<Image, String> {
     let dds = ntw_formats::dds::Dds::parse(bytes).map_err(|e| e.to_string())?;
     let mut data = Vec::new();
     for level in 0..dds.mip_count {

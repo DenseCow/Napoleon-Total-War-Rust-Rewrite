@@ -115,6 +115,9 @@ pub struct MouseDrag {
     pub right: Option<Press>,
     /// The cursor this frame (window pixels).
     pub cursor: Option<Vec2>,
+    /// The unit under the mouse this frame (any side, on the battlefield, not over the HUD): its
+    /// men show the mouse-over marker (`selection_markers`).
+    pub hovered: Option<u32>,
 }
 
 impl MouseDrag {
@@ -158,6 +161,12 @@ pub fn mouse(
         let hit = crate::terrain::pick_ground(ray)?;
         Some(Vec2::new(hit.x, -hit.z))
     };
+    // The unit under the mouse (the original marks the hovered soldier's unit, `0x00789BD0`;
+    // ours picks as a click does, PROVISIONAL).
+    drag.hovered = cursor
+        .filter(|_| !over_hud)
+        .and_then(ground_at)
+        .and_then(|p| unit_near(&sim, p, |_, u| super::sim::on_field(u)));
 
     // A press whose release was missed (the button let go while the battle was not updating, or
     // outside the window) is dropped.
