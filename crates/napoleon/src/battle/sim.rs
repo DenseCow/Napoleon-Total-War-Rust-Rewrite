@@ -50,7 +50,8 @@ pub struct BattleSim {
     /// Faction key of each side's first army (e.g. `france`), for uniforms and music.
     pub side_factions: [String; 2],
     /// The player's alliance (the side of the player's army: a historical battle's playable army, a
-    /// custom battle's human one; 0 by default). The original keeps it at the battle's `+0x281A4`
+    /// custom battle's human one; 0 by default), always 0 or 1: the setup keeps the player on one of
+    /// the two sides the battle UI and AI are built for, the original's two. The original keeps it at the battle's `+0x281A4`
     /// and compares an army's alliance (`+0x44` → `+0x10`) with it, e.g. for the mouse-over marker
     /// (`0x00789BD0`).
     pub player_side: u8,
@@ -202,17 +203,10 @@ impl BattleSim {
         self.outcome.is_over().then(|| self.outcome.winner() == Some(self.player_side))
     }
 
-    /// The alliance the battle AI plays: the first one that is not the player's (the original
-    /// fights two). PROVISIONAL: with more than two alliances (a modded battle) the others get no AI.
+    /// The other of the two sides, the one the battle AI plays (the original fights two).
+    /// PROVISIONAL: the alliances past the second (a modded battle) get no AI.
     pub fn enemy_side(&self) -> u8 {
-        u8::from(self.player_side == 0)
-    }
-
-    /// The player's index into the two-side display lists ([`Self::side_names`],
-    /// [`Self::side_factions`], the HUD's per-side results). PROVISIONAL: a player on an alliance
-    /// past the second (a modded battle) is shown as the second, not out of bounds.
-    pub fn player_index(&self) -> usize {
-        usize::from(self.player_side).min(1)
+        1 - self.player_side
     }
 
     /// Whether unit `id` is selected.
@@ -309,9 +303,6 @@ mod tests {
         assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
         sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
         assert_eq!(sim.player_won(), Some(false), "a draw is not won");
-        // A modded battle's third alliance: shown as the second, the AI on the first.
-        sim.player_side = 2;
-        assert_eq!((sim.player_index(), sim.enemy_side()), (1, 0));
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;

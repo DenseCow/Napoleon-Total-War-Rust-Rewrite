@@ -345,7 +345,7 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
         *units_start = t.units_start;
         *units_left = t.units_fighting;
     }
-    let (mine, theirs) = (results[sim.player_index()].men_alive as f32, results[1 - sim.player_index()].men_alive as f32);
+    let (mine, theirs) = (results[usize::from(sim.player_side)].men_alive as f32, results[usize::from(sim.enemy_side())].men_alive as f32);
     *phase = match sim.phase() {
         BattlePhase::Deployment => HudPhase::Deployment,
         BattlePhase::Conflict => HudPhase::Conflict,
@@ -357,8 +357,8 @@ fn refresh_facts(out: &mut BattleHudFacts, hud: &mut BattleHud, sim: &BattleSim,
     *naval = false;
     *player_won = sim.player_won();
     set_str(battle_name, &hud.battle_name);
-    set_str(player_faction, &sim.side_factions[sim.player_index()]);
-    set_str(player_flag, flag_of(&mut hud.flags, db, &sim.side_factions[sim.player_index()]));
+    set_str(player_faction, &sim.side_factions[usize::from(sim.player_side)]);
+    set_str(player_flag, flag_of(&mut hud.flags, db, &sim.side_factions[usize::from(sim.player_side)]));
     *balance = if mine + theirs > 0.0 { mine / (mine + theirs) } else { 0.5 };
 }
 
@@ -559,7 +559,7 @@ fn click(host: &UiScriptHost, node: NodeId, add: bool, sounds: &mut MessageWrite
 /// The music state for a battle phase with the player's subculture (`factions` #2), e.g.
 /// `music_land_battle` + `sc_european_west`.
 fn music_for(sim: &BattleSim, db: &ntw_data::GameDatabase, state: &str) -> crate::audio::SetMusic {
-    let subculture = db.faction(&sim.side_factions[sim.player_index()]).map(|f| f.subculture.clone()).filter(|s| !s.is_empty());
+    let subculture = db.faction(&sim.side_factions[usize::from(sim.player_side)]).map(|f| f.subculture.clone()).filter(|s| !s.is_empty());
     crate::audio::SetMusic { state: Some(state.to_owned()), subculture }
 }
 

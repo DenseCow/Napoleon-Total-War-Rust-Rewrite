@@ -401,7 +401,15 @@ fn army_number(i: usize) -> u32 {
 /// side), every `army` of it is placed as the file says (position, orientation, frontage, men).
 /// Reinforcement armies start off the field and arrive in turn (see below).
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
-    let player = spec.player_army().unwrap_or((0, 0));
+    let mut player = spec.player_army().unwrap_or((0, 0));
+    // The player's alliance is one of the first two: the battle UI and the battle AI are built for
+    // the original's two sides (`BattleSim::player_side`). A (modded) file whose playable army is
+    // in a later alliance gets the first army of alliance 0 as the player's (PROVISIONAL; the
+    // other alliances are still placed and fight).
+    if player.0 > 1 {
+        warn!("Battle {key}: the playable army is in alliance {}; the player takes the first army of alliance 0 (two sides are shown)", player.0);
+        player = (0, 0);
+    }
     // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
     if spec.alliances.len() > usize::from(u8::MAX) + 1 {
         warn!("Battle {key}: {} alliances; only the first 256 are placed", spec.alliances.len());
