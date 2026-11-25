@@ -447,9 +447,9 @@ mod tests {
     }
 
     /// A standing unit turned a little (the HUD's rotate buttons) walks its men to the turned
-    /// slots; one turned about (180°) gives each man his nearest slot, so none crosses the block;
-    /// a turn before the unit's first tick (under the re-slot threshold) also leaves every man
-    /// where he stands (`LandUnit::turn_in_place`).
+    /// slots from its next tick; turned about (180°), or by many small turns adding up to it, each
+    /// man gets his nearest slot, so none crosses the block; a turn before the unit's first tick
+    /// leaves every man where he stands (`LandUnit::turn_to`, `LandUnit::reslot_tick`).
     #[test]
     fn a_standing_unit_turned_walks_its_men_to_their_nearest_slots() {
         let line = |b: &mut Battle| {
@@ -459,29 +459,52 @@ mod tests {
             b.units[1].hold_position = true;
         };
         let off = |b: &Battle| b.units[0].march.men.iter().map(|m| m.side.hypot(m.lag)).fold(0.0f32, f32::max);
-        // A 15° turn: the men walk to their slots and stand in them.
+        let settle = |b: &mut Battle| {
+            for _ in 0..150 {
+                b.step();
+            }
+        };
+        // A 15° turn: the men walk to their slots from the next tick and stand in them.
         let mut b = battle();
         line(&mut b);
-        for _ in 0..30 {
-            b.step();
-        }
+        settle(&mut b);
         let f = b.units[0].facing;
-        b.units[0].turn_in_place(f + 15f32.to_radians());
-        assert!(off(&b) > 0.5 && b.units[0].march.reforming, "the turn left the men to walk");
-        for _ in 0..100 {
-            b.step();
-        }
+        b.units[0].turn_to(f + 15f32.to_radians());
+        assert!(off(&b) > 0.5, "the turn left the men to walk");
+        b.step();
+        assert!(b.units[0].march.reforming, "the reform walks them");
+        settle(&mut b);
         assert!(off(&b) < 0.3, "in the turned slots ({} m off)", off(&b));
         // About turn: the farthest man has about a rank's depth to go, not the line's width.
         let f = b.units[0].facing;
-        b.units[0].turn_in_place(f + std::f32::consts::PI);
+        b.units[0].turn_to(f + std::f32::consts::PI);
+        b.step();
         assert!(off(&b) < 4.0, "nearest slots ({} m off)", off(&b));
-        // Before the first tick: every man is counted and stays where he stands.
+        settle(&mut b);
+        // Twelve 15° clicks, a little walk after each: they add up to an about-turn, and the men
+        // get their nearest slots again.
+        let mut worst = 0.0f32;
+        for _ in 0..12 {
+            let f = b.units[0].facing;
+            b.units[0].turn_to(f + 15f32.to_radians());
+            for _ in 0..3 {
+                b.step();
+                worst = worst.max(off(&b));
+            }
+        }
+        // Up to 45° between re-slots, quickly clicked: an end man of the 20 m line can be some 8 m
+        // off plus what he has not walked yet; crossing to the mirrored slot would be about 20 m.
+        assert!(worst < 12.0, "no man crosses the block ({worst} m)");
+        // Before the first tick, turned about: every man is counted and stays where he stands,
+        // and the first tick still lays out and reforms.
         let mut b = battle();
         line(&mut b);
-        let before: Vec<(f32, f32)> = { b.units[0].march.ensure_men(60); b.units[0].men_standing().map(|m| m.pos).collect() };
+        let before: Vec<(f32, f32)> = {
+            b.units[0].march.ensure_men(60);
+            b.units[0].men_standing().map(|m| m.pos).collect()
+        };
         b.units[0].march.men.clear();
-        b.units[0].turn_in_place(0.5);
+        b.units[0].turn_to(std::f32::consts::PI);
         let mut after: Vec<(u32, (f32, f32))> = b.units[0].men_standing().zip(&b.units[0].march.men).map(|(s, m)| (m.figure, s.pos)).collect();
         after.sort_by_key(|a| a.0);
         let mut moved = 0.0f32;
@@ -489,7 +512,9 @@ mod tests {
             moved = moved.max((a.0 - c.0).hypot(a.1 - c.1));
         }
         assert!(moved < 1e-3, "a man moved {moved} m at the turn");
-        assert!(b.units[0].march.laid.is_none() && !b.units[0].march.reforming, "the first tick still lays out and reforms");
+        assert!(b.units[0].march.laid.is_none() && !b.units[0].march.reforming);
+        b.step();
+        assert!(b.units[0].march.laid.is_some() && b.units[0].march.idle_reformed, "the first tick laid out and reformed");
     }
 
     /// The turns of a moving unit (walking off, a new order to its side) leave its men to the
