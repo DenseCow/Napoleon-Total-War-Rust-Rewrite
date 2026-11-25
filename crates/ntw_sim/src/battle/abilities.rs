@@ -62,6 +62,9 @@ pub const SKIRMISH_EDGE_LOOKAHEAD_S: f32 = 3.0;
 pub const FORMATION_RANKS: f32 = 3.0;
 /// See [`FORMATION_RANKS`] (PROVISIONAL).
 pub const FILE_SPACING_M: f32 = 1.0;
+/// The widest line a single unit can be dragged out to, in metres (`0x005640C0`: `80.0` at
+/// `0x01325D70`, CONFIRMED static).
+pub const MAX_DRAG_WIDTH_M: f32 = 80.0;
 
 /// Ability enum values used here (`0x0131C3A0`, CONFIRMED; see [`super::attributes::ABILITY_NAMES`]).
 pub mod ability_ids {
@@ -234,6 +237,16 @@ pub fn defence_pieces(u: &super::model::LandUnit, kind: u8) -> Vec<Defence> {
     }
 }
 
+/// A line's files and width in metres ([`super::model::LandUnit::formation_files`],
+/// [`super::model::LandUnit::formation_width`]): the unit's own, or one a drag asks for. 0 is unknown.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Frontage {
+    /// Men in one rank (0: unknown).
+    pub files: u32,
+    /// The files' width at their spacing, files × spacing (0: unknown).
+    pub width: f32,
+}
+
 impl super::model::LandUnit {
     /// The formation's width in metres: the squad summary's (`+0x650`), measured from the men where
     /// they stand ([`super::model::LandUnit::squad_box`], `0x0053D1A0`, CONFIRMED static): the
@@ -248,14 +261,15 @@ impl super::model::LandUnit {
     /// is only as wide as its men, so they do not spread out), else those files at the PROVISIONAL
     /// [`FILE_SPACING_M`]. Both read the one count the exe's files cap reads (the living men, unit
     /// `+0x18`), so a fresh layout's width and grid agree.
-    pub(super) fn fresh_width(&self) -> f32 {
-        if self.formation_width <= 0.0 {
-            return self.files() as f32 * FILE_SPACING_M;
+    /// `f` is the line's files and width: the unit's own ([`Self::frontage`]) or a dragged one.
+    pub(super) fn fresh_width_at(&self, f: Frontage) -> f32 {
+        if f.width <= 0.0 {
+            return self.files_at(f) as f32 * FILE_SPACING_M;
         }
-        if self.formation_files > 0 {
-            self.formation_width * self.files() as f32 / self.formation_files as f32
+        if f.files > 0 {
+            f.width * self.files_at(f) as f32 / f.files as f32
         } else {
-            self.formation_width
+            f.width
         }
     }
 
@@ -263,6 +277,89 @@ impl super::model::LandUnit {
     /// PROVISIONAL [`FILE_SPACING_M`].
     pub fn rank_spacing(&self) -> f32 {
         if self.formation_rank_spacing > 0.0 { self.formation_rank_spacing } else { FILE_SPACING_M }
+    }
+
+    /// The metres between two files: [`super::model::LandUnit::formation_file_spacing`] (the
+    /// battle setup's `spacing_file_close`), else the formation's width over its files, else the
+    /// PROVISIONAL [`FILE_SPACING_M`].
+    pub fn file_spacing(&self) -> f32 {
+        if self.formation_file_spacing > 0.0 {
+            self.formation_file_spacing
+        } else if self.formation_width > 0.0 && self.formation_files > 0 {
+            self.formation_width / self.formation_files as f32
+        } else {
+            FILE_SPACING_M
+        }
+    }
+
+    /// The files a line `width` metres wide holds at the unit's file spacing
+    /// ([`super::march::line_files`], `0x00642C90`), capped at the living men as its callers cap it.
+    pub fn files_for_width(&self, width: f32) -> u32 {
+        super::march::line_files(width, self.man_radius, self.file_spacing()).min(self.men.max(1))
+    }
+
+    /// The span of a line of `files` files: from the first man's outer edge to the last's,
+    /// `(files − 1) × spacing + 2r`, the width [`super::march::line_files`] turns back into the
+    /// same files (INFERRED inverse of `0x00642C90`; the squad box measured from such a line,
+    /// [`super::model::LandUnit::width`], is the same span).
+    pub fn span_of_files(&self, files: u32) -> f32 {
+        files.saturating_sub(1) as f32 * self.file_spacing() + 2.0 * self.man_radius
+    }
+
+    /// The width the unit's line forms to when laid out now: the span of its files
+    /// ([`super::model::LandUnit::files`]), whatever shape its men stand in at the moment.
+    pub fn formed_width(&self) -> f32 {
+        self.span_of_files(self.files())
+    }
+
+    /// The narrowest and widest line the player may drag the unit out to, as spans in metres (one
+    /// selected land unit: `0x006879A0` / `0x00687390` → `0x00564530` / `0x005640C0`, CONFIRMED
+    /// static; the release clamps the drag's length between them, `0x005C4030`). The narrowest
+    /// holds `max(1, round(men × 0.04))` files, `× 0.1` for a mounted unit (`0x0055ABF0`,
+    /// [`super::strength::mounted`]); the widest the files a width of twice the man radius per man
+    /// holds (`0x00642C60`), at most 80 m. The men are the unit's entity count `+0x2CC` (its men,
+    /// for infantry). `None` (the unit keeps its width): artillery, whose limits the exe asks of its
+    /// current shape (`0x0055CAA0` / `0x0055B060` / state `0xE` → `0x00569410`), and PROVISIONAL a
+    /// unit not in line (square, skirmish order, pike wall...: ours does not let a drag change
+    /// that shape's files). PROVISIONAL: with no man radius (no `battle_entities` record) half the
+    /// file spacing stands in for it in the widest.
+    pub fn drag_width_limits(&self) -> Option<(f32, f32)> {
+        if super::strength::category(self) == super::strength::Category::Artillery || self.shape_kind() != 0 {
+            return None;
+        }
+        let men = self.men.max(1);
+        let share = if super::strength::mounted(self) { 0.1 } else { 0.04 };
+        let narrowest = ((men as f32 * share).round() as u32).max(1);
+        let radius = if self.man_radius > 0.0 { self.man_radius } else { self.file_spacing() * 0.5 };
+        let widest = self.files_for_width(2.0 * radius * men as f32).max(narrowest);
+        let lo = self.span_of_files(narrowest);
+        let hi = self.span_of_files(widest).min(MAX_DRAG_WIDTH_M).max(lo);
+        Some((lo, hi))
+    }
+
+    /// Re-forms the line to the files a span of `width` metres holds ([`Self::files_for_width`]);
+    /// returns the span it forms to ([`Self::span_of_files`], at most `width` unless one file is
+    /// wider). The model keeps `formation_width` = files × spacing, as the battle setup lays it.
+    /// The player's dragged width reaches the unit through its move order (`0x0068E610` stores it
+    /// at the order's `+0x1C`; a move's lay-out, `0x00576B30`, re-forms the men at the order's
+    /// width), so ours sets it with the order ([`super::Battle::order_move_formed`]).
+    pub fn set_frontage(&mut self, width: f32) -> f32 {
+        let f = self.frontage_for(width);
+        self.formation_file_spacing = self.file_spacing();
+        (self.formation_files, self.formation_width) = (f.files, f.width);
+        self.span_of_files(f.files)
+    }
+
+    /// The unit's own line: its files and width (`formation_files`, `formation_width`).
+    pub fn frontage(&self) -> Frontage {
+        Frontage { files: self.formation_files, width: self.formation_width }
+    }
+
+    /// The line [`Self::set_frontage`] gives for a span of `width` metres: the files it holds at
+    /// the unit's file spacing (which the re-form keeps) and their width.
+    pub fn frontage_for(&self, width: f32) -> Frontage {
+        let files = self.files_for_width(width);
+        Frontage { files, width: files as f32 * self.file_spacing() }
     }
 
     /// The formation's depth in metres: the squad summary's (`+0x654`), measured as
@@ -659,6 +756,17 @@ impl Battle {
             && !super::strength::dismount_active(u)
             && self.limbered_artillery(idx)
             && u.unit_class == "artillery_horse"
+    }
+
+    /// The state-byte reset `0x005357B0` (CONFIRMED static; run by the unit constructor `0x0051B7D0`,
+    /// the ability toggle `0x00578860`, the bayonet plug and unplug and the deployable and
+    /// formation changes): skirmish mode = [`Battle::skirmish_default`] (`+0xD9C`) and melee mode =
+    /// "cannot fire" (`+0xD98` = `!0x0053EFE0`, [`Battle::can_fire_and_advance`]). The bytes
+    /// `+0xD9A` / `+0xD9B` it also sets are not modelled. Whether the exe runs it when a unit's
+    /// ammunition runs out is not traced (callers `0x0054DD70`, `0x005748A0` via `0x0057E9E0`).
+    pub fn reset_state_bytes(&mut self, idx: usize) {
+        self.units[idx].skirmish = self.skirmish_default(idx);
+        self.units[idx].melee_mode = !self.can_fire_and_advance(idx);
     }
 
     /// `skirmish(on)`: the unit's skirmish mode (`0x005602A0`: unit `+0xD9C`, CONFIRMED).

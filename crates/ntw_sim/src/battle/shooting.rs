@@ -72,9 +72,14 @@ impl LandUnit {
     /// `0x005755D0` lower as each soldier dies), so the files shrink with the losses (CONFIRMED);
     /// unknown → the living men over [`super::abilities::FORMATION_RANKS`] (PROVISIONAL).
     pub fn files(&self) -> u32 {
+        self.files_at(self.frontage())
+    }
+
+    /// [`Self::files`] for the line's files `f` (the unit's own, or a dragged one).
+    pub fn files_at(&self, f: super::abilities::Frontage) -> u32 {
         let men = self.men.max(1);
-        if self.formation_files > 0 {
-            self.formation_files.min(men)
+        if f.files > 0 {
+            f.files.min(men)
         } else {
             ((men as f32 / super::abilities::FORMATION_RANKS).ceil() as u32).max(1)
         }

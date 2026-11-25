@@ -88,6 +88,8 @@ pub struct HudUnit {
     pub category: String,
     /// Fire at will on.
     pub fire_at_will: bool,
+    /// Melee mode on (unit `+0xD98`), the melee button's state.
+    pub melee_mode: bool,
 }
 
 /// One side's line in the results.
@@ -300,6 +302,7 @@ pub fn update_facts(host: &UiScriptHost, f: &BattleHudFacts, written: Option<&Ba
             "selected" => selected,
             "category" => category,
             "fire_at_will" => fire_at_will,
+            "melee_mode" => melee_mode,
         });
         Ok(())
     })?;
@@ -505,7 +508,7 @@ pub fn update_orders(host: &UiScriptHost) -> mlua::Result<()> {
 }
 
 /// A completed left click on HUD component `node`: selects the unit of a card that was clicked
-/// (`add` = shift held). Returns true if it was a card.
+/// (`add` = CTRL held: the card joins or leaves the selection). Returns true if it was a card.
 pub fn click(host: &UiScriptHost, node: super::NodeId, add: bool) -> mlua::Result<bool> {
     let f: Function = host.lua().globals().get("__ntw_battle_click")?;
     f.call::<bool>((Value::LightUserData(mlua::LightUserData((node + 1) as *mut std::ffi::c_void)), add))
@@ -565,6 +568,28 @@ mod tests {
         host.pulse(2_500.0);
         let t: f64 = host.lua().load("return BattleUI.Time()").eval().unwrap();
         assert_eq!(t, f64::from(2_500.0_f32 * 0.001_f32));
+    }
+
+    /// The melee button shows the selection's melee mode (unit `+0xD98`): Selected only when every
+    /// selected unit is in melee mode (it was always Unselected).
+    #[test]
+    fn the_melee_button_shows_the_selections_melee_mode() {
+        let root_script = "states = {}\nfunction SetOrderButtonState(id, s) states[id] = s end";
+        let source = ScriptSource::empty().with_memory_file("ui/test/page", layout_bytes_with_root(root_script, ""));
+        let host = UiScriptHost::new(source, ntw_formats::loc::Localisation::new(), facts(), (100.0, 100.0), ntw_sim::limits::GameLimits::default()).unwrap();
+        install(&host, ScriptSource::empty()).unwrap();
+        let root = host.load_root_layout("ui/test/page").unwrap();
+        let state = |host: &UiScriptHost| -> String {
+            let states: Table = host.script_env(root).unwrap().get("states").unwrap();
+            states.get("button_melee").unwrap()
+        };
+        let lua = host.lua();
+        lua.load("__battle.units = { { id = 1, selected = true, melee_mode = true }, { id = 2, selected = true, melee_mode = false }, { id = 3, melee_mode = true } }").exec().unwrap();
+        update_orders(&host).unwrap();
+        assert_eq!(state(&host), "Unselected", "one selected unit is not in melee mode");
+        lua.load("__battle.units[2].melee_mode = true").exec().unwrap();
+        update_orders(&host).unwrap();
+        assert_eq!(state(&host), "Selected");
     }
 
     /// The per-frame card update runs each card's `Update` as that card's script without a context

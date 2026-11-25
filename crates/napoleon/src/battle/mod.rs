@@ -31,6 +31,7 @@ mod input;
 mod labels;
 mod markers;
 mod scripts;
+mod selection_markers;
 mod sim;
 pub(crate) mod setup;
 mod skin;
@@ -155,6 +156,7 @@ impl Plugin for BattlePlugin {
             .init_resource::<fx_draw::FxMeshes>()
             .init_resource::<view::ScriptCamera>()
             .init_resource::<view::CameraKeys>()
+            .init_resource::<input::MouseDrag>()
             .add_systems(
                 OnEnter(GameMode::Battle),
                 (
@@ -166,14 +168,15 @@ impl Plugin for BattlePlugin {
                     scripts::enter,
                     view::spawn_camera,
                     flag::load,
+                    selection_markers::enter,
                     hud::enter,
                 )
                     .chain(),
             )
-            .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave))
+            .add_systems(OnExit(GameMode::Battle), (hud::leave, scripts::leave, markers::leave, fx_draw::leave, input::reset_drag))
             .add_systems(
                 Update,
-                (hud::harness, hud::keys, hud::frame, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
+                (hud::harness, hud::keys, hud::frame, hud::selection_box, hud::redraw).chain().before(input::keyboard).run_if(in_state(GameMode::Battle)),
             )
             .add_systems(FixedUpdate, (tick_battle, fx_draw::tick_fx, scripts::tick, trace_battle, view::observe_ticks).chain().run_if(in_state(GameMode::Battle)))
             .add_systems(
@@ -187,6 +190,8 @@ impl Plugin for BattlePlugin {
                     view::spawn_missing_views,
                     flag::spawn_flags,
                     view::sync_views,
+                    input::order_preview,
+                    selection_markers::draw,
                     // After the views: a tracking camera follows its unit's view this frame.
                     view::move_camera,
                     flag::sync_flags,

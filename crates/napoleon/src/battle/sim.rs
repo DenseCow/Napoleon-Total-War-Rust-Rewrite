@@ -7,6 +7,30 @@ use ntw_sim::battle::model::{Battle, LandUnit};
 use ntw_sim::battle::speed::BattleSpeed;
 use ntw_sim::battle::victory::{Outcome, VictoryRules};
 
+/// A unit that can still take orders: men left, active and not gone off the field.
+pub fn on_field(u: &LandUnit) -> bool {
+    u.men > 0 && u.active && !u.left_field
+}
+
+/// How a selection change combines with the current selection ([`BattleSim::select`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectMode {
+    /// The units become the selection (a plain click, a plain box).
+    Replace,
+    /// The units join the selection (a box with CTRL held).
+    Add,
+    /// A click with CTRL held: one unit joins the selection, or leaves it if it was selected. CTRL
+    /// adds: "press and hold the Ctrl key to select multiple units" (advice
+    /// `advice_levels_onscreen_text_1152775702`, CONFIRMED from the shipped text). PROVISIONAL: that
+    /// a CTRL click on a selected unit deselects it (the card manager's rule is not traced).
+    Toggle,
+}
+
+/// `side` when it is one of the two sides the battle UI and AI are built for (0 or 1).
+fn one_of_two_sides(side: u8) -> Option<u8> {
+    (side <= 1).then_some(side)
+}
+
 /// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
 #[derive(Resource)]
 pub struct BattleSim {
@@ -24,10 +48,18 @@ pub struct BattleSim {
     pub side_names: [String; 2],
     /// RNG seed this battle started from (shown in the HUD; the test key F8 restarts with seed + 1).
     pub seed: u32,
-    /// The currently selected player (side 0) unit id, if any.
-    pub selected: Option<u32>,
+    /// The player's selected units, in the order they were selected (the original keeps the
+    /// selection as lists that every `BCQ_MULTIPLE_SELECTION_ORDER_*` executor walks, e.g.
+    /// `0x006D1280`; CONFIRMED). Changed only through [`Self::select`].
+    selection: Vec<u32>,
     /// Faction key of each side's first army (e.g. `france`), for uniforms and music.
     pub side_factions: [String; 2],
+    /// The player's alliance (the side of the player's army: a historical battle's playable army, a
+    /// custom battle's human one; 0 by default), always 0 or 1: the setup keeps the player on one of
+    /// the two sides the battle UI and AI are built for, the original's two. The original keeps it at the battle's `+0x281A4`
+    /// and compares an army's alliance (`+0x44` → `+0x10`) with it, e.g. for the mouse-over marker
+    /// (`0x00789BD0`).
+    player_side: u8,
     /// The `battles` key of the historical battle being fought (None = the test slice).
     pub battle_key: Option<String>,
     /// The player's army's `camera_start_position` and `camera_target_position` from the battle
@@ -80,8 +112,9 @@ impl BattleSim {
             info: Vec::new(),
             side_names: [String::new(), String::new()],
             seed,
-            selected: None,
+            selection: Vec::new(),
             side_factions: [String::new(), String::new()],
+            player_side: 0,
             battle_key: None,
             camera_start: None,
             deployment_area: None,
@@ -164,6 +197,68 @@ impl BattleSim {
         self.info.binary_search_by_key(&id, |i| i.id).ok().map(|i| &self.info[i])
     }
 
+    /// The selected units, first selected first.
+    pub fn selection(&self) -> &[u32] {
+        &self.selection
+    }
+
+    /// The player's alliance, 0 or 1 (see the field).
+    pub fn player_side(&self) -> u8 {
+        self.player_side
+    }
+
+    /// Sets the player's alliance: one of the two sides the battle UI and AI are built for (the
+    /// setup keeps a modded battle's player there, `BattleSpec::player_army_in`). A side past the
+    /// second is a setup bug (no setup path gives one): a debug build stops; the release branch is
+    /// only defensive, it logs and keeps the first side.
+    pub fn set_player_side(&mut self, side: u8) {
+        debug_assert!(side <= 1, "player side {side}: the setup keeps the player on the two sides");
+        self.player_side = one_of_two_sides(side).unwrap_or_else(|| {
+            error!("Battle: player side {side} is not one of the two sides; the player stays on side 0");
+            0
+        });
+    }
+
+    /// Whether the player's alliance ([`Self::player_side()`]) won: `None` while the battle is not
+    /// decided, `Some(false)` for a loss and also for a draw.
+    pub fn player_won(&self) -> Option<bool> {
+        self.outcome.is_over().then(|| self.outcome.winner() == Some(self.player_side))
+    }
+
+    /// The other of the two sides, the one the battle AI plays (the original fights two).
+    /// PROVISIONAL: the alliances past the second (a modded battle) get no AI.
+    pub fn enemy_side(&self) -> u8 {
+        1 - self.player_side
+    }
+
+    /// Whether unit `id` is selected.
+    pub fn is_selected(&self, id: u32) -> bool {
+        self.selection.contains(&id)
+    }
+
+    /// Changes the selection (the one writer). Units the player does not control and units no
+    /// longer on the field are dropped; each unit is kept once.
+    pub fn select(&mut self, ids: &[u32], mode: SelectMode) {
+        match mode {
+            SelectMode::Replace => self.selection.clear(),
+            SelectMode::Add => {}
+            SelectMode::Toggle => {
+                if let [id] = ids
+                    && let Some(at) = self.selection.iter().position(|s| s == id)
+                {
+                    self.selection.remove(at);
+                    return;
+                }
+            }
+        }
+        for &id in ids {
+            let on_field = self.battle.unit_index(id).is_some_and(|i| on_field(&self.battle.units[i]));
+            if on_field && self.info_of(id).is_some_and(|i| i.controllable) && !self.selection.contains(&id) {
+                self.selection.push(id);
+            }
+        }
+    }
+
     /// Adds a unit and its display info: `info` goes to the index the model's
     /// [`Battle::add_unit`] gives the unit (sorted by id), so `info` keeps `battle.units`' order
     /// whatever order units are added in (a reinforcement with a lower id included).
@@ -199,5 +294,82 @@ impl BattleSim {
     pub fn unit_with_info(&self, id: u32) -> Option<(&LandUnit, &UnitInfo)> {
         let i = self.battle.unit_index(id)?;
         Some((&self.battle.units[i], self.info_at(i, id)?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ntw_sim::battle::fatigue::KvFatigue;
+    use ntw_sim::battle::morale::KvMorale;
+
+    /// Units 1–3 are the player's, unit 4 the enemy's.
+    fn sim() -> BattleSim {
+        let mut sim = BattleSim::new(Battle::new(1, KvMorale::default(), KvFatigue::default()), 1);
+        for id in 1..=4 {
+            let side = u8::from(id == 4);
+            sim.add_unit(LandUnit::new(id, side, 100, (id as f32 * 30.0, 0.0)), UnitInfo { id, controllable: side == 0, ..UnitInfo::default() });
+        }
+        sim
+    }
+
+    /// The player's side decides who won and which side the AI plays: the player on the second
+    /// alliance wins when that side does.
+    #[test]
+    fn the_players_side_decides_the_win_and_the_ais_side() {
+        let mut sim = sim();
+        assert_eq!((sim.player_won(), sim.enemy_side()), (None, 1));
+        sim.outcome = ntw_sim::battle::victory::Outcome::Won { side: 1 };
+        assert_eq!(sim.player_won(), Some(false));
+        sim.set_player_side(1);
+        assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
+        sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
+        assert_eq!(sim.player_won(), Some(false), "a draw is not won");
+    }
+
+    /// A side past the two is a setup bug: a debug build stops on it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the setup keeps the player on the two sides")]
+    fn a_player_side_past_the_two_is_a_setup_bug() {
+        sim().set_player_side(2);
+    }
+
+    /// The release branch's check: only 0 and 1 are sides (tested in every build).
+    #[test]
+    fn only_the_first_two_sides_are_player_sides() {
+        assert_eq!([0, 1, 2, 255].map(one_of_two_sides), [Some(0), Some(1), None, None]);
+    }
+
+    /// A release build keeps the player on the first side for a side past the two (runs only under
+    /// `cargo test --release`; the helper's test runs in every build).
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn a_release_build_keeps_a_bad_player_side_on_the_first() {
+        let mut sim = sim();
+        sim.set_player_side(2);
+        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
+    }
+
+    /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
+    /// the enemy's units, units gone from the field and repeats are never selected.
+    #[test]
+    fn selection_modes() {
+        let mut sim = sim();
+        sim.select(&[2, 4, 2], SelectMode::Replace);
+        assert_eq!(sim.selection(), [2]);
+        sim.select(&[3, 1], SelectMode::Add);
+        assert_eq!(sim.selection(), [2, 3, 1]);
+        sim.select(&[3], SelectMode::Toggle);
+        assert_eq!(sim.selection(), [2, 1], "a CTRL click on a selected unit deselects it");
+        sim.select(&[3], SelectMode::Toggle);
+        assert_eq!(sim.selection(), [2, 1, 3]);
+        assert!(sim.is_selected(3) && !sim.is_selected(4));
+        sim.select(&[], SelectMode::Replace);
+        assert!(sim.selection().is_empty());
+        sim.battle.units[0].left_field = true;
+        sim.battle.units[1].men = 0;
+        sim.select(&[1, 2, 3], SelectMode::Replace);
+        assert_eq!(sim.selection(), [3], "units gone from the field are not selected");
     }
 }

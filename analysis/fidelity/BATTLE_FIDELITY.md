@@ -2968,6 +2968,168 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   ease and short turn, a bookmark ending the modes),
   `ui::battle::tests::selection_proxy_is_a_request`.
 
+### 59.6 Mouse orders: selection, attack, melee mode, dragged lines (contributor, 2026-11-24; static)
+- **The controls, from the shipped help texts (CONFIRMED data):** CTRL + left click selects several units
+  (`advice_levels_onscreen_text_1152775702`); a left drag draws a box around units
+  (`battle_script_strings_string_CreativeAssembly.Naval_Tut_30`); a right drag sets "the width, depth and
+  orientation" of the line (`..._BT_Rich_right_click_drag`); CTRL+A selects the whole army
+  (`advice_levels_onscreen_text_-405343219`). Ours had shift for "add" (PROVISIONAL guess): now CTRL.
+- **Selection (CONFIRMED structure):** every `BCQ_MULTIPLE_SELECTION_ORDER_*` executor walks the selection's
+  lists (groups at `+0xC`/`+0x10`, land units at `+0x1C`/`+0x20`; e.g. `0x006D1280`, `0x006D2EB0`) and gives
+  each unit the order. A left click on a unit in the 3D view formats its id with `"%d"` (`0x0131530C`) and
+  hands it to the card manager (`0x005D7220`, interface at `+0x450`, slot `+0x10`); the box hands its unit
+  list to slot `+0x18` (`0x005D7220` → `0x005E0750`). So the cards and the battlefield share one selection.
+  The card manager (`card_manager`, `0x01024E20`; shortcut handler `0x0103C1D0`: `deselect_all`,
+  `select_all`, `select_next`, `select_prev`, `toggle_group`, `usegroup0..9`) holds the add/replace rule;
+  it was not traced (mouse modifiers travel in the UI event, no `GetAsyncKeyState` call on this path).
+  PROVISIONAL: a CTRL click on a selected unit deselects it (`SelectMode::Toggle`); a CTRL box adds.
+- **Selection box (CONFIRMED):** each frame of a left drag `0x005C5BB0` calls root.lua's
+  `ShowSelectionBox(x1, y1, x2, y2)` (start corner from `+0xF4`/`+0xF8` × viewport, current corner from
+  `+0x10C`/`+0x110` in −1..1, viewport size `0x00611A70` `+0xC`/`+0x10`), else `HideSelectionBox()`;
+  `0x005D7220` hides it on release. root.lua (line 509) creates `box_selection` from its template once
+  and moves / resizes it over the two corners. Ours: `hud::selection_box`. UNKNOWN: the drag threshold
+  (ours 4 px, PROVISIONAL) and which units the box takes (ours: unit centre on screen, PROVISIONAL).
+- **Right click on an enemy (CONFIRMED structure):** the order-mode object's slot 11 (`0x005DEAB0`; this
+  build's database had no function there, created) with the cursor over an enemy unit builds
+  `BCQ_MULTIPLE_SELECTION_ORDER_ATTACK_UNIT` (`0x00599190`: the selection, the target, `!isMeleePressed`,
+  0, the click's byte `+2`; registrar `0x0040D280`, executor `0x005BFF70` → `0x006D1280`). `isMeleePressed`
+  (`0x005AE920`) calls root.lua's `isMeleePressed()`, which returns `button_melee`'s `Selected` state
+  (root.lua line 871, `luac_dump`). Per land unit `0x006D1280` calls `0x0055FBE0` with the attack's missile
+  byte = unit `+0xD98 == 0`. `0x0055FBE0`: refused unless `0x0055CBD0` and not `0x0055C780`; then a missile
+  attack needs `0x0053EFE0` (can fire: a projectile; grenades always; else bayonets not plugged, not riding
+  unless column 65, rounds left) and a melee attack `0x0053EFD0` (= not `0x0055C230`, limbered artillery);
+  a unit that fails does nothing (no move). Then it skips a repeat of the unit's current order, and queues
+  the attack (up to 10 when the click's byte is set) and posts event 7 / 8 (missile) or 9 / 10 (melee) on
+  battle `+0x3D8`. The `!isMeleePressed` field's reader was not followed (the per-unit byte comes from
+  `+0xD98`). Ours: `Battle::order_attack` (melee chases `LandUnit::melee_target`, PROVISIONAL straight
+  path that stops at the advance's PLACEHOLDER contact distance or once in melee; `charging` set as the
+  AI's attack sets it and cleared with the attack, PROVISIONAL). Before: a unit that could not fire walked
+  to the clicked point instead (wrong).
+- **Melee mode (CONFIRMED structure):** unit `+0xD98`. The state-byte reset `0x005357B0` sets it to
+  `!0x0053EFE0` (so cavalry and unarmed units start in melee mode); callers `0x0051B7D0` (constructor),
+  `0x00578860` (ability toggle), `0x0054E8E0` / `0x0054DB50` (bayonets), `0x005445A0`, `0x00544620`,
+  `0x005446F0`, `0x005447A0`, `0x0057E9E0` (from `0x0054DD70`, `0x005748A0`; not followed: whether running
+  out of rounds resets it). The melee button: `BCQ_MULTIPLE_SELECTION_ORDER_CHANGE_MELEE_MODE` (registrar
+  `0x0040D600`, executor `0x005C0480` → `0x006D2EB0` → per unit `0x0055FFF0`): refused by `0x0055C780`, and
+  refused leaving melee mode when the unit cannot fire; posts event 0x2A / 0x2B and writes `+0xD98`
+  (which argument is the value: INFERRED from the decompiler). Ours: `Battle::reset_state_bytes`,
+  `Battle::order_melee_mode`, the HUD's `Current_Selection_Enable_Melee`, `button_melee` shows it.
+  Open (Ghidra stopped answering before it was read): whether a unit that runs out of rounds gets melee
+  mode back. Until then a unit out of rounds and not in melee mode ignores a right click on an enemy, as
+  `0x0055FBE0` does for it; the melee button sends it in.
+- **Right click and drag on the ground (structure only):** with no unit under the cursor `0x005DEAB0`
+  builds the formation from the drag (`0x005C4030`: start / end from `0x005B70E0`; with its byte argument
+  set it copies the selection's stored shape, else the line along the drag, its length clamped between the
+  selection's minimum and maximum width, `0x006D9280` / `0x006D8E90`, `0x005C44C0` → `0x007FEEF0`; the
+  line's places from `0x007FE9C0` / `0x007FECA0`; facing `0x005C43F0` → `0x007FE8F0`) and hands it to slot
+  12 (`0x005DB890` → `0x0059EFB0` / `0x0059F140`). Traced further (2026-11-24, static): the minimum /
+  maximum are `0x006879A0` / `0x00687390` (land; naval `0x00687690` / `0x00687080` with 80 m): one land unit →
+  its own `0x006D9210` / `0x006D8E20` (vfunc `+0x10` / `+0x14` of the selection entry's `+0x28`, object not
+  identified yet); several → the sum of each unit's value **plus 5 m per unit** (`0x40A00000`, CONFIRMED; ours
+  used 2 m). `0x005C4030`: a drag shorter than the minimum or longer than the maximum is laid at that length
+  along the drag (`0x007FE9C0`), else the drag's own points (`0x007FECA0`); both return a navigable point
+  (`0x007FD070`, 5 dwords), not a width. **The drag's order (debugger sitting 2026-11-24, Linux/Proton, gdb on
+  the running original, a custom battle in progress, one Austrian Landwehr unit dragged wide and narrow;
+  CONFIRMED):** the drag release runs order mode `0x0059F140` → `0x006A9DB0` → `0x00685BD0` → the order queue
+  `0x005EFCC0` (stack of the stops at `0x005EFCC0`: return addresses `0x00685C51`, `0x006A9E07`, `0x0059F254`,
+  `0x0060879A`, `0x005AE9EC`, `0x005C5D85`), not `0x006847A0` (the static guess above, no stop there during the
+  drags). In `0x00685BD0` **one selected unit** gets `0x0068E610(point, facing, dragged width)`: the move order
+  (same layout as `0x0068E5C0`'s: unit `+0`, the 5-dword point `+4`, facing `+0x18`) stores **the drag's
+  (clamped) length as the unit's new width at `+0x1C`**, where `0x0068E5C0` stores the unit's current width
+  (vfunc `[0]` = unit `+0x378` → `+0x24`). **Several units** are sorted along the drag (`0x00682BA0`, by their
+  position projected on the line) and laid side by side, each with `0x0068E5C0` (its own width kept): the next
+  unit's centre is the running offset plus half its width (`0x01318038`), the offset then grows by its width plus
+  the gap argument (`param_12`; that it is the 5 m of the minimum above is INFERRED). The group formation
+  `0x006A95A0` (stops returning to `0x006A9968`) is a separate path the game runs on its own every frame for a
+  unit already in a group, not the drag. Debugger note: under Wine the hardware breakpoints never fire on the
+  game's main thread (only on worker threads); software breakpoints do. The order's width reaches the men
+  through the move's lay-out, which re-forms them at the order's width (`0x00576B30`, §52); ours sets it
+  with the order (`LandUnit::set_frontage`: the files of `0x00642C90` at the unit's file spacing).
+  **One unit's limits** (`0x006879A0` / `0x00687390` with one selected unit → `0x00564530` /
+  `0x005640C0`, CONFIRMED static): the narrowest is `max(1, round(men × 0.04))` files (`0.04` at
+  `0x01325C84`; `0.1` at `0x0131A7B0` for a mounted unit, `0x0055ABF0`), the widest the files a width of
+  twice the man radius per man holds (`0x00642C60`), at most 80 m (`0x01325D70`); the men are the unit's
+  entity count `+0x2CC`. Artillery with guns, an unlimbered gun and state `0xE` keep their shape's width
+  (`0x00569410`; PROVISIONAL: ours keeps every artillery unit's width, and a unit not in line, in square or skirmish order, keeps its shape's files, `LandUnit::drag_width_limits`). Widths here are spans, `(files − 1) × spacing + 2r` (`LandUnit::span_of_files`, INFERRED inverse of `0x00642C90`), the same as the squad box measured from such a line.
+  None of the `0x007FE…` formation code is ported. Ours: a plain click moves the group keeping its shape
+  (`input::order_group_move`, PROVISIONAL); a drag with one unit makes the drag's clamped length its width,
+  centred on the line from the drag's start; with several (decided by the selection, as `0x00685BD0` does), each at the width it forms to on arrival
+  (`LandUnit::formed_width`), they are sorted along the drag and laid side by
+  side from its start, 5 m apart (INFERRED gap), each keeping its width (`input::formation_line`); all
+  face the camera's far side and turn to it on arrival (`LandUnit::arrival_facing`,
+  `Battle::order_move_formed`; PROVISIONAL: the unit's facing turns at once). **Turns keep the men where they
+  stand** (fix, 2026-11-24, user report "the facing jumps right after the release"): the unit's facing turned
+  at once (to walk off, on arrival, the HUD's rotate buttons) and its men, whose places are offsets in the
+  unit's frame, turned rigidly with it, up to 19 m in one tick for a wide line. `LandUnit::turn_to` turns
+  the frame and leaves each man where he stands, his offset from his turned slot what he then walks, as the
+  exe's lay-out leaves the men where they stand (`0x00555CA0`, CONFIRMED static). Every turn is `LandUnit::turn_to`; a standing
+  unit's men then walk to the turned slots at once (the reform's walk, `0x005736B0`). A moving unit's slots
+  and moves stay its order's (a new order behind the front re-slots in full, CONFIRMED). The layout step
+  re-slots in full (each man to his nearest slot) once the unit's own move is over and it has turned 45° or
+  more from the facing of its last lay-out (`MenMarch::laid_facing`, in the state hash), also while its men
+  still finish the march or reform, so an about-turn on arrival, or many small rotations adding up, never
+  sends a man across the block (ours, PROVISIONAL threshold). Tests `no_man_jumps_when_his_unit_turns`,
+  `a_standing_unit_turned_walks_its_men_to_their_nearest_slots`, `a_moving_units_turn_leaves_its_men_to_the_march`. PROVISIONAL: the drawn size
+  `UnitInfo::size_m` (the fallback outline of a unit without figures, and the spread of the muzzle flashes,
+  `fx_draw::muzzle_of`) is
+  set once at the battle's start and does not follow a new width.
+- **Player units hold position (fix):** the model's advance on the nearest enemy (PLACEHOLDER, for units no
+  AI controls) also moved the player's units after every order, so a unit sent somewhere walked off on its
+  own once it arrived. The setup now sets `hold_position` for every controllable unit.
+- Next: trace the card manager's click handler for the CTRL rule and the box's unit test (`0x005E0750`),
+  then port the `0x007FE…` formation code (width, depth, the units' order along the line).
+- Tests: `orders::tests::{units_that_cannot_fire_start_in_melee_mode, a_melee_attack_chases_the_target_until_another_order,
+  a_missile_attack_fires_and_a_unit_that_cannot_fire_does_nothing, only_a_unit_that_can_fire_leaves_melee_mode,
+  a_formed_move_turns_to_its_facing_on_arrival}`, `input::tests::{a_dragged_line_spreads_the_units_along_the_drag,
+  a_short_drag_keeps_the_units_side_by_side}`, `sim::tests` (selection modes).
+
+### 59.9 Selection and mouse-over markers (2026-11-25; static, CONFIRMED unless tagged)
+
+- **What the original draws** (`0x00789BD0`, the soldier display's per-frame update): under every living,
+  shown man (entity `+0xCC` = 0, `+0xBA` = 1) a flat textured square from the decal manager (`0x00794B10`,
+  vfunc `+0x60`) at his position (entity `+0xA8..+0xB0`, the height at least 0.1), turned to his heading
+  (`+0xB8`). His unit selected (display `+0x88`): `entity_selection_marker`, 1 × 1 m, last argument 0.03.
+  His unit under the mouse (`+0x89`): 1.5 × 1.5 m, 0.045; `entity_mouse_over_marker` for the player's
+  alliance (army `+0x44` → `+0x10` = battle `+0x281A4`), else `entity_mouse_over_enemy_marker`. Both show at
+  once. No rectangle round the unit.
+- **Textures** (`0x0118CE90`): `Indicators/selector_units_selected_diffuse` (a filled blue disc with a point
+  at the front), `selector_units_mouse_over_diffuse` (its outline), `selector_units_mouse_over_enemy_diffuse`
+  (red, filled). The handles are made once per battle (`0x007159D0`, display `+0x174` / `+0x178` / `+0x17C`).
+- **Ours** (`battle::selection_markers`): the view hands every marked man's drawn position and facing over;
+  one mesh per marker is rewritten in place when its marks change. The unit under the mouse is `input::MouseDrag::hovered`.
+  The debug rectangle (gizmo lines, coloured by side and morale) is drawn only for a unit without figures
+  (no soldier library), so it can still be seen. PROVISIONAL: the last argument is
+  taken as the square's lift above the ground (INFERRED from the two sizes); the square is flat, not
+  projected on the slope; the hovered unit is picked by its centre (`input::unit_near`), the original's by
+  a soldier; the condition on the unit's `+0xD94` (not 2) is not ported. Nor the height clamp (at least 0.1): its frame is not traced against our terrain heights. The player's
+  alliance is `BattleSim::player_side` (set by the setup from the player's army). The HUD (faction, flag,
+  balance, result), the battle script's result, the music and the battle AI (it plays
+  `BattleSim::enemy_side`) all read it; before, they took side 0, so a player on the second alliance had
+  the AI order his own army.
+- Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
+  rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
+- **The drag preview** (user, 2026-11-25: none shown). The original loads four proxy models for it
+  (`0x0059D010`: `facing_arrow_proxy`, `artillery_proxy`, `cavalry_proxy`, `infantry_proxy`, all in
+  `rigidmodels/3dindicators/`; the object sits at `+0x444` of the object `0x00596B00` builds), and the
+  key bindings `Current_Selection_Proxy_Turn_Left/Right`, `..._Increase_Rank/File_Proxy` edit it.
+  Where and how many proxies it lays is UNKNOWN (not traced). Ours, PROVISIONAL: while the right button
+  drags out a line, every man of the selection gets the selection square at his place in it
+  (`input::order_preview`), from the same plan the release orders (`input::formation_plan`) and, for
+  a dragged width, `LandUnit::line_at_width` (the line `set_frontage` lays). Test:
+  `input::tests::the_drag_preview_shows_every_man_on_the_dragged_line`.
+- **Men drawn on the field, not in the turning frame** (user, 2026-11-25: men teleported back and
+  forth). The view lerped each man's offset in the unit's frame while the unit's facing was lerped
+  (or snapped) apart from it, so in the tick a unit turned (an order, the arrival facing) a wide
+  line's men swung up to tens of metres out and back. Ours now lerps each figure's field offset from
+  the unit's position and draws it in the drawn frame (`view::MenDrawn::local`). A turn never snaps or
+  carries the men (the model's `turn_to` keeps them where they stand); a position changed in a tick
+  without a move (a building snap) or a step of 5 m or more is a placement, drawn at once; a unit moved
+  outside a tick (deployment) takes its men along. PROVISIONAL: a placement that only turns the unit
+  and re-lays its men shows them walking there over the tick. (A snap
+  rule keyed on the unit's `moved` flag was tried and dropped: it froze the men of units the model
+  turns in place.) Tests:
+  `view::tests::{a_turning_units_men_stay_put_between_ticks, a_placed_units_men_go_with_it_at_once}`.
+
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)
 Ported in `ntw_sim::battle::special_abilities`; static traces, CONFIRMED unless marked. Tests in that module.
 

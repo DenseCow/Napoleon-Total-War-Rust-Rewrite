@@ -174,6 +174,10 @@ pub struct MenMarch {
     /// before the unit's first tick (the fresh layout then: the exe's unit is built with a re-slot
     /// pending, `0x00518DC0` sets `+0x278C` = 1 with `+0x2788` = 0).
     pub laid: Option<Formation>,
+    /// The unit's facing at its last lay-out (the slots match the frame at it): once its own move
+    /// is over, a turn of [`RESLOT_TURN`] or more away from it makes the next layout step assign in
+    /// full again ([`LandUnit::reslot_tick`]).
+    pub laid_facing: f32,
     /// The living men at the unit's last tick: fewer now is a loss, which restarts the re-slot
     /// countdown.
     pub last_men: u32,
@@ -391,6 +395,11 @@ where
 /// returns true, as do kinds 3 to 6; kinds 1 and 2 return false (`0x00462CB0`): a loss in such a
 /// shape makes the re-slot pending without restarting the countdown ([`LandUnit::shape_kind`]).
 pub const RESLOT_TICKS: u32 = 20;
+
+/// The turn (radians) from the facing of the last lay-out after which the layout step
+/// ([`LandUnit::reslot_tick`]) gives the men their nearest slots again
+/// (45°; PROVISIONAL, ours: the exe turns its men through their own moves, not traced).
+pub const RESLOT_TURN: f32 = std::f32::consts::FRAC_PI_4;
 
 /// Ticks between an idle unit's in-place checks (`[0x014A35D0]`, 10, set by `0x00407740`): the
 /// idle update `0x005577C0` runs the check in the ticks whose remainder by this is the unit's
@@ -610,6 +619,11 @@ fn row_offset(i: usize, first: usize, n: usize, spacing: f32) -> f32 {
 pub fn unit_frame_offset(facing: f32, (right, back): (f32, f32)) -> (f32, f32) {
     let (s, c) = facing.sin_cos();
     (right * s - back * c, -right * c - back * s)
+}
+
+/// The angle between two facings in radians, 0 to π (the shorter way round).
+fn angle_between(a: f32, b: f32) -> f32 {
+    ((a - b + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI).abs()
 }
 
 /// `floor(sqrt(men))` as the exe takes it (`0x00630390`, `0x006311B0`, `0x00643B50`, CONFIRMED
@@ -1015,6 +1029,15 @@ impl Formation {
     }
 }
 
+/// The files a line `width` metres wide holds at `spacing` metres between files, its men of
+/// radius `man_radius`: the line shape's vfunc `+0x10`, `0x00642C90`:
+/// `floor((width + 0.001 − 2r) / spacing) + 1`, at least 1 (CONFIRMED static). Its callers cap
+/// it at the men they are passed. The inverse span is [`LandUnit::span_of_files`].
+pub fn line_files(width: f32, man_radius: f32, spacing: f32) -> u32 {
+    let room = (width + 0.001 - 2.0 * man_radius) / spacing;
+    if room.is_finite() && room > 0.0 { room.floor() as u32 + 1 } else { 1 }
+}
+
 impl LandUnit {
     /// The formation's files and ranks over its living men: for the line the files are the front
     /// rank ([`LandUnit::files`], the men who fire with the default drill, capped at the living men
@@ -1031,7 +1054,7 @@ impl LandUnit {
 
     /// The formation laid out fresh over the living men in the unit's shape kind
     /// ([`LandUnit::shape_kind`]; the shape's layout vfunc `+0x24` run with the unit's soldier
-    /// count `+0x18`): the files of [`LandUnit::files`], the spacing of [`LandUnit::fresh_width`]
+    /// count `+0x18`): the files of [`LandUnit::files`], the spacing of [`LandUnit::fresh_width_at`]
     /// over them (the unit's p3) and the pitch [`LandUnit::rank_spacing`] (its p4), which the
     /// shape factory `0x00531680` hands the line and kinds 1 and 5 alike (CONFIRMED static).
     /// Kind 6 has its own: [`LIGHT_INFANTRY_SPACING_M`] and [`LIGHT_INFANTRY_PITCH_M`]
@@ -1047,7 +1070,7 @@ impl LandUnit {
     /// (`0x00576B30`) passes the order's width, the same `+0x384` → `+0x24` float its path query
     /// carries (`0x0054D900`). That width is not narrowed by the men (only the files are capped),
     /// so ours takes [`LandUnit::formation_width`] (else the fallback of
-    /// [`LandUnit::fresh_width`]). Its p1, CONFIRMED static for a unit on foot: ability 6 writes
+    /// [`LandUnit::fresh_width_at`]). Its p1, CONFIRMED static for a unit on foot: ability 6 writes
     /// no shape params; the unit set-up `0x0051B7D0` sets p1 = p2 = twice the unit's `+0x2EC`
     /// (`0x0051C739` / `0x0051C747`), the largest soldier radius `+0x58` (`0x0051C200`,
     /// `0x0051C43C`, `0x0051C691`). Of the other writers (the callers of `0x00579780`), the
@@ -1064,19 +1087,23 @@ impl LandUnit {
     /// PROVISIONAL: kind 6 keeps the line's files (the exe's come from `0x00642D90` over the width
     /// the light-infantry task `0x00515210` re-forms to, not traced).
     fn fresh_formation(&self) -> Formation {
+        self.fresh_formation_at(self.frontage())
+    }
+
+    /// [`LandUnit::fresh_formation`] for the line's files and width `f` (the unit's own, or a dragged one).
+    fn fresh_formation_at(&self, f: super::abilities::Frontage) -> Formation {
         let kind = self.shape_kind();
         let men = self.men as usize;
-        let files = (self.files() as usize).max(1);
+        let files = (self.files_at(f) as usize).max(1);
         let (files, spacing, pitch) = match kind {
             6 => (files, LIGHT_INFANTRY_SPACING_M, LIGHT_INFANTRY_PITCH_M),
             2 | 4 => (files, SQUARE_SPACING_M, SQUARE_SPACING_M),
             3 => {
-                let width = if self.formation_width > 0.0 { self.formation_width } else { self.fresh_width() };
-                let room = width + 0.001 - 2.0 * self.man_radius;
-                let wall = (room / SQUARE_SPACING_M).floor().max(0.0) as usize + 1;
+                let width = if f.width > 0.0 { f.width } else { self.fresh_width_at(f) };
+                let wall = line_files(width, self.man_radius, SQUARE_SPACING_M) as usize;
                 (wall.min(men).max(1), SQUARE_SPACING_M, SQUARE_SPACING_M)
             }
-            _ => (files, self.fresh_width() / files as f32, self.rank_spacing()),
+            _ => (files, self.fresh_width_at(f) / files as f32, self.rank_spacing()),
         };
         Formation::new(kind, men, files, spacing, pitch)
     }
@@ -1101,6 +1128,14 @@ impl LandUnit {
     /// tick (`laid` `None`) the fresh layout: the exe's unit is built with a re-slot pending (`0x00518DC0`).
     pub fn formation(&self) -> Formation {
         self.march.laid.unwrap_or_else(|| self.fresh_formation())
+    }
+
+    /// The formation the unit lays out once dragged out to `width` metres: the fresh lay-out at
+    /// the line [`LandUnit::set_frontage`] gives ([`LandUnit::frontage_for`]), without changing the
+    /// unit. What the drag's preview shows; a dragged width reaches only a unit in line
+    /// ([`LandUnit::drag_width_limits`] is `None` for every other shape), so this is its line.
+    pub fn line_at_width(&self, width: f32) -> Formation {
+        self.fresh_formation_at(self.frontage_for(width))
     }
 
     /// One unit tick of the men's layout (CONFIRMED static, see [`LandUnit::formation`]):
@@ -1162,11 +1197,20 @@ impl LandUnit {
         self.march.last_men = self.men;
         let due = self.march.reslot && self.march.reslot_in == 0;
         let first = self.march.laid.is_none();
-        let standing = self.timed_move.is_none() && self.march.plan.is_none();
+        let standing = self.standing();
+        // A unit whose own move is over (standing, or its men still finishing the march) that has
+        // turned [`RESLOT_TURN`] or more since its last lay-out (the HUD's rotate buttons, a
+        // formation's facing on arrival, many small turns adding up) re-slots in full, each man to
+        // his nearest slot (ours, see [`LandUnit::turn_to`]). A unit still moving lays out every
+        // tick its order says (a new order behind the front re-slots in full, CONFIRMED), which
+        // keeps `laid_facing` with it.
+        let turned = !first && self.timed_move.is_none() && angle_between(self.facing, self.march.laid_facing) >= RESLOT_TURN;
         if standing {
             // The idle state: the reform state's entry when the gate holds (the unit's first tick
             // always: a new idle task), else the idle update.
-            let reform = !self.march.reforming && (first || self.idle_gate(tick));
+            // A turned unit re-enters the reform, also during one (see `turned` above).
+            let due = due || turned;
+            let reform = turned || (!self.march.reforming && (first || self.idle_gate(tick)));
             // Only a re-slot assigns the men (`lay_out(Some(true))`); the entry's lay-out without
             // one keeps each man's slot (`0x005736B0`), so it does not stand for the move order's
             // assignment in the same tick.
@@ -1186,6 +1230,7 @@ impl LandUnit {
         } else {
             self.march.idle_reformed = false;
             let short_of_end = self.timed_move.is_some_and(|t| !t.at_end);
+            let due = due || turned;
             self.march.relaid = (first || due || short_of_end).then_some(first || due);
             if let Some(full) = self.march.relaid {
                 self.relay(full);
@@ -1294,6 +1339,51 @@ impl LandUnit {
         self.lay_out(Some(full));
     }
 
+    /// Turns the unit to `facing` (radians, the model's facing) with every man staying where he
+    /// stands: his slot turns with the unit and his offset from it ([`ManMarch::side`],
+    /// [`ManMarch::lag`]) becomes what is left of his way there. As [`LandUnit::relay`] leaves the
+    /// men where they stand at a new lay-out (`0x00555CA0`, CONFIRMED static), no man moves at the
+    /// turn itself; he walks his offset as any other: in the march of a moving unit, else at once
+    /// in the reform's walk ([`LandUnit::send_men_to_slots`], also re-issued in a running reform);
+    /// the turn also clears the idle task's reformed flag ([`MenMarch::idle_reformed`]), so the
+    /// reform's gate holds ([`LandUnit::idle_gate`]). The slots are the layout step's business
+    /// ([`LandUnit::reslot_tick`]): once the unit's own move is over and it has turned
+    /// [`RESLOT_TURN`] or more from the facing of its last lay-out, that step gives each man his
+    /// nearest slot again, so no man crosses the block to the slot his number had. PROVISIONAL: the unit's own facing still
+    /// turns at once (the exe's comes from its men's heading, the squad summary's vote, not ported
+    /// for a moving unit); its men's figures face it; the re-slot threshold is ours.
+    pub fn turn_to(&mut self, facing: f32) {
+        if facing == self.facing {
+            return;
+        }
+        // Every man counted, also before the unit's first tick sized the march.
+        self.march.ensure_men(self.max_men as usize);
+        let formation = self.formation();
+        let alive = (self.men as usize).min(self.march.men.len());
+        let old = self.facing;
+        for (k, m) in self.march.men[..alive].iter_mut().enumerate() {
+            let p = formation.place(k);
+            // Where he stands from the unit's point, then in the new frame (the frame offset is
+            // its own inverse).
+            let world = unit_frame_offset(old, (p.0 + m.side, p.1 + m.lag));
+            let (right, back) = unit_frame_offset(facing, world);
+            (m.side, m.lag) = (right - p.0, back - p.1);
+        }
+        self.facing = facing;
+        self.march.idle_reformed = false;
+        // A standing unit's men walk to their turned slots at once, also those that had already
+        // reached them in a running reform (before its first tick, that tick lays out and reforms).
+        if self.standing() && self.march.laid.is_some() {
+            self.send_men_to_slots();
+        }
+    }
+
+    /// The unit is not moving: no move of its own and no men still under its order's march (the
+    /// idle state of [`LandUnit::reslot_tick`]).
+    pub fn standing(&self) -> bool {
+        self.timed_move.is_none() && self.march.plan.is_none()
+    }
+
     /// Lays the formation out again over the living men as [`LandUnit::relay`] does, giving the men
     /// their slots by [`assign_slots`] (`Some(full)`) or keeping each man's slot (`None`: the
     /// reform state's lay-out without a re-slot, `0x005736B0`, which sends man `k` to slot `k`).
@@ -1313,6 +1403,12 @@ impl LandUnit {
         for (k, m) in men[..alive].iter_mut().enumerate() {
             let p = laid.place(k);
             (m.side, m.lag) = (m.side - p.0, m.lag - p.1);
+        }
+        // The slots now match the unit's frame at this facing, once they were assigned (the idle
+        // reform's lay-out keeps each man's slot, so small turns still add up).
+        debug_assert!(assign.is_some() || self.march.laid.is_some(), "a unit's first lay-out assigns its slots");
+        if assign.is_some() {
+            self.march.laid_facing = self.facing;
         }
         self.march.laid = Some(laid);
         #[cfg(test)]
@@ -1428,7 +1524,8 @@ impl LandUnit {
 pub(super) struct UnitStep {
     /// The unit's position before the step.
     pub pos: (f32, f32),
-    /// The unit's facing after the step (the men's places are laid out on it).
+    /// The unit's walking facing after the step (the men's places are laid out on it); on the
+    /// arrival tick the turn to the formation's facing comes after the march ([`LandUnit::turn_to`]).
     pub facing: f32,
     /// The unit's direction of travel (unit vector) and metres left to its goal before the step.
     pub dir: (f32, f32),
@@ -1909,6 +2006,7 @@ mod tests {
         assert!(changed(&|c| c.units[0].march.laid.as_mut().unwrap().ranks += 1));
         assert!(changed(&|c| c.units[0].march.reslot = true));
         assert!(changed(&|c| c.units[0].march.reslot_in += 1));
+        assert!(changed(&|c| c.units[0].march.laid_facing += 1.0));
         assert!(changed(&|c| c.units[0].march.last_men += 1));
         assert!(changed(&|c| c.units[0].march.measured = None));
         assert!(changed(&|c| c.units[0].march.measured.as_mut().unwrap().radius += 0.25));

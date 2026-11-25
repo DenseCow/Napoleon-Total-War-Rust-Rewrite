@@ -22,7 +22,7 @@ mod detail;
 mod hud;
 mod play;
 mod region_labels;
-mod scene;
+pub(crate) mod scene;
 
 use bevy::prelude::*;
 

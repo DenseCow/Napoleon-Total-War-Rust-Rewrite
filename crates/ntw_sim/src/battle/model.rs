@@ -70,7 +70,7 @@ pub enum Reinforcement {
     },
 }
 /// PLACEHOLDER: advancing units stop at this fraction of the contact range.
-const ADVANCE_STOP_FRACTION: f32 = 0.8;
+pub(super) const ADVANCE_STOP_FRACTION: f32 = 0.8;
 /// APPROXIMATION: at most this many men of a unit are engaged in one melee (its "frontage").
 pub const MELEE_FRONTAGE_MEN: u32 = 40;
 /// APPROXIMATION: each engaged soldier pair starts one exchange every this many ticks (5 s).
@@ -237,6 +237,18 @@ pub struct LandUnit {
     pub reload_ticks_left: u32,
     /// Unit id the player ordered this unit to shoot at.
     pub fire_target: Option<u32>,
+    /// `+0xD98`: melee mode. An attack order on an enemy makes a unit in melee mode close to melee
+    /// and any other shoot (`0x006D1280` passes `+0xD98 == 0` as the attack's missile byte to
+    /// `0x0055FBE0`, CONFIRMED). Set to "cannot fire" by the state-byte reset `0x005357B0`
+    /// ([`Battle::reset_state_bytes`]) and toggled by the melee button ([`Battle::order_melee_mode`]).
+    pub melee_mode: bool,
+    /// The enemy a melee attack order chases ([`Battle::order_attack`]); any other order clears it
+    /// ([`LandUnit::set_destination`]).
+    pub melee_target: Option<u32>,
+    /// The facing a move order turns the unit to when it arrives ([`Battle::order_move_formed`]:
+    /// the player's dragged-out formation). PROVISIONAL: the turn is made at once on arrival; the
+    /// original's formed move (`0x005DB890` → `0x0059EFB0` / `0x0059F140`) is not ported.
+    pub arrival_facing: Option<f32>,
     /// Fire at will: shoot the nearest enemy in range when there is no fire order.
     pub fire_at_will: bool,
     /// Volleys fired so far (statistics).
@@ -304,7 +316,7 @@ pub struct LandUnit {
     /// `0x005C2B80`, CONFIRMED): the hit test skips its soldiers (`0x00679B20`).
     pub invincible: bool,
     /// The formation's width in metres (formation `+0x24`; set from the unit's files and spacing).
-    /// 0 = unknown: [`LandUnit::fresh_width`] falls back to the files at
+    /// 0 = unknown: [`LandUnit::fresh_width_at`] falls back to the files at
     /// [`super::abilities::FILE_SPACING_M`].
     pub formation_width: f32,
     /// Metres between the formation's ranks (close order, `spacing_rank_close`). Its depth is this
@@ -312,6 +324,10 @@ pub struct LandUnit {
     /// men's places always come from the one grid. 0 = unknown:
     /// [`super::abilities::FILE_SPACING_M`] stands in.
     pub formation_rank_spacing: f32,
+    /// Metres between the formation's files (close order, `spacing_file_close`), set by the battle
+    /// setup. 0 = unknown: the width over the files, else [`super::abilities::FILE_SPACING_M`]
+    /// ([`LandUnit::file_spacing`]).
+    pub formation_file_spacing: f32,
     /// Men in one rank of the formation (its files): the line shape's vfunc `+0x10`, `0x00642D00` →
     /// `0x00642C90`: `floor((width + 0.001 − 2r) / file spacing) + 1`, which its callers (`0x0061CAB0`,
     /// `0x00646B00`, `0x00646C70`, `0x00646D40`, `0x0065A410`, `0x0065A6D0`) cap at the men they are
@@ -336,11 +352,17 @@ impl LandUnit {
     /// Installs a move order to `dest`, or clears it with `None`: the one path every order source
     /// writes `destination` by. Every install starts a new timed move, also one re-issued to the
     /// same point (`0x00659520` zeroes the order's elapsed time `+0x43C` on each install). A pending
-    /// Inspire order ends: it is an order like the others, and a new order replaces it.
+    /// Inspire order or melee attack ends: each is an order like the others, and a new order
+    /// replaces it.
     pub fn set_destination(&mut self, dest: Option<(f32, f32)>) {
         self.destination = dest;
         self.timed_move = None;
         self.inspire_order = None;
+        // A melee attack's charge goes with it (`Battle::order_attack` set it).
+        if self.melee_target.take().is_some() {
+            self.charging = false;
+        }
+        self.arrival_facing = None;
     }
 
     /// The ordered destination, if any (written only through [`LandUnit::set_destination`]).
@@ -414,6 +436,9 @@ impl LandUnit {
             ammo_pool: None,
             reload_ticks_left: 0,
             fire_target: None,
+            melee_mode: false,
+            melee_target: None,
+            arrival_facing: None,
             fire_at_will: true,
             volleys_fired: 0,
             fired_this_tick: false,
@@ -440,6 +465,7 @@ impl LandUnit {
             invincible: false,
             formation_width: 0.0,
             formation_rank_spacing: 0.0,
+            formation_file_spacing: 0.0,
             formation_files: 0,
             garrison: None,
             garrison_target: None,
@@ -1267,6 +1293,10 @@ impl Battle {
         } else if let Some(d) = self.units[idx].destination {
             let u = &self.units[idx];
             Some((d, u.move_speed(), true))
+        } else if let Some(t) = self.melee_target_to_chase(idx) {
+            // A melee attack order: towards the target until contact, at the speed of the current
+            // move (PROVISIONAL path: straight at the target's centre, like the fire approach).
+            Some((self.units[t].position, self.units[idx].move_speed(), false))
         } else if let Some(t) = self.ordered_fire_target_to_approach(idx) {
             // PLACEHOLDER: move towards an ordered fire target until it is within range, at the speed of
             // the current move (the run option applies to whatever move the unit makes, 0x005600C0).
@@ -1370,7 +1400,8 @@ impl Battle {
         if len > 0.0
             && let Some(d) = self.defence_in_the_way(idx, pos, next)
         {
-            self.units[idx].facing = dy.atan2(dx);
+            // The men stay where they stand and walk the turn (`LandUnit::turn_to`).
+            self.units[idx].turn_to(dy.atan2(dx));
             self.defence_contact(idx, &d);
             let u = &mut self.units[idx];
             u.speed = 0.0;
@@ -1394,21 +1425,30 @@ impl Battle {
         } else if len > 0.0 {
             u.position = (pos.0 + dx / len * step, pos.1 + dy / len * step);
         }
-        if is_order && (len <= step || stopped) {
+        let arrived = is_order && (len <= step || stopped);
+        let arrival_facing = if arrived { u.arrival_facing } else { None };
+        if arrived {
             u.set_destination(None);
             u.running = false;
         }
         if len > 0.0 && step > 0.0 {
-            u.facing = dy.atan2(dx);
+            // The men stay where they stand and walk the turn (`LandUnit::turn_to`).
+            u.turn_to(dy.atan2(dx));
             u.moved = true;
             u.gradient = gradient;
         }
         // Its men follow the same order, each at his own speed (`march`), laid out at the unit's
-        // facing after the step (the drawn one).
+        // walking facing after the step (the drawn one, but on arrival: the arrival turn follows).
         let dir = if len > 0.0 { (dx / len, dy / len) } else { (0.0, 0.0) };
         let (facing, fatigue) = (self.units[idx].facing, self.units[idx].fatigue_effect().speed);
         let unit_step = super::march::UnitStep { pos, facing, dir, len, covered: len.min(step), is_order, fatigue };
         self.march_men(idx, Some(unit_step), Some(planned_order));
+        // On arrival the unit turns to its formation's facing after this tick's march, so the men
+        // walk the last step along the way they came, then the turn (`LandUnit::turn_to`), which
+        // the reform walks once the move's march has ended.
+        if let Some(f) = arrival_facing {
+            self.units[idx].turn_to(f);
+        }
     }
 
     /// The enemy unit that unit `idx` is in melee contact with (nearest active enemy with men,
@@ -1953,6 +1993,8 @@ impl Battle {
             h.u32(u.march.last_men);
             h.u32(u.march.reslot as u32);
             h.u32(u.march.reslot_in);
+            // The facing of the last lay-out: a turn away from it re-slots (`LandUnit::reslot_tick`).
+            h.u32(u.march.laid_facing.to_bits());
             // The idle reform gate's state (`march::LandUnit::idle_gate`).
             h.u32(u.march.in_place_at);
             h.u32(u.march.idle_reformed as u32);

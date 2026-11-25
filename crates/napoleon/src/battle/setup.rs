@@ -55,7 +55,7 @@ struct Slot {
     general: Option<i32>,
 }
 
-/// French army (side 0, the player). Real unit keys from the `units` table.
+/// French army (side 0, the default `BattleSim::player_side`). Real unit keys from the `units` table.
 const FRANCE: [Slot; 5] = [
     Slot { key: "Inf_Line_French_Fusiliers", category: "infantry", x: -75.0, general: None },
     Slot { key: "Inf_Line_French_18th_Ligne", category: "infantry", x: -10.0, general: None },
@@ -355,9 +355,16 @@ pub fn build_battle(db: &GameDatabase, setup: &SetupData, seed: u32) -> BattleSi
         || std::env::args().any(|a| a == "--skip-deployment")
         || std::env::var_os("NAPOLEON_FPS_LOG").is_some();
     sim.battle.buildings = setup.buildings.clone();
-    // The skirmish default of the unit constructor (`abilities::skirmish_default`, CONFIRMED).
+    // The state bytes of the unit constructor (`0x005357B0` from `0x0051B7D0`: skirmish default and
+    // melee mode, `Battle::reset_state_bytes`, CONFIRMED).
     for i in 0..sim.battle.units.len() {
-        sim.battle.units[i].skirmish = sim.battle.skirmish_default(i);
+        sim.battle.reset_state_bytes(i);
+        // The player's units wait for orders: in the original a unit never walks off on its own
+        // (the model's advance on the nearest enemy is the PLACEHOLDER for units no AI controls),
+        // so after a move they stay where they were sent.
+        if sim.infos()[i].controllable {
+            sim.battle.units[i].hold_position = true;
+        }
     }
     // The model's own deployment flag, the one source of the deployment phase (`BattleSim::phase`;
     // the special-ability gate reads it too). A battle with no deployment ends it at once, which
@@ -394,7 +401,26 @@ fn army_number(i: usize) -> u32 {
 /// side), every `army` of it is placed as the file says (position, orientation, frontage, men).
 /// Reinforcement armies start off the field and arrive in turn (see below).
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
-    let player = spec.player_army().unwrap_or((0, 0));
+    // The player's alliance is one of the first two: the battle UI and the battle AI are built for
+    // the original's two sides (`BattleSim::player_side()`), so the player's army is looked for
+    // there (`BattleSpec::player_army_in`: an army of a playable alliance first, else an unflagged
+    // army there). Every shipped battle's player army is there and unflagged (`ntw_formats` test
+    // `battle_spec_install`). PROVISIONAL, modded files only (the front end's choice is not
+    // traced): the player's army in a later alliance leaves that alliance with neither the player
+    // nor the AI; first two alliances with no unflagged army give the player none.
+    let player = spec.player_army_in(2);
+    match (player, spec.player_army()) {
+        (None, Some(f)) => warn!(
+            "Battle {key}: no unflagged army in the first two alliances (the file's player army is alliance {}, army {}, not on the two sides shown); the player commands none",
+            f.0, f.1
+        ),
+        (None, None) => warn!("Battle {key}: no unflagged army in the battle file; the player commands none"),
+        (Some(p), Some(f)) if p != f => warn!(
+            "Battle {key}: the file's player army (alliance {}, army {}) is not on the two sides shown; the player commands alliance {}, army {} instead",
+            f.0, f.1, p.0, p.1
+        ),
+        _ => {}
+    }
     // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
     if spec.alliances.len() > usize::from(u8::MAX) + 1 {
         warn!("Battle {key}: {} alliances; only the first 256 are placed", spec.alliances.len());
@@ -407,8 +433,9 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
             sim.side_factions[ai] = army.faction.clone();
         }
         for (ri, army) in alliance.armies.iter().enumerate() {
-            let controllable = (ai, ri) == player;
+            let controllable = Some((ai, ri)) == player;
             if controllable {
+                sim.set_player_side(side);
                 sim.camera_start = army.camera_start.zip(army.camera_target);
                 sim.deployment_area = army.deployment_area;
             }
@@ -503,6 +530,7 @@ fn apply_spec_unit(db: &GameDatabase, key: &str, su: &SpecUnit, unit: &mut LandU
         unit.formation_files = (width / stats.spacing_file_close.max(0.1)).round().max(1.0) as u32;
         unit.formation_width = width;
         unit.formation_rank_spacing = stats.spacing_rank_close;
+        unit.formation_file_spacing = stats.spacing_file_close;
     }
     // The drawn block: the model's one grid (`LandUnit::formation`), with or without a width; the
     // model caps the files, and the width with them, at the men (`LandUnit::files`).
@@ -573,7 +601,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             }
             unit.facing = facing;
             unit_info.faction = sim.side_factions[side].clone();
-            unit_info.controllable = side == 0;
+            unit_info.controllable = side == usize::from(sim.player_side());
             unit_info.army = (side, 0);
             built.push(Built { unit, info: unit_info });
             next_id += 1;
@@ -617,6 +645,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
 fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
     let mut next_id = 1;
     let mut army_counts = [0usize; 2];
+    let mut player_seen = false;
     for army in &setup.custom {
         let side = (army.alliance as usize).min(1);
         let ri = army_counts[side];
@@ -626,7 +655,10 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             sim.side_factions[side] = army.faction.clone();
         }
         let area = setup.deployment.as_ref().and_then(|d| d.alliances.get(side)).and_then(|a| a.areas.get(ri).or_else(|| a.areas.first()));
-        if army.human && sim.deployment_area.is_none() {
+        // The first human army is the player's: its alliance, and its area shown.
+        if army.human && !player_seen {
+            player_seen = true;
+            sim.set_player_side(side as u8);
             sim.deployment_area = area.cloned();
         }
         let mut built = Vec::new();
@@ -1069,6 +1101,7 @@ fn make_unit(db: &GameDatabase, setup: &SetupData, key: &str, id: u32, side: u8,
     // (skirmish strips, defence pieces, the drawn block): files by the file spacing, ranks by the rank spacing.
     u.formation_width = (files * stats.spacing_file_close).max(5.0);
     u.formation_rank_spacing = stats.spacing_rank_close;
+    u.formation_file_spacing = stats.spacing_file_close;
     let size_m = drawn_size(&u);
     let info = UnitInfo { id, name: record.dev_name.clone(), size_m, key: key.to_owned(), category: record.category.clone(), ..Default::default() };
     (u, info)
@@ -1436,6 +1469,16 @@ mod tests {
             assert!(area_contains(area, u.position), "{} at {:?} outside its area", i.key, u.position);
         }
         assert!(sim.deployment_area.is_some(), "the player's area is shown");
+        assert_eq!(sim.player_side(), 0);
+        // The human army on the second alliance: that side is the player's.
+        let mut start = start;
+        for a in &mut start.custom {
+            a.human = !a.human;
+        }
+        let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start), Some(0.75));
+        let sim = build_battle(&db, &setup, FIRST_SEED);
+        assert_eq!(sim.player_side(), 1);
+        assert!(sim.battle.units.iter().zip(sim.infos()).all(|(u, i)| i.controllable == (u.side == 1)));
     }
 
     fn area(orientation: f32, width: f32) -> DeploymentArea {

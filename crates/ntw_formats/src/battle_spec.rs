@@ -225,18 +225,26 @@ impl BattleSpec {
         Ok(spec)
     }
 
-    /// The alliance the human player commands and its first playable army: the first alliance
-    /// without an alliance-level `non_playable`, and its first army without an army-level one.
+    /// The alliance the human player commands and its first playable army: the first army without
+    /// an army-level `non_playable` in the first alliance without an alliance-level one that has
+    /// such an army.
     /// The two flags are CONFIRMED reads (alliance `+0x38`, army `+0xCD`; the XML element is a
     /// name → children map, so an alliance-level `non_playable` anywhere among the alliance's
     /// children counts). That the player takes the first such army is PROVISIONAL (the front
     /// end's choice is not traced). Friedland flags **both** alliances (its first one has the
     /// element between its two French armies), so when no alliance is playable we fall back to
-    /// the first army without an army-level flag (PROVISIONAL).
+    /// the first army without an army-level flag (PROVISIONAL). Every army flagged: none.
     pub fn player_army(&self) -> Option<(usize, usize)> {
+        self.player_army_in(self.alliances.len())
+    }
+
+    /// [`Self::player_army`] among the first `alliances` alliances only (a game that shows fewer
+    /// sides than the file has).
+    pub fn player_army_in(&self, alliances: usize) -> Option<(usize, usize)> {
         let pick = |only_playable: bool| {
             self.alliances
                 .iter()
+                .take(alliances)
                 .enumerate()
                 .filter(|(_, a)| !only_playable || !a.non_playable)
                 .find_map(|(ai, a)| a.armies.iter().position(|r| !r.non_playable).map(|ri| (ai, ri)))
@@ -417,6 +425,26 @@ mod tests {
         assert_eq!(s.playable_area, Some((1400.0, (-200.0, -100.0))));
         assert_eq!(s.player_army(), Some((0, 0)));
         assert!(!s.is_naval());
+    }
+
+    /// The player's army among the first alliances only: an army of a playable alliance first,
+    /// else any unflagged army there, else none; a later playable alliance is not taken.
+    #[test]
+    fn the_player_army_can_be_looked_for_in_the_first_alliances() {
+        let army = |non_playable| SpecArmy { non_playable, ..Default::default() };
+        let alliance = |non_playable, armies| SpecAlliance { non_playable, armies, ..Default::default() };
+        let s = BattleSpec {
+            alliances: vec![alliance(true, vec![army(false)]), alliance(true, vec![army(true), army(false)]), alliance(false, vec![army(false)])],
+            ..Default::default()
+        };
+        assert_eq!(s.player_army(), Some((2, 0)), "the only playable alliance");
+        assert_eq!(s.player_army_in(2), Some((0, 0)), "none playable in the first two: the first unflagged army there");
+        let s = BattleSpec { alliances: vec![alliance(false, vec![]), alliance(false, vec![army(true), army(false)])], ..Default::default() };
+        assert_eq!(s.player_army_in(2), Some((1, 1)), "an alliance without armies is passed over");
+        // Every army in the first two flagged: none there.
+        let s = BattleSpec { alliances: vec![alliance(false, vec![]), alliance(true, vec![army(true)]), alliance(false, vec![army(false)])], ..Default::default() };
+        assert_eq!((s.player_army(), s.player_army_in(2)), (Some((2, 0)), None));
+        assert_eq!(BattleSpec::default().player_army_in(2), None);
     }
 
     /// A `special_ability` element's own attributes (`0x0050CAE0`): each is optional, and one that

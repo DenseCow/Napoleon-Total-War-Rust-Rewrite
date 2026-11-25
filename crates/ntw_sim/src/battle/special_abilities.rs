@@ -424,7 +424,7 @@ impl Battle {
                     }
                     self.activate_ability(i, ability, target)
                 };
-                self.units[i].skirmish = self.skirmish_default(i);
+                self.reset_state_bytes(i);
                 done
             }
             a if uses_slot(a) => {
@@ -442,8 +442,9 @@ impl Battle {
     /// Plugs (`plug` true, `0x0054E8E0`) or unplugs (`0x0054DB50`) unit `i`'s bayonets (CONFIRMED
     /// static): unit `+0xD9D` is set or cleared, melee attack (unit `+0x170`) gains or loses the
     /// `kv_rules` value `bayonet_melee_attack_bonus`, and the unit's state bytes are set again
-    /// (`0x005357B0`: the skirmish default). The byte both also write, unit `+0xD98`, is overwritten
-    /// at once by `0x005357B0` with "cannot fire and advance" (`!0x0053EFE0`), so it is not modelled.
+    /// (`0x005357B0`, [`Battle::reset_state_bytes`]). The byte both also write, unit `+0xD98` (melee
+    /// mode), is overwritten at once by `0x005357B0` with "cannot fire" (`!0x0053EFE0`), so only that
+    /// value is modelled.
     /// Like the original, neither tests the present state: the gate and the toggle only plug
     /// unplugged bayonets and unplug plugged ones.
     fn plug_bayonets(&mut self, i: usize, plug: bool) {
@@ -451,7 +452,7 @@ impl Battle {
         let u = &mut self.units[i];
         u.bayonets_plugged = plug;
         u.melee_attack = u.melee_attack.wrapping_add(if plug { bonus } else { bonus.wrapping_neg() });
-        self.units[i].skirmish = self.skirmish_default(i);
+        self.reset_state_bytes(i);
     }
 
     /// Activates a slot, `0x0052ED80` → `0x0052ECC0` (CONFIRMED): refused without a use left or
