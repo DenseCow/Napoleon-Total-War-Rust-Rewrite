@@ -492,8 +492,9 @@ mod tests {
                 worst = worst.max(off(&b));
             }
         }
-        // Up to 45° between re-slots, quickly clicked: an end man of the 20 m line can be some 8 m
-        // off plus what he has not walked yet; crossing to the mirrored slot would be about 20 m.
+        // Under 60° between re-slots (the threshold may first be reached at the fourth click),
+        // quickly clicked: an end man of the 20 m line can be some 9 m off plus what he has not
+        // walked yet; crossing to the mirrored slot would be about 20 m.
         assert!(worst < 12.0, "no man crosses the block ({worst} m)");
         // Before the first tick, turned about: every man is counted and stays where he stands,
         // and the first tick still lays out and reforms.
@@ -538,11 +539,48 @@ mod tests {
                 let u = &b.units[0];
                 assert!(!u.march.reforming && u.march.men.iter().all(|m| m.walk.is_none()), "no reform walk while moving");
             }
+            // And after it ends, standing at its new facing.
+            for _ in 0..200 {
+                b.step();
+            }
+            assert!(b.units[0].destination.is_none() && b.units[0].standing());
             b.units[0].march.assignments - before
         };
-        // 60° to the side is not behind the front: no more lay-outs than straight ahead (no re-slot
-        // of the turn's own).
-        assert_eq!(assignments(60f32.to_radians()), assignments(0.0));
+        // 60° or 90° to the side is not behind the front: no more lay-outs than straight ahead, while
+        // moving and after it (no re-slot of the turn's own).
+        let straight = assignments(0.0);
+        assert_eq!(assignments(60f32.to_radians()), straight);
+        assert_eq!(assignments(90f32.to_radians()), straight);
+    }
+
+    /// A formed move arriving with its formation facing back (an about-turn on arrival): each man
+    /// gets his nearest slot while the men are still finishing the march, so none crosses the block.
+    #[test]
+    fn an_about_turn_on_arrival_crosses_no_man_through_the_block() {
+        let mut b = battle();
+        let u = &mut b.units[0];
+        (u.men, u.max_men, u.formation_files, u.formation_width, u.formation_file_spacing, u.man_radius) = (60, 60, 20, 20.0, 1.0, 0.3);
+        (u.walk_speed, u.run_speed, u.hold_position) = (1.5, 4.0, true);
+        b.units[1].hold_position = true;
+        for _ in 0..30 {
+            b.step();
+        }
+        let back = b.units[0].facing + std::f32::consts::PI;
+        let f = b.units[0].facing;
+        assert!(b.order_move_formed(1, (10.0 * f.cos(), 10.0 * f.sin()), back, MoveSpeed::Walk, None));
+        let off = |b: &Battle| b.units[0].march.men.iter().map(|m| m.side.hypot(m.lag)).fold(0.0f32, f32::max);
+        let mut worst_after = 0.0f32;
+        let mut arrived = false;
+        for _ in 0..300 {
+            b.step();
+            if arrived {
+                worst_after = worst_after.max(off(&b));
+            }
+            arrived |= b.units[0].destination.is_none();
+        }
+        assert!(arrived && (b.units[0].facing - back).abs() < 1e-5);
+        assert!(worst_after < 6.0, "a man {worst_after} m off his slot after the about-turn");
+        assert!(off(&b) < 0.3, "the men stand in their slots");
     }
 
     /// A formed move walks there facing its way, then turns to the formation's facing; a plain

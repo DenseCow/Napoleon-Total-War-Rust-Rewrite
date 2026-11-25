@@ -1993,6 +1993,8 @@ impl Battle {
             h.u32(u.march.last_men);
             h.u32(u.march.reslot as u32);
             h.u32(u.march.reslot_in);
+            // The facing of the last lay-out: a turn away from it re-slots (`LandUnit::reslot_tick`).
+            h.u32(u.march.laid_facing.to_bits());
             // The idle reform gate's state (`march::LandUnit::idle_gate`).
             h.u32(u.march.in_place_at);
             h.u32(u.march.idle_reformed as u32);
