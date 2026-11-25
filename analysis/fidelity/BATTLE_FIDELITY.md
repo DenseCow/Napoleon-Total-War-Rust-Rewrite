@@ -3102,7 +3102,10 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   taken as the square's lift above the ground (INFERRED from the two sizes); the square is flat, not
   projected on the slope; the hovered unit is picked by its centre (`input::unit_near`), the original's by
   a soldier; the condition on the unit's `+0xD94` (not 2) is not ported. Nor the height clamp (at least 0.1): its frame is not traced against our terrain heights. The player's
-  alliance is `BattleSim::player_side` (set by the setup from the player's army).
+  alliance is `BattleSim::player_side` (set by the setup from the player's army). The HUD (faction, flag,
+  balance, result), the battle script's result, the music and the battle AI (it plays
+  `BattleSim::enemy_side`) all read it; before, they took side 0, so a player on the second alliance had
+  the AI order his own army.
 - Tests: `napoleon battle::selection_markers` (the square points to the man's front, the buffers are
   rewritten per mark). In game: still to check by eye (the screen was locked when this was written).
 

@@ -113,7 +113,7 @@ fn step(s: &mut BattleScripts, sim: &mut BattleSim) -> Vec<BattleScriptRequest> 
                 }
             }
             BattlePhase::Finished => {
-                let won = sim.outcome.winner() == Some(0);
+                let won = sim.player_won() == Some(true);
                 s.host.results(won);
             }
         }

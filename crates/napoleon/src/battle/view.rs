@@ -1706,7 +1706,8 @@ pub fn sync_views(
             selection_markers::Marker::MouseOverEnemy
         });
         // Ours: a unit drawn without figures (no soldier library or no kits, e.g. on the test
-        // fixture) is an outline on the ground in its side's colour, yellow when selected, so it
+        // fixture) is an outline on the ground in its side's colour, yellow when selected (no mouse-
+        // over colour: a hovered enemy would look selected), so it
         // can still be seen and picked; the original always has its figures.
         if let Some(info) = info.filter(|_| figures.is_none() || skin.is_none()) {
             let half = info.size_m * 0.5;

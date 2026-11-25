@@ -1393,6 +1393,7 @@ impl LandUnit {
         }
         // The slots now match the unit's frame at this facing, once they were assigned (the idle
         // reform's lay-out keeps each man's slot, so small turns still add up).
+        debug_assert!(assign.is_some() || self.march.laid.is_some(), "a unit's first lay-out assigns its slots");
         if assign.is_some() {
             self.march.laid_facing = self.facing;
         }

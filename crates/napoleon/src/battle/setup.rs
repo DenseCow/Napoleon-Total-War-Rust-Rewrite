@@ -55,7 +55,7 @@ struct Slot {
     general: Option<i32>,
 }
 
-/// French army (side 0, the player). Real unit keys from the `units` table.
+/// French army (side 0, the default `BattleSim::player_side`). Real unit keys from the `units` table.
 const FRANCE: [Slot; 5] = [
     Slot { key: "Inf_Line_French_Fusiliers", category: "infantry", x: -75.0, general: None },
     Slot { key: "Inf_Line_French_18th_Ligne", category: "infantry", x: -10.0, general: None },
@@ -626,6 +626,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
 fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
     let mut next_id = 1;
     let mut army_counts = [0usize; 2];
+    let mut player_seen = false;
     for army in &setup.custom {
         let side = (army.alliance as usize).min(1);
         let ri = army_counts[side];
@@ -635,10 +636,11 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             sim.side_factions[side] = army.faction.clone();
         }
         let area = setup.deployment.as_ref().and_then(|d| d.alliances.get(side)).and_then(|a| a.areas.get(ri).or_else(|| a.areas.first()));
-        if army.human && sim.deployment_area.is_none() {
-            sim.deployment_area = area.cloned();
-            // The first human army's alliance is the player's.
+        // The first human army is the player's: its alliance, and its area shown.
+        if army.human && !player_seen {
+            player_seen = true;
             sim.player_side = side as u8;
+            sim.deployment_area = area.cloned();
         }
         let mut built = Vec::new();
         for (key, xp) in &army.units {

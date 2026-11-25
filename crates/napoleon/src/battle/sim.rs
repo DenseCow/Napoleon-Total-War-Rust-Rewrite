@@ -196,6 +196,17 @@ impl BattleSim {
         &self.selection
     }
 
+    /// Whether the player's alliance ([`Self::player_side`]) won: `None` while the battle is not
+    /// decided (also a draw counts as not won once it is).
+    pub fn player_won(&self) -> Option<bool> {
+        self.outcome.is_over().then(|| self.outcome.winner() == Some(self.player_side))
+    }
+
+    /// The other alliance, the one the battle AI plays (the original fights two).
+    pub fn enemy_side(&self) -> u8 {
+        1 - self.player_side.min(1)
+    }
+
     /// Whether unit `id` is selected.
     pub fn is_selected(&self, id: u32) -> bool {
         self.selection.contains(&id)
@@ -276,6 +287,20 @@ mod tests {
             sim.add_unit(LandUnit::new(id, side, 100, (id as f32 * 30.0, 0.0)), UnitInfo { id, controllable: side == 0, ..UnitInfo::default() });
         }
         sim
+    }
+
+    /// The player's side decides who won and which side the AI plays: the player on the second
+    /// alliance wins when that side does.
+    #[test]
+    fn the_players_side_decides_the_win_and_the_ais_side() {
+        let mut sim = sim();
+        assert_eq!((sim.player_won(), sim.enemy_side()), (None, 1));
+        sim.outcome = ntw_sim::battle::victory::Outcome::Won { side: 1 };
+        assert_eq!(sim.player_won(), Some(false));
+        sim.player_side = 1;
+        assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
+        sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
+        assert_eq!(sim.player_won(), Some(false));
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;

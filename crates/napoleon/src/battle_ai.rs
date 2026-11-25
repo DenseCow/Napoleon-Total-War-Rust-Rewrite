@@ -12,13 +12,10 @@ use ntw_ai::battle::BattleAi;
 use crate::GameMode;
 use crate::battle::BattleSim;
 
-/// The side the AI plays (the player is side 0 in the battle slice).
-const AI_SIDE: u8 = 1;
-
 /// Whether the AI is on, from `--ai on|off`.
 #[derive(Resource, Clone, Copy)]
 pub struct AiSettings {
-    /// True: the AI controls side 1.
+    /// True: the AI controls the alliance that is not the player's (`BattleSim::enemy_side`).
     pub enabled: bool,
 }
 
@@ -26,6 +23,8 @@ pub struct AiSettings {
 #[derive(Resource)]
 struct AiState {
     ai: BattleAi,
+    /// The alliance it plays: the one that is not the player's (`BattleSim::enemy_side`).
+    side: u8,
     seed: u32,
     last_tick: u32,
 }
@@ -74,14 +73,15 @@ fn run_ai(
     let tick = sim.battle.tick;
     let seed = sim.seed;
     match state {
-        Some(mut s) if s.seed == seed && s.last_tick <= tick => {
+        Some(mut s) if s.seed == seed && s.last_tick <= tick && s.side == sim.enemy_side() => {
             s.ai.update(&mut sim.battle);
             s.last_tick = tick;
         }
         _ => {
-            let mut ai = BattleAi::new(&[AI_SIDE]);
+            let side = sim.enemy_side();
+            let mut ai = BattleAi::new(&[side]);
             ai.update(&mut sim.battle);
-            commands.insert_resource(AiState { ai, seed, last_tick: tick });
+            commands.insert_resource(AiState { ai, side, seed, last_tick: tick });
         }
     }
 }
@@ -167,6 +167,6 @@ fn ai_harness(
             us.iter().filter(|u| u.running).count(),
         ));
     }
-    let ai = state.and_then(|s| s.ai.alliance(AI_SIDE).map(|a| a.status())).unwrap_or_default();
+    let ai = state.and_then(|s| s.ai.alliance(s.side).map(|a| a.status())).unwrap_or_default();
     info!("AI trace t={t:.0}s: {} | {ai}", parts.join(" | "));
 }
