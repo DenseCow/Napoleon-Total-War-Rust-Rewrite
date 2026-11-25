@@ -26,6 +26,11 @@ pub enum SelectMode {
     Toggle,
 }
 
+/// `side` when it is one of the two sides the battle UI and AI are built for (0 or 1).
+fn one_of_two_sides(side: u8) -> Option<u8> {
+    (side <= 1).then_some(side)
+}
+
 /// The battle, as a Bevy resource: the authoritative `ntw_sim` model plus display info.
 #[derive(Resource)]
 pub struct BattleSim {
@@ -208,12 +213,10 @@ impl BattleSim {
     /// only defensive, it logs and keeps the first side.
     pub fn set_player_side(&mut self, side: u8) {
         debug_assert!(side <= 1, "player side {side}: the setup keeps the player on the two sides");
-        if side > 1 {
+        self.player_side = one_of_two_sides(side).unwrap_or_else(|| {
             error!("Battle: player side {side} is not one of the two sides; the player stays on side 0");
-            self.player_side = 0;
-        } else {
-            self.player_side = side;
-        }
+            0
+        });
     }
 
     /// Whether the player's alliance ([`Self::player_side()`]) won: `None` while the battle is not
@@ -332,13 +335,10 @@ mod tests {
         sim().set_player_side(2);
     }
 
-    /// A release build keeps the player on the first side for a side past the two.
+    /// The release branch's check: only 0 and 1 are sides (tested in every build).
     #[test]
-    #[cfg(not(debug_assertions))]
-    fn a_release_build_keeps_a_bad_player_side_on_the_first() {
-        let mut sim = sim();
-        sim.set_player_side(2);
-        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
+    fn only_the_first_two_sides_are_player_sides() {
+        assert_eq!([0, 1, 2, 255].map(one_of_two_sides), [Some(0), Some(1), None, None]);
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;

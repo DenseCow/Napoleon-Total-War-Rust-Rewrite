@@ -232,7 +232,8 @@ impl BattleSpec {
     /// children counts). That the player takes the first such army is PROVISIONAL (the front
     /// end's choice is not traced). Friedland flags **both** alliances (its first one has the
     /// element between its two French armies), so when no alliance is playable we fall back to
-    /// the first army without an army-level flag (PROVISIONAL).
+    /// the first army without an army-level flag, and when every army is flagged, the first army
+    /// (both PROVISIONAL).
     pub fn player_army(&self) -> Option<(usize, usize)> {
         self.player_army_in(self.alliances.len())
     }
@@ -248,7 +249,8 @@ impl BattleSpec {
                 .filter(|(_, a)| !only_playable || !a.non_playable)
                 .find_map(|(ai, a)| a.armies.iter().position(|r| !r.non_playable).map(|ri| (ai, ri)))
         };
-        pick(true).or_else(|| pick(false))
+        let first = || self.alliances.iter().take(alliances).enumerate().find_map(|(ai, a)| (!a.armies.is_empty()).then_some((ai, 0)));
+        pick(true).or_else(|| pick(false)).or_else(first)
     }
 
     /// True if the battle has ships and no land units (a naval battle).
@@ -440,6 +442,9 @@ mod tests {
         assert_eq!(s.player_army_in(2), Some((0, 0)), "none playable in the first two: the first army there");
         let s = BattleSpec { alliances: vec![alliance(false, vec![]), alliance(false, vec![army(true), army(false)])], ..Default::default() };
         assert_eq!(s.player_army_in(2), Some((1, 1)), "an alliance without armies is passed over");
+        // Every army in the first two flagged: the first army there all the same.
+        let s = BattleSpec { alliances: vec![alliance(false, vec![]), alliance(true, vec![army(true)]), alliance(false, vec![army(false)])], ..Default::default() };
+        assert_eq!((s.player_army(), s.player_army_in(2)), (Some((2, 0)), Some((1, 0))));
         assert_eq!(BattleSpec::default().player_army_in(2), None);
     }
 
