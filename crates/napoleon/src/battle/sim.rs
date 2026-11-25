@@ -204,8 +204,9 @@ impl BattleSim {
 
     /// Sets the player's alliance: one of the two sides the battle UI and AI are built for (the
     /// setup keeps a modded battle's player there, `BattleSpec::player_army_in`). A side past the
-    /// second is a setup bug: logged, and the first side kept.
+    /// second is a setup bug: a debug build stops, a release build logs it and keeps the first side.
     pub fn set_player_side(&mut self, side: u8) {
+        debug_assert!(side <= 1, "player side {side}: the setup keeps the player on the two sides");
         if side > 1 {
             error!("Battle: player side {side} is not one of the two sides; the player stays on side 0");
             self.player_side = 0;
@@ -214,7 +215,7 @@ impl BattleSim {
         }
     }
 
-    /// Whether the player's alliance ([`Self::player_side`]) won: `None` while the battle is not
+    /// Whether the player's alliance ([`Self::player_side()`]) won: `None` while the battle is not
     /// decided, `Some(false)` for a loss and also for a draw.
     pub fn player_won(&self) -> Option<bool> {
         self.outcome.is_over().then(|| self.outcome.winner() == Some(self.player_side))
@@ -320,9 +321,14 @@ mod tests {
         assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
         sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
         assert_eq!(sim.player_won(), Some(false), "a draw is not won");
-        // A side past the two is refused (the setup keeps the player on the first two).
-        sim.set_player_side(2);
-        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
+    }
+
+    /// A side past the two is a setup bug: a debug build stops on it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "the setup keeps the player on the two sides")]
+    fn a_player_side_past_the_two_is_a_setup_bug() {
+        sim().set_player_side(2);
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;

@@ -402,16 +402,16 @@ fn army_number(i: usize) -> u32 {
 /// Reinforcement armies start off the field and arrive in turn (see below).
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
     // The player's alliance is one of the first two: the battle UI and the battle AI are built for
-    // the original's two sides (`BattleSim::player_side`), so the player's army is looked for
-    // there (`BattleSpec::player_army_in`). A (modded) file whose playable army is in a later
-    // alliance leaves that alliance with neither the player nor the AI (PROVISIONAL; it is still
-    // placed and fights); one with no army in the first two gives the player none.
-    let player = spec.player_army_in(2);
-    if let Some(p) = spec.player_army().filter(|&p| Some(p) != player) {
-        warn!("Battle {key}: the playable army (alliance {}, army {}) is past the two sides shown; the player takes {player:?}, that alliance gets neither player nor AI", p.0, p.1);
-    }
-    if player.is_none() {
-        warn!("Battle {key}: no army in the first two alliances; the player commands none");
+    // the original's two sides (`BattleSim::player_side()`), so the player's army is looked for
+    // there (`BattleSpec::player_army_in`), else (0, 0) as before. Every shipped battle has it
+    // there (`ntw_formats` test `battle_spec_install`). PROVISIONAL, modded files only: a playable
+    // army in a later alliance leaves that alliance with neither the player nor the AI.
+    let player = spec.player_army_in(2).unwrap_or((0, 0));
+    if let Some(p) = spec.player_army().filter(|&p| p != player) {
+        warn!(
+            "Battle {key}: the playable army (alliance {}, army {}) is not on the two sides shown; the player commands alliance {}, army {} instead",
+            p.0, p.1, player.0, player.1
+        );
     }
     // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
     if spec.alliances.len() > usize::from(u8::MAX) + 1 {
@@ -425,7 +425,7 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
             sim.side_factions[ai] = army.faction.clone();
         }
         for (ri, army) in alliance.armies.iter().enumerate() {
-            let controllable = Some((ai, ri)) == player;
+            let controllable = (ai, ri) == player;
             if controllable {
                 sim.set_player_side(side);
                 sim.camera_start = army.camera_start.zip(army.camera_target);

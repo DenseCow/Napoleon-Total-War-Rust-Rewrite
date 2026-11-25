@@ -48,6 +48,8 @@ fn every_battle_file_parses() {
         assert!(spec.description.duration.is_some() && spec.description.timeout_winner.is_some(), "{f}");
         assert!(spec.map_definition.is_some(), "{f}");
         assert!(spec.player_army().is_some(), "{f}");
+        // The game shows two sides: the player's army is on one of them (`player_army_in`).
+        assert_eq!(spec.player_army_in(2), spec.player_army(), "{f}");
         if !spec.is_naval() {
             for u in spec.alliances.iter().flat_map(|a| a.armies.iter().chain(&a.reinforcements)).flat_map(|a| &a.units) {
                 assert!(!u.unit_type.is_empty() && u.width.is_some_and(|w| w > 0.0), "{f}: {u:?}");
