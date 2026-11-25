@@ -197,14 +197,22 @@ impl BattleSim {
     }
 
     /// Whether the player's alliance ([`Self::player_side`]) won: `None` while the battle is not
-    /// decided (also a draw counts as not won once it is).
+    /// decided, `Some(false)` for a loss and also for a draw.
     pub fn player_won(&self) -> Option<bool> {
         self.outcome.is_over().then(|| self.outcome.winner() == Some(self.player_side))
     }
 
-    /// The other alliance, the one the battle AI plays (the original fights two).
+    /// The alliance the battle AI plays: the first one that is not the player's (the original
+    /// fights two). PROVISIONAL: with more than two alliances (a modded battle) the others get no AI.
     pub fn enemy_side(&self) -> u8 {
-        1 - self.player_side.min(1)
+        u8::from(self.player_side == 0)
+    }
+
+    /// The player's index into the two-side display lists ([`Self::side_names`],
+    /// [`Self::side_factions`], the HUD's per-side results). PROVISIONAL: a player on an alliance
+    /// past the second (a modded battle) is shown as the second, not out of bounds.
+    pub fn player_index(&self) -> usize {
+        usize::from(self.player_side).min(1)
     }
 
     /// Whether unit `id` is selected.
@@ -300,7 +308,10 @@ mod tests {
         sim.player_side = 1;
         assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
         sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
-        assert_eq!(sim.player_won(), Some(false));
+        assert_eq!(sim.player_won(), Some(false), "a draw is not won");
+        // A modded battle's third alliance: shown as the second, the AI on the first.
+        sim.player_side = 2;
+        assert_eq!((sim.player_index(), sim.enemy_side()), (1, 0));
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
