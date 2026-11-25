@@ -1108,7 +1108,7 @@ pub fn spawn_camera(
     let mut harness = false;
     // Start behind the player's army (`BattleSim::player_side`), looking the way it faces.
     if let Some(sim) = sim.as_ref() {
-        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == sim.player_side).collect();
+        let mine: Vec<&LandUnit> = sim.battle.units.iter().filter(|u| u.side == sim.player_side()).collect();
         if let Some(first) = mine.first() {
             let n = mine.len() as f32;
             let centre = mine.iter().fold(Vec2::ZERO, |a, u| a + Vec2::new(u.position.0, u.position.1)) / n;
@@ -1700,7 +1700,7 @@ pub fn sync_views(
         // mouse, blue for the player's alliance and red for the enemy.
         let info = view.info(&sim).filter(|_| !unit.off_field());
         let selected = info.is_some() && sim.is_selected(unit.id);
-        let hover = (info.is_some() && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == sim.player_side {
+        let hover = (info.is_some() && drag.as_ref().is_some_and(|d| d.hovered == Some(unit.id))).then_some(if unit.side == sim.player_side() {
             selection_markers::Marker::MouseOver
         } else {
             selection_markers::Marker::MouseOverEnemy
@@ -1715,7 +1715,7 @@ pub fn sync_views(
                 let p = transform.transform_point(Vec3::new(x, 0.0, z));
                 Vec3::new(p.x, ground(Vec2::new(p.x, -p.z)) + 0.15, p.z)
             });
-            let color = unit_color(unit, sim.player_side, selected);
+            let color = unit_color(unit, sim.player_side(), selected);
             for k in 0..4 {
                 gizmos.line(corners[k], corners[(k + 1) % 4], color);
             }

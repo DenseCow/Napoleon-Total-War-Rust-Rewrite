@@ -54,7 +54,7 @@ pub struct BattleSim {
     /// the two sides the battle UI and AI are built for, the original's two. The original keeps it at the battle's `+0x281A4`
     /// and compares an army's alliance (`+0x44` → `+0x10`) with it, e.g. for the mouse-over marker
     /// (`0x00789BD0`).
-    pub player_side: u8,
+    player_side: u8,
     /// The `battles` key of the historical battle being fought (None = the test slice).
     pub battle_key: Option<String>,
     /// The player's army's `camera_start_position` and `camera_target_position` from the battle
@@ -197,6 +197,23 @@ impl BattleSim {
         &self.selection
     }
 
+    /// The player's alliance, 0 or 1 (see the field).
+    pub fn player_side(&self) -> u8 {
+        self.player_side
+    }
+
+    /// Sets the player's alliance: one of the two sides the battle UI and AI are built for (the
+    /// setup keeps a modded battle's player there, `BattleSpec::player_army_in`). A side past the
+    /// second is a setup bug: logged, and the first side kept.
+    pub fn set_player_side(&mut self, side: u8) {
+        if side > 1 {
+            error!("Battle: player side {side} is not one of the two sides; the player stays on side 0");
+            self.player_side = 0;
+        } else {
+            self.player_side = side;
+        }
+    }
+
     /// Whether the player's alliance ([`Self::player_side`]) won: `None` while the battle is not
     /// decided, `Some(false)` for a loss and also for a draw.
     pub fn player_won(&self) -> Option<bool> {
@@ -299,10 +316,13 @@ mod tests {
         assert_eq!((sim.player_won(), sim.enemy_side()), (None, 1));
         sim.outcome = ntw_sim::battle::victory::Outcome::Won { side: 1 };
         assert_eq!(sim.player_won(), Some(false));
-        sim.player_side = 1;
+        sim.set_player_side(1);
         assert_eq!((sim.player_won(), sim.enemy_side()), (Some(true), 0));
         sim.outcome = ntw_sim::battle::victory::Outcome::Draw;
         assert_eq!(sim.player_won(), Some(false), "a draw is not won");
+        // A side past the two is refused (the setup keeps the player on the first two).
+        sim.set_player_side(2);
+        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
     }
 
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;

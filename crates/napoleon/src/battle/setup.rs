@@ -401,14 +401,17 @@ fn army_number(i: usize) -> u32 {
 /// side), every `army` of it is placed as the file says (position, orientation, frontage, men).
 /// Reinforcement armies start off the field and arrive in turn (see below).
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
-    let mut player = spec.player_army().unwrap_or((0, 0));
     // The player's alliance is one of the first two: the battle UI and the battle AI are built for
-    // the original's two sides (`BattleSim::player_side`). A (modded) file whose playable army is
-    // in a later alliance gets the first army of alliance 0 as the player's (PROVISIONAL; the
-    // other alliances are still placed and fight).
-    if player.0 > 1 {
-        warn!("Battle {key}: the playable army is in alliance {}; the player takes the first army of alliance 0 (two sides are shown)", player.0);
-        player = (0, 0);
+    // the original's two sides (`BattleSim::player_side`), so the player's army is looked for
+    // there (`BattleSpec::player_army_in`). A (modded) file whose playable army is in a later
+    // alliance leaves that alliance with neither the player nor the AI (PROVISIONAL; it is still
+    // placed and fights); one with no army in the first two gives the player none.
+    let player = spec.player_army_in(2);
+    if let Some(p) = spec.player_army().filter(|&p| Some(p) != player) {
+        warn!("Battle {key}: the playable army (alliance {}, army {}) is past the two sides shown; the player takes {player:?}, that alliance gets neither player nor AI", p.0, p.1);
+    }
+    if player.is_none() {
+        warn!("Battle {key}: no army in the first two alliances; the player commands none");
     }
     // Sides are `u8` in the battle model (the original fights two); alliances past 256 are left out.
     if spec.alliances.len() > usize::from(u8::MAX) + 1 {
@@ -422,9 +425,9 @@ fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &Bat
             sim.side_factions[ai] = army.faction.clone();
         }
         for (ri, army) in alliance.armies.iter().enumerate() {
-            let controllable = (ai, ri) == player;
+            let controllable = Some((ai, ri)) == player;
             if controllable {
-                sim.player_side = side;
+                sim.set_player_side(side);
                 sim.camera_start = army.camera_start.zip(army.camera_target);
                 sim.deployment_area = army.deployment_area;
             }
@@ -590,7 +593,7 @@ fn test_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
             }
             unit.facing = facing;
             unit_info.faction = sim.side_factions[side].clone();
-            unit_info.controllable = side == usize::from(sim.player_side);
+            unit_info.controllable = side == usize::from(sim.player_side());
             unit_info.army = (side, 0);
             built.push(Built { unit, info: unit_info });
             next_id += 1;
@@ -647,7 +650,7 @@ fn custom_armies(db: &GameDatabase, setup: &SetupData, sim: &mut BattleSim) {
         // The first human army is the player's: its alliance, and its area shown.
         if army.human && !player_seen {
             player_seen = true;
-            sim.player_side = side as u8;
+            sim.set_player_side(side as u8);
             sim.deployment_area = area.cloned();
         }
         let mut built = Vec::new();
@@ -1458,7 +1461,7 @@ mod tests {
             assert!(area_contains(area, u.position), "{} at {:?} outside its area", i.key, u.position);
         }
         assert!(sim.deployment_area.is_some(), "the player's area is shown");
-        assert_eq!(sim.player_side, 0);
+        assert_eq!(sim.player_side(), 0);
         // The human army on the second alliance: that side is the player's.
         let mut start = start;
         for a in &mut start.custom {
@@ -1466,7 +1469,7 @@ mod tests {
         }
         let setup = SetupData::load(Some(&vfs), Some(&map), Some(&start), Some(0.75));
         let sim = build_battle(&db, &setup, FIRST_SEED);
-        assert_eq!(sim.player_side, 1);
+        assert_eq!(sim.player_side(), 1);
         assert!(sim.battle.units.iter().zip(sim.infos()).all(|(u, i)| i.controllable == (u.side == 1)));
     }
 
