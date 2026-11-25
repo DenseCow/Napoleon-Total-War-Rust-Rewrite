@@ -403,20 +403,20 @@ fn army_number(i: usize) -> u32 {
 fn historical_armies(db: &GameDatabase, setup: &SetupData, key: &str, spec: &BattleSpec, sim: &mut BattleSim) {
     // The player's alliance is one of the first two: the battle UI and the battle AI are built for
     // the original's two sides (`BattleSim::player_side()`), so the player's army is looked for
-    // there (`BattleSpec::player_army_in`: a playable army first, else an unflagged one, else the
-    // first army there). Every shipped battle has it there (`ntw_formats` test
-    // `battle_spec_install`). PROVISIONAL, modded files only: a playable army in a later alliance
-    // leaves that alliance with neither the player nor the AI; only first two alliances without
-    // any army give the player none.
+    // there (`BattleSpec::player_army_in`: an army of a playable alliance first, else an unflagged
+    // army there). Every shipped battle's player army is there and unflagged (`ntw_formats` test
+    // `battle_spec_install`). PROVISIONAL, modded files only (the front end's choice is not
+    // traced): the player's army in a later alliance leaves that alliance with neither the player
+    // nor the AI; first two alliances with no unflagged army give the player none.
     let player = spec.player_army_in(2);
     match (player, spec.player_army()) {
         (None, Some(f)) => warn!(
-            "Battle {key}: the first two alliances hold no army and the playable one (alliance {}, army {}) is not on the two sides shown; the player commands none",
+            "Battle {key}: no unflagged army in the first two alliances (the file's player army is alliance {}, army {}, not on the two sides shown); the player commands none",
             f.0, f.1
         ),
-        (None, None) => warn!("Battle {key}: no army in the battle file; the player commands none"),
+        (None, None) => warn!("Battle {key}: no unflagged army in the battle file; the player commands none"),
         (Some(p), Some(f)) if p != f => warn!(
-            "Battle {key}: the playable army (alliance {}, army {}) is not on the two sides shown; the player commands alliance {}, army {} instead",
+            "Battle {key}: the file's player army (alliance {}, army {}) is not on the two sides shown; the player commands alliance {}, army {} instead",
             f.0, f.1, p.0, p.1
         ),
         _ => {}

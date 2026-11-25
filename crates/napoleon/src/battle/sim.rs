@@ -341,6 +341,15 @@ mod tests {
         assert_eq!([0, 1, 2, 255].map(one_of_two_sides), [Some(0), Some(1), None, None]);
     }
 
+    /// A release build keeps the player on the first side for a side past the two.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn a_release_build_keeps_a_bad_player_side_on_the_first() {
+        let mut sim = sim();
+        sim.set_player_side(2);
+        assert_eq!((sim.player_side(), sim.enemy_side()), (0, 1));
+    }
+
     /// A plain click or box replaces the selection; a CTRL box adds; a CTRL click toggles one unit;
     /// the enemy's units, units gone from the field and repeats are never selected.
     #[test]
