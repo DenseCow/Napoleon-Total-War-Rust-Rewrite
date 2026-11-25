@@ -122,8 +122,8 @@ pub struct MouseDrag {
     /// ([`formation_plan`]), shown by [`order_preview`]; empty otherwise.
     pub preview: Vec<LinePlace>,
     /// What [`Self::preview`] was laid out for: the drag's ground line, the camera's view
-    /// direction and the model tick, and the selection then.
-    preview_for: Option<(Vec2, Vec2, Vec3, u32)>,
+    /// direction and [`plan_stamp`], and the selection then.
+    preview_for: Option<(Vec2, Vec2, Vec3, u64)>,
     preview_ids: Vec<u32>,
 }
 
@@ -193,8 +193,8 @@ pub fn mouse(
         }
     }
     // The line the right drag would order, while it is held (not in deployment, which places).
-    // Laid out again only when the drag's line, the view, the model (a tick: the units moved or
-    // lost men) or the selection changed.
+    // Laid out again only when the drag's line, the view, the selection or what the plan reads of
+    // its units changed ([`plan_stamp`]: they walk, lose men, turn or re-form while it is held).
     let line = if buttons.pressed(MouseButton::Right)
         && sim.phase() != BattlePhase::Deployment
         && !over_hud
@@ -202,7 +202,7 @@ pub fn mouse(
         && press.start.distance(c) > DRAG_PX
         && let (Some(start), Some(end)) = (press.ground, ground_at(c))
     {
-        Some((start, end, camera_transform.forward().as_vec3(), sim.battle.tick))
+        Some((start, end, camera_transform.forward().as_vec3(), plan_stamp(&sim)))
     } else {
         None
     };
@@ -351,6 +351,15 @@ fn order_formation(sim: &mut BattleSim, ids: &[u32], start: Vec2, end: Vec2, cam
             sim.script_events.push(super::ScriptEvent::Command { name: "Move", unit: Some(id), bool1: false });
         }
     }
+}
+
+/// A stamp of what [`formation_plan`] and [`order_preview`] read of the selected units (position,
+/// facing, men, files, width, abilities): it changes when any of them does.
+fn plan_stamp(sim: &BattleSim) -> u64 {
+    sim.selection().iter().filter_map(|&id| sim.battle.unit_index(id).map(|i| &sim.battle.units[i])).fold(0xcbf2_9ce4_8422_2325, |h, u| {
+        let parts = [u.position.0.to_bits(), u.position.1.to_bits(), u.facing.to_bits(), u.men, u.formation_files, u.formation_width.to_bits(), u.active_abilities];
+        parts.iter().fold(h, |h, &p| (h ^ u64::from(p)).wrapping_mul(0x0100_0000_01b3))
+    })
 }
 
 /// The places [`order_formation`] orders the selection to, and the drag's preview shows

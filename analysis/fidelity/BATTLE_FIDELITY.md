@@ -3122,9 +3122,10 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   (or snapped) apart from it, so in the tick a unit turned (an order, the arrival facing) a wide
   line's men swung up to tens of metres out and back. Ours now lerps each figure's field offset from
   the unit's position and draws it in the drawn frame (`view::MenDrawn::local`). A turn never snaps or
-  carries the men (the model's `turn_to` keeps them where they stand); a step of 5 m or more is a
-  placement, drawn at once; a unit moved outside a tick (deployment) takes its men along. PROVISIONAL:
-  a shorter in-tick placement that re-lays the men shows them walking there over the tick. (A snap
+  carries the men (the model's `turn_to` keeps them where they stand); a position changed in a tick
+  without a move (a building snap) or a step of 5 m or more is a placement, drawn at once; a unit moved
+  outside a tick (deployment) takes its men along. PROVISIONAL: a placement that only turns the unit
+  and re-lays its men shows them walking there over the tick. (A snap
   rule keyed on the unit's `moved` flag was tried and dropped: it froze the men of units the model
   turns in place.) Tests:
   `view::tests::{a_turning_units_men_stay_put_between_ticks, a_placed_units_men_go_with_it_at_once}`.

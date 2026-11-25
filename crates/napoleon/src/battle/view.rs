@@ -976,12 +976,14 @@ struct MenDrawn {
 
 impl MenDrawn {
     /// After every fixed step, after [`GroundSpeed::observe_unit`] saw the same step. `figures`
-    /// is the number of figures drawn. A turn never snaps the men: the model turns a unit with its
-    /// men where they stand (`LandUnit::turn_to`), so their field places are right either way. A
-    /// step of [`MAX_BLEND_STEP_M`] or more is a placement, drawn at once (as [`DrawnPose`]).
-    /// PROVISIONAL (ours): a shorter placement that re-lays the men (`LandUnit::place_at` with a new
-    /// facing in a tick) shows them walking to their new places over that tick.
-    fn observe(&mut self, unit: &LandUnit, ground: &GroundSpeed, tick: u32, figures: usize) {
+    /// is the number of figures drawn; `moved` the flag [`DrawnPose::observe`] gets. A turn never
+    /// snaps the men: the model turns a unit with its men where they stand (`LandUnit::turn_to`), so
+    /// their field places are right either way. A position the model changed in a tick without a
+    /// move (placed, snapped into a building), or a step of [`MAX_BLEND_STEP_M`] or more, is a
+    /// placement, drawn at once (as [`DrawnPose`]). PROVISIONAL (ours): a placement that only turns
+    /// the unit and re-lays its men (`LandUnit::place_at` at the same position) shows them walking
+    /// to their new places over that tick.
+    fn observe(&mut self, unit: &LandUnit, ground: &GroundSpeed, tick: u32, figures: usize, moved: bool) {
         let men = &unit.march.men;
         // The figures first seen now (a unit spawned late, or more figures drawn).
         let seen = self.to.len().min(figures);
@@ -1001,7 +1003,7 @@ impl MenDrawn {
         let ticked = tick != self.tick;
         self.tick = tick;
         let ((ax, ay), (px, py)) = (self.at_pos, unit.position);
-        let placed = (px - ax).hypot(py - ay) >= MAX_BLEND_STEP_M;
+        let placed = (ticked && !moved && (px, py) != (ax, ay)) || (px - ax).hypot(py - ay) >= MAX_BLEND_STEP_M;
         // The last offsets, from the new position.
         let (sx, sy) = (ax - px, ay - py);
         self.at_pos = unit.position;
@@ -1674,7 +1676,7 @@ pub fn observe_ticks(sim: Res<BattleSim>, mut views: Query<(&mut UnitView, &mut 
         if let Some(mut figures) = figures {
             let figures = &mut *figures;
             figures.ground.observe_unit(unit, sim.battle.tick);
-            figures.march.observe(unit, &figures.ground, sim.battle.tick, figures.men.len());
+            figures.march.observe(unit, &figures.ground, sim.battle.tick, figures.men.len(), moved);
         }
     }
 }
@@ -2214,7 +2216,7 @@ mod tests {
             (u.speed, u.moved) = (2.0, true);
             (u.march.men[0].speed, u.march.men[1].speed) = (2.2, 2.0);
             g.observe_unit(&u, tick);
-            d.observe(&u, &g, tick, 2);
+            d.observe(&u, &g, tick, 2, u.moved);
         }
         assert!((d.speed(0, 1.0) - 0.2).abs() < 1e-4 && d.speed(1, 1.0).abs() < 1e-4, "{d:?}");
         let here = Vec2::new(u.position.0, u.position.1);
@@ -2224,16 +2226,16 @@ mod tests {
         (u.march.men[0].speed, u.march.men[1].speed) = (1.0, 0.0);
         for tick in 4..3 + STILL_TICKS {
             g.observe_unit(&u, tick);
-            d.observe(&u, &g, tick, 2);
+            d.observe(&u, &g, tick, 2, u.moved);
             assert_eq!(d.to[0][2], 0.0, "the unit's last speed is still bridged");
         }
         let tick = 3 + STILL_TICKS;
         g.observe_unit(&u, tick);
-        d.observe(&u, &g, tick, 2);
+        d.observe(&u, &g, tick, 2, u.moved);
         assert_eq!(g.gait(false), Gait::Stand);
         assert!(d.settling(0) && !d.settling(1) && (d.speed(0, 1.0) - 1.0).abs() < 1e-6);
         for _ in 0..2 {
-            d.observe(&u, &g, tick, 2);
+            d.observe(&u, &g, tick, 2, u.moved);
         }
         assert!(!d.settling(0), "paused: {d:?}");
     }
@@ -2247,14 +2249,14 @@ mod tests {
         u.march.men = (0..4).map(|j| ManMarch { figure: j, ..Default::default() }).collect();
         let g = GroundSpeed::new(Vec2::ZERO, 0, true);
         let mut d = MenDrawn::default();
-        d.observe(&u, &g, 1, 4);
+        d.observe(&u, &g, 1, 4, false);
         let before: Vec<_> = (0..4).map(|j| d.at(j, 1.0).unwrap()).collect();
         // Figures 0 and 3 trade entries; each keeps standing where he stood.
         let (p0, p3) = (u.man_place(0), u.man_place(3));
         u.march.men.swap(0, 3);
         (u.march.men[0].side, u.march.men[0].lag) = (p3.0 - p0.0, p3.1 - p0.1);
         (u.march.men[3].side, u.march.men[3].lag) = (p0.0 - p3.0, p0.1 - p3.1);
-        d.observe(&u, &g, 2, 4);
+        d.observe(&u, &g, 2, 4, false);
         for (j, b) in before.iter().enumerate() {
             let a = d.at(j, 1.0).unwrap();
             assert!((a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5, "figure {j}: {a:?} vs {b:?}");
@@ -2272,12 +2274,12 @@ mod tests {
         let g = GroundSpeed::new(Vec2::new(10.0, 20.0), 0, true);
         let mut d = MenDrawn { at_pos: u.position, ..MenDrawn::default() };
         let mut pose = DrawnPose::at(Vec2::new(10.0, 20.0), u.facing);
-        d.observe(&u, &g, 1, 60);
+        d.observe(&u, &g, 1, 60, false);
         let before: Vec<_> = (0..60).map(|j| d.at(j, 1.0).map(|a| [a[0] + 10.0, a[1] + 20.0]).unwrap()).collect();
         for moved in [true, false] {
             u.turn_to(u.facing + std::f32::consts::FRAC_PI_2);
             pose.observe(Vec2::new(10.0, 20.0), u.facing, moved);
-            d.observe(&u, &g, if moved { 2 } else { 3 }, 60);
+            d.observe(&u, &g, if moved { 2 } else { 3 }, 60, moved);
             for alpha in [0.0, 0.3, 0.5, 1.0] {
                 let (pos, facing) = pose.blend(Vec2::new(10.0, 20.0), u.facing, alpha);
                 for (j, b) in before.iter().enumerate() {
@@ -2290,7 +2292,7 @@ mod tests {
         }
     }
 
-    /// A unit the model places far (a placement, not a march step) is drawn there at once with its
+    /// A unit the model places in a tick without a move (a building snap, even 2 m) or far is drawn there at once with its
     /// men: no slide across the tick. A unit moved outside a tick (deployment) takes its men along
     /// at once. A turn made outside a tick (a HUD button while paused) leaves them where they stand,
     /// as the model's `turn_to` does. Far from the origin a standing man's drawn place does not
@@ -2302,36 +2304,46 @@ mod tests {
         u.march.ensure_men(30);
         let g = GroundSpeed::new(Vec2::from(start), 0, true);
         let mut d = MenDrawn { at_pos: u.position, ..MenDrawn::default() };
-        d.observe(&u, &g, 1, 30);
+        d.observe(&u, &g, 1, 30, false);
         let here = Vec2::from(start);
         let still: Vec<_> = (0..30).map(|j| d.local(j, 0.3, u.position, here, u.facing).unwrap()).collect();
         assert!((0..30).all(|j| d.local(j, 0.8, u.position, here, u.facing) == Some(still[j])), "standing: the same every frame");
-        // Placed 30 m on and turned a quarter in tick 2.
-        u.place_at((start.0 + 30.0, start.1), u.facing + std::f32::consts::FRAC_PI_2);
-        d.observe(&u, &g, 2, 30);
-        let at = Vec2::from(u.position);
-        for j in 0..30 {
-            let (a, b) = (d.local(j, 0.0, u.position, at, u.facing).unwrap(), d.local(j, 1.0, u.position, at, u.facing).unwrap());
-            assert!((a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3, "figure {j} slides: {a:?} → {b:?}");
+        // Placed in a tick without a move: 2 m on and turned a quarter (a building snap), then 30 m on.
+        let mut tick = 1;
+        for step in [2.0, 30.0] {
+            tick += 1;
+            let p = (u.position.0 + step, u.position.1);
+            u.place_at(p, u.facing + std::f32::consts::FRAC_PI_2);
+            d.observe(&u, &g, tick, 30, false);
+            let at = Vec2::from(u.position);
+            for j in 0..30 {
+                let (a, b) = (d.local(j, 0.0, u.position, at, u.facing).unwrap(), d.local(j, 1.0, u.position, at, u.facing).unwrap());
+                assert!((a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3, "{step} m: figure {j} slides: {a:?} → {b:?}");
+            }
         }
         // Moved outside a tick: the men go along.
+        let at = Vec2::from(u.position);
         let before: Vec<_> = (0..30).map(|j| d.local(j, 1.0, u.position, at, u.facing).unwrap()).collect();
-        u.place_at((start.0 + 40.0, start.1), u.facing);
+        u.place_at((u.position.0 + 10.0, u.position.1), u.facing);
         let at = Vec2::from(u.position);
         for (j, b) in before.iter().enumerate() {
             let a = d.local(j, 0.5, u.position, at, u.facing).unwrap();
             assert!((a.0 - b.0).abs() < 1e-3 && (a.1 - b.1).abs() < 1e-3, "figure {j}: {a:?} vs {b:?}");
         }
-        // Turned outside a tick: each man stays where the field has him.
-        d.observe(&u, &g, 3, 30);
+        // Turned outside a tick (paused: observed again in the same tick): each man is drawn where
+        // he stood on the field.
+        tick += 1;
+        d.observe(&u, &g, tick, 30, false);
         let field = |d: &MenDrawn, facing: f32| -> Vec<(f32, f32)> {
-            (0..30).map(|j| ntw_sim::battle::march::unit_frame_offset(facing, d.local(j, 0.5, (start.0 + 40.0, start.1), at, facing).unwrap())).collect()
+            (0..30).map(|j| ntw_sim::battle::march::unit_frame_offset(facing, d.local(j, 0.5, u.position, at, facing).unwrap())).collect()
         };
         let before = field(&d, u.facing);
-        u.turn_to(u.facing + 1.0);
-        let after = field(&d, u.facing);
+        let mut turned = u.clone();
+        turned.turn_to(u.facing + 1.0);
+        d.observe(&turned, &g, tick, 30, false);
+        let after = field(&d, turned.facing);
         for j in 0..30 {
-            assert!((before[j].0 - after[j].0).abs() < 1e-3 && (before[j].1 - after[j].1).abs() < 1e-3, "figure {j}");
+            assert!((before[j].0 - after[j].0).abs() < 1e-3 && (before[j].1 - after[j].1).abs() < 1e-3, "figure {j}: {:?} vs {:?}", before[j], after[j]);
         }
     }
 
@@ -2344,7 +2356,7 @@ mod tests {
         u.march.men = [3, 1, 2, 0].into_iter().map(|j| ManMarch { figure: j, lag: 0.5, ..Default::default() }).collect();
         let g = GroundSpeed::new(Vec2::ZERO, 0, true);
         let mut d = MenDrawn::default();
-        d.observe(&u, &g, 7, 4);
+        d.observe(&u, &g, 7, 4, false);
         for j in 0..4 {
             let (a, b) = (d.at(j, 0.0).unwrap(), d.at(j, 1.0).unwrap());
             assert_eq!((a[0], a[1]), (b[0], b[1]), "figure {j} does not move");
