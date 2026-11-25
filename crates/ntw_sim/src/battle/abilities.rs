@@ -356,9 +356,9 @@ impl super::model::LandUnit {
     }
 
     /// The line [`Self::set_frontage`] gives for a span of `width` metres: the files it holds at
-    /// the unit's file spacing (which the re-form keeps) and their width.
+    /// the unit's file spacing (which the re-form keeps), at least one, and their width.
     pub fn frontage_for(&self, width: f32) -> Frontage {
-        let files = self.files_for_width(width);
+        let files = self.files_for_width(width).max(1);
         Frontage { files, width: files as f32 * self.file_spacing() }
     }
 

@@ -3121,9 +3121,12 @@ the 64-second intro cutscene", and listed "verification needed: read the actual 
   forth). The view lerped each man's offset in the unit's frame while the unit's facing was lerped
   (or snapped) apart from it, so in the tick a unit turned (an order, the arrival facing) a wide
   line's men swung up to tens of metres out and back. Ours now lerps each figure's field offset from
-  the unit's position and draws it in the drawn frame (`view::MenDrawn::local`); a pose the model
-  changes in a tick without moving the unit (the same `moved` rule as `DrawnPose`) shows the men there
-  at once, and one changed outside a tick (paused) carries them in the unit's frame. Tests:
+  the unit's position and draws it in the drawn frame (`view::MenDrawn::local`). A turn never snaps or
+  carries the men (the model's `turn_to` keeps them where they stand); a step of 5 m or more is a
+  placement, drawn at once; a unit moved outside a tick (deployment) takes its men along. PROVISIONAL:
+  a shorter in-tick placement that re-lays the men shows them walking there over the tick. (A snap
+  rule keyed on the unit's `moved` flag was tried and dropped: it froze the men of units the model
+  turns in place.) Tests:
   `view::tests::{a_turning_units_men_stay_put_between_ticks, a_placed_units_men_go_with_it_at_once}`.
 
 ## 60. Rally and Inspire (worker rallyinspire, 2026-11-10)

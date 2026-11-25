@@ -1132,7 +1132,8 @@ impl LandUnit {
 
     /// The formation the unit lays out once dragged out to `width` metres: the fresh lay-out at
     /// the line [`LandUnit::set_frontage`] gives ([`LandUnit::frontage_for`]), without changing the
-    /// unit. What the drag's preview shows.
+    /// unit. What the drag's preview shows; a dragged width reaches only a unit in line
+    /// ([`LandUnit::drag_width_limits`] is `None` for every other shape), so this is its line.
     pub fn line_at_width(&self, width: f32) -> Formation {
         self.fresh_formation_at(self.frontage_for(width))
     }
